@@ -84,14 +84,25 @@ def stage_assets(agent_path: Path) -> dict:
         raise FileNotFoundError(f"Android probe binary not found: {agent_path}")
 
     clean_staged_binaries(keep_placeholder=True)
-    dst = STAGE_DIR / "pktpath-android-arm64"
-    shutil.copy2(agent_path, dst)
-    digest, size = sha256_file(dst)
+    files_map: dict[str, dict] = {}
+    candidates = [
+        ("pktpath-android-arm64", agent_path, True),
+        ("pktpath-linux-x86_64", PKTPATH_DIR / "bin" / "pktpath-linux-x86_64", False),
+        ("pktpath-linux-arm64", PKTPATH_DIR / "bin" / "pktpath-linux-arm64", False),
+    ]
+    for name, src, required in candidates:
+        if not src.is_file():
+            if required:
+                raise FileNotFoundError(f"Required collector binary not found: {src}")
+            continue
+        dst = STAGE_DIR / name
+        shutil.copy2(src, dst)
+        digest, size = sha256_file(dst)
+        files_map[name] = {"size": size, "sha256": digest}
+
     manifest = {
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "files": {
-            "pktpath-android-arm64": {"size": size, "sha256": digest},
-        },
+        "files": files_map,
     }
     (STAGE_DIR / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

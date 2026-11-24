@@ -390,6 +390,30 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": false, "path": chosen})
 }
 
+func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
+	b, _ := readBody(r)
+	title := ""
+	initDir := ""
+	filter := "PktPath Plugin (*.json)|*.json|All Files (*.*)|*.*"
+	if b != nil {
+		title = b.str("title")
+		initDir = b.str("initial_dir")
+		if f := b.str("filter"); f != "" {
+			filter = f
+		}
+	}
+	chosen, cancelled, err := openFileNative(r.Context(), title, initDir, filter)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "open-file dialog failed: "+err.Error())
+		return
+	}
+	if cancelled || chosen == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "cancelled": true, "path": ""})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": false, "path": chosen})
+}
+
 func (s *Server) handleReveal(w http.ResponseWriter, r *http.Request) {
 	b, err := readBody(r)
 	if err != nil {

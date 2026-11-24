@@ -510,24 +510,10 @@ func (c *Client) Pull(ctx context.Context, serial, remote, local string, timeout
 	return nil
 }
 
-// SyncPlugins uploads local *.json plugin manifests into RemotePluginsDir on the device.
-func (c *Client) SyncPlugins(ctx context.Context, serial, localDir string) (int, error) {
-	if localDir == "" {
-		return 0, nil
-	}
-	ents, err := os.ReadDir(localDir)
-	if err != nil {
-		return 0, nil
-	}
-	var files []string
-	for _, e := range ents {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
-			continue
-		}
-		files = append(files, e.Name())
-	}
-	sort.Strings(files)
-	if len(files) == 0 {
+// SyncPluginFiles uploads the specified local *.json plugin manifests into
+// RemotePluginsDir on the device (and clears stale manifests).
+func (c *Client) SyncPluginFiles(ctx context.Context, serial string, localPaths []string) (int, error) {
+	if len(localPaths) == 0 {
 		_, _ = c.Priv(ctx, serial, "rm -rf "+RemotePluginsDir, 10*time.Second)
 		return 0, nil
 	}
@@ -535,8 +521,8 @@ func (c *Client) SyncPlugins(ctx context.Context, serial, localDir string) (int,
 		return 0, err
 	}
 	pushed := 0
-	for _, name := range files {
-		localPath := filepath.Join(localDir, name)
+	for _, localPath := range localPaths {
+		name := filepath.Base(localPath)
 		stage := RemoteTmp + "_plug_" + name
 		if _, err := c.Run(ctx, 20*time.Second, "-s", serial, "push", localPath, stage); err != nil {
 			return pushed, fmt.Errorf("push plugin %s: %w", name, err)
@@ -549,4 +535,24 @@ func (c *Client) SyncPlugins(ctx context.Context, serial, localDir string) (int,
 		pushed++
 	}
 	return pushed, nil
+}
+
+// SyncPlugins uploads local *.json plugin manifests into RemotePluginsDir on the device.
+func (c *Client) SyncPlugins(ctx context.Context, serial, localDir string) (int, error) {
+	if localDir == "" {
+		return 0, nil
+	}
+	ents, err := os.ReadDir(localDir)
+	if err != nil {
+		return 0, nil
+	}
+	var paths []string
+	for _, e := range ents {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+			continue
+		}
+		paths = append(paths, filepath.Join(localDir, e.Name()))
+	}
+	sort.Strings(paths)
+	return c.SyncPluginFiles(ctx, serial, paths)
 }

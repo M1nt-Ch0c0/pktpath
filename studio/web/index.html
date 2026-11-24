@@ -40,6 +40,10 @@
     </div>
 
     <div class="appbar-actions">
+      <button class="btn btn-ghost" id="btnOpenPlugins" title="加载 / 管理自定义 JSON 插件并查看能力清单">
+        🔌 插件管理
+        <span class="badge badge-muted" id="navPluginCount">0</span>
+      </button>
       <button class="btn btn-ghost" id="btnOpenFolder" title="选择本地 pktpath 会话目录 (含 manifest.json / block_*.pktb)">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
         打开历史会话文件夹
@@ -69,17 +73,55 @@
   <div class="layout">
     <!-- ===================== Left Control Rail ===================== -->
     <aside class="rail" id="rail">
-      <!-- ① device & interface -->
+      <!-- ① target device & interface -->
       <section class="card step">
-        <div class="step-head"><span class="step-no">①</span><h2>选择设备与网卡</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
-        <label class="field">
-          <span class="field-label">Android 设备</span>
-          <select id="selDevice"><option value="">正在扫描 USB 设备…</option></select>
-        </label>
+        <div class="step-head"><span class="step-no">①</span><h2>选择目标设备与网卡</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
+        <div class="seg target-tabs" id="segTransport" role="radiogroup">
+          <button data-v="adb" class="active">Android (ADB)</button>
+          <button data-v="ssh">Linux (SSH)</button>
+        </div>
+        <div id="paneADB">
+          <label class="field">
+            <span class="field-label">Android 设备 (USB / ADB)</span>
+            <select id="selDevice"><option value="">正在扫描 USB 设备…</option></select>
+          </label>
+        </div>
+        <div id="paneSSH" hidden>
+          <div class="field">
+            <span class="field-label">Linux 远程主机 (SSH · x86_64 / arm64)</span>
+            <div class="ssh-bar">
+              <select id="selSSH"><option value="">尚未添加 Linux SSH 主机</option></select>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnToggleSSHForm" title="添加新的 Linux SSH 目标">+ 添加</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnDeleteSSH" title="删除当前选中的 SSH 主机" hidden>删</button>
+            </div>
+          </div>
+          <div class="ssh-form" id="sshForm" hidden>
+            <label class="field"><span class="field-label">显示名称（可选）</span><input type="text" id="sshName" placeholder="例如 prod-gateway-01"></label>
+            <div class="ssh-form-grid">
+              <label class="field"><span class="field-label">主机 IP / 域名</span><input type="text" id="sshHost" placeholder="192.168.1.10"></label>
+              <label class="field"><span class="field-label">端口</span><input type="number" id="sshPort" min="1" max="65535" value="22"></label>
+            </div>
+            <label class="field"><span class="field-label">用户名</span><input type="text" id="sshUser" placeholder="root / ubuntu"></label>
+            <div class="field">
+              <span class="field-label">SSH 私钥路径（留空使用默认密钥 / ssh-agent）</span>
+              <div class="ssh-key-row">
+                <input type="text" id="sshKey" placeholder="可选，如 C:\Users\you\.ssh\id_ed25519">
+                <button type="button" class="btn btn-ghost btn-sm" id="btnPickSSHKey">浏览</button>
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="sshSudo" checked><span>非 root 用户自动使用 <code>sudo -n</code> 提权</span></label>
+            <div class="ssh-test-out" id="sshTestOut" hidden></div>
+            <div class="ssh-form-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="btnSSHTest">测试连接</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btnSSHSave">保存并连接</button>
+              <button type="button" class="link-btn" id="btnSSHCancel">取消</button>
+            </div>
+          </div>
+        </div>
         <div class="prep-status" id="prepStatus" hidden></div>
         <label class="field">
           <span class="field-label">网卡 (出口)</span>
-          <select id="selIface" disabled><option value="">请先选择设备</option></select>
+          <select id="selIface" disabled><option value="">请先选择目标设备</option></select>
         </label>
         <details class="topo" id="topoDetails" open>
           <summary>
@@ -98,13 +140,13 @@
       <section class="card step">
         <div class="step-head"><span class="step-no">②</span><h2>筛选谁的流量</h2><span class="hint">零手查 UID</span></div>
         <div class="field">
-          <span class="field-label">应用 / 进程</span>
+          <span class="field-label">应用 / 进程 / UID</span>
           <div class="combo" id="appCombo">
-            <input type="text" id="appSearch" placeholder="输入 chrome / wechat / ping / UID 搜索…" autocomplete="off" spellcheck="false">
+            <input type="text" id="appSearch" placeholder="输入进程名 / 包名 / 用户名 / UID 搜索…" autocomplete="off" spellcheck="false">
             <div class="combo-list" id="appList" hidden></div>
           </div>
           <div class="app-chosen" id="appChosen">
-            <span class="chip chip-accent" id="appChosenText">全部应用 (不限 UID)</span>
+            <span class="chip chip-accent" id="appChosenText">全部进程 / 应用 (不限 UID)</span>
           </div>
         </div>
         <div class="field">
@@ -141,8 +183,8 @@
           </div>
           <div class="plugin-row" style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
             <label class="check" style="margin:0"><input type="checkbox" id="chkPlugins" checked><span>启用外部插件</span></label>
-            <span class="badge badge-muted" id="pluginCountBadge" title="将自定义 JSON 插件放入本地插件目录即可生效">0 个插件</span>
-            <button type="button" class="link-btn" id="btnRevealPlugins" title="在资源管理器中打开插件目录">📂 打开插件目录</button>
+            <span class="badge badge-muted" id="pluginCountBadge" title="点击「管理插件」加载 JSON 插件并查看能力">0 个已启用</span>
+            <button type="button" class="link-btn" id="btnManagePluginsInline">🔌 管理插件</button>
           </div>
           <label class="check"><input type="checkbox" id="chkPartial" checked><span>允许部分探针缺失 (allow partial)</span></label>
         </details>
@@ -236,8 +278,8 @@
         </svg>
         <h1>看清每一个包在内核里排了多久队</h1>
         <ol class="steps-guide">
-          <li><b>①</b> 左侧选择手机与网卡（自动注入采集器、自动识别队列拓扑）</li>
-          <li><b>②</b> 搜索要观察的应用（输入 <code>wechat</code> / <code>ping</code> 即可）</li>
+          <li><b>①</b> 左侧选择目标设备（支持 <b>Android ADB</b> 或 <b>Linux SSH</b> 主机，自动匹配架构并下发采集器）</li>
+          <li><b>②</b> 点击顶栏 <b>「🔌 插件管理」</b> 可随时导入外部 JSON 插件，查看其提供的 BTF 字段与自定义队列能力</li>
           <li><b>③</b> 点击 <b>「开始一键采集」</b>，复现问题后 <b>「停止并拉回分析」</b></li>
         </ol>
         <p class="muted">也可以通过顶栏 <b>「打开历史会话文件夹」</b> 或 <b>「历史记录」</b> 浏览以前的采集结果。</p>
@@ -372,6 +414,56 @@
       </button>
     </div>
     <div class="drawer-body" id="drwBody"></div>
+  </aside>
+
+  <!-- ===================== Plugin Manager Drawer ===================== -->
+  <div class="drawer-mask plugin-mask" id="pluginMask" hidden></div>
+  <aside class="drawer plugin-drawer" id="pluginDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <h2>🔌 插件管理与能力中心</h2>
+        <div class="drawer-sub">
+          <span class="muted" id="plugDirHint" style="font-family:var(--mono);font-size:11px">加载中…</span>
+        </div>
+      </div>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" id="btnRevealPlugins" title="在资源管理器中打开本地插件目录">📂 打开目录</button>
+      <button class="btn btn-ghost btn-sm" id="btnRefreshPlugins">刷新</button>
+      <button class="icon-btn" id="plugClose" title="关闭 (Esc)" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body">
+      <div class="plug-toolbar">
+        <button class="btn btn-primary btn-sm" id="btnImportPlugin">＋ 加载 / 导入插件 (.json)</button>
+        <span class="spacer"></span>
+        <div class="plug-slots" id="plugSlots"></div>
+      </div>
+
+      <div class="plug-preview" id="plugPreview" hidden></div>
+
+      <div class="section-title">已安装插件与能力清单</div>
+      <div class="plug-list" id="plugList"><div class="empty-mini">尚未加载任何外部插件</div></div>
+
+      <details class="adv plug-schema">
+        <summary>插件 JSON 编写说明（零重编 C / eBPF）</summary>
+        <p class="muted" style="margin:6px 0 0;font-size:12px">
+          核心框架 100% 为纯上游 Linux 实现。只需导入一个声明式 <code>.json</code> 文件，即可在运行时动态解析内核 <code>/sys/kernel/btf/vmlinux</code> 中的自定义 <code>struct sock</code> 字段，或挂钩内核中任意第三方 TC 队列函数：
+        </p>
+        <pre>{
+  "name": "示例：Socket 标签 + 自定义队列",
+  "version": "1.0",
+  "description": "提取 sk_mark 并测量 netem 叶子队列驻留耗时",
+  "sock_fields": [
+    { "struct": "sock", "field": "sk_mark", "size": 4, "role": "tag", "label": "sock_mark" }
+  ],
+  "qdiscs": [
+    { "id": "netem_leaf", "name": "Netem Leaf", "kind": "netem", "mode": "leaf",
+      "enqueue_sym": "netem_enqueue", "dequeue_sym": "netem_dequeue" }
+  ]
+}</pre>
+      </details>
+    </div>
   </aside>
 
   <div class="quit-modal" id="quitModal" hidden>

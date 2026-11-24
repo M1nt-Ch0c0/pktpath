@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"pktpath/studio/pkg/adb"
+	"pktpath/studio/pkg/sshclient"
 )
 
 // Options configures the server.
@@ -38,6 +39,8 @@ type Options struct {
 type Server struct {
 	opts         Options
 	adb          *adb.Client
+	ssh          *sshclient.Client
+	sshStore     *sshclient.Store
 	sessionsRoot string
 	pluginsDir   string
 	log          *log.Logger
@@ -88,6 +91,8 @@ func New(opts Options) *Server {
 	s := &Server{
 		opts:         opts,
 		adb:          adb.NewClient(opts.Runtime.AdbPath),
+		ssh:          sshclient.NewClient(),
+		sshStore:     sshclient.NewStore(filepath.Join(opts.AppDir, "ssh_targets.json")),
 		sessionsRoot: root,
 		pluginsDir:   pdir,
 		log:          opts.Logger,
@@ -164,6 +169,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/plugins", s.handlePlugins)
+	mux.HandleFunc("POST /api/plugins/preview", s.handlePluginsPreview)
+	mux.HandleFunc("POST /api/plugins/import", s.handlePluginsImport)
+	mux.HandleFunc("POST /api/plugins/toggle", s.handlePluginsToggle)
+	mux.HandleFunc("POST /api/plugins/delete", s.handlePluginsDelete)
+	mux.HandleFunc("GET /api/ssh/targets", s.handleSSHTargetsList)
+	mux.HandleFunc("POST /api/ssh/targets", s.handleSSHTargetsUpsert)
+	mux.HandleFunc("DELETE /api/ssh/targets", s.handleSSHTargetsDelete)
+	mux.HandleFunc("POST /api/ssh/test", s.handleSSHTest)
 	mux.HandleFunc("GET /api/app/events", s.handleAppEvents)
 	mux.HandleFunc("POST /api/app/quit", s.handleAppQuit)
 	mux.HandleFunc("GET /api/devices", s.handleDevices)
@@ -178,6 +191,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sessions/open", s.handleSessionsOpen)
 	mux.HandleFunc("POST /api/dialog/pick-folder", s.handlePickFolder)
 	mux.HandleFunc("POST /api/dialog/save-file", s.handleSaveFile)
+	mux.HandleFunc("POST /api/dialog/open-file", s.handleOpenFile)
 	mux.HandleFunc("POST /api/dialog/reveal", s.handleReveal)
 	mux.HandleFunc("GET /api/session/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/session/sample", s.handleSample)
@@ -300,61 +314,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":        s.opts.Version,
 		"runtime":        s.opts.Runtime,
 		"adb_missing":    s.opts.Runtime.AdbPath == "",
+		"ssh_available":  s.ssh != nil && s.ssh.Available(),
 		"sessions_root":  s.sessionsRoot,
 		"plugins_dir":    s.pluginsDir,
 		"active_clients": s.activeClients.Load(),
-	})
-}
-
-type pluginSummary struct {
-	File        string `json:"file"`
-	Name        string `json:"name"`
-	Version     string `json:"version,omitempty"`
-	Description string `json:"description,omitempty"`
-	SockFields  int    `json:"sock_fields"`
-	Qdiscs      int    `json:"qdiscs"`
-	Error       string `json:"error,omitempty"`
-}
-
-func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	list := []pluginSummary{}
-	if ents, err := os.ReadDir(s.pluginsDir); err == nil {
-		for _, e := range ents {
-			if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
-				continue
-			}
-			ps := pluginSummary{File: e.Name(), Name: strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))}
-			b, rerr := os.ReadFile(filepath.Join(s.pluginsDir, e.Name()))
-			if rerr != nil {
-				ps.Error = rerr.Error()
-				list = append(list, ps)
-				continue
-			}
-			var raw struct {
-				Name        string            `json:"name"`
-				Version     string            `json:"version"`
-				Description string            `json:"description"`
-				SockFields  []json.RawMessage `json:"sock_fields"`
-				Qdiscs      []json.RawMessage `json:"qdiscs"`
-			}
-			if jerr := json.Unmarshal(b, &raw); jerr != nil {
-				ps.Error = jerr.Error()
-			} else {
-				if strings.TrimSpace(raw.Name) != "" {
-					ps.Name = strings.TrimSpace(raw.Name)
-				}
-				ps.Version = strings.TrimSpace(raw.Version)
-				ps.Description = strings.TrimSpace(raw.Description)
-				ps.SockFields = len(raw.SockFields)
-				ps.Qdiscs = len(raw.Qdiscs)
-			}
-			list = append(list, ps)
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"plugins_dir": s.pluginsDir,
-		"plugins":     list,
 	})
 }
 

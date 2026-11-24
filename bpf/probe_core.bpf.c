@@ -28,8 +28,27 @@ static uint64_t (*ktime_boot_ns)(void) = (void *)125;
 static void *(*rb_reserve)(void *, uint64_t, uint64_t) = (void *)131;
 static void  (*rb_submit)(void *, uint64_t) = (void *)132;
 
-/* ARM64 user_pt_regs: regs[0..30], sp at index 31 */
-#define ARM64_SP_IDX     31
+#ifdef PKT_ARCH_X86_64
+/* Linux x86_64 struct pt_regs (unsigned long[]):
+ *   10: ax (ret), 11: cx (parm4), 12: dx (parm3), 13: si (parm2), 14: di (parm1), 19: sp.
+ * On x86_64, ret pops the 8-byte return address before kretprobe runs, so sp_ret - 8 == sp_entry. */
+#define PT_PARM1(r)    ((r)[14])
+#define PT_PARM2(r)    ((r)[13])
+#define PT_PARM3(r)    ((r)[12])
+#define PT_PARM4(r)    ((r)[11])
+#define PT_RC(r)       ((r)[10])
+#define PT_SP_ENTRY(r) ((r)[19])
+#define PT_SP_RET(r)   ((r)[19] - 8ULL)
+#else
+/* Linux arm64 struct user_pt_regs: regs[0..30], sp at index 31 (LR holds return addr) */
+#define PT_PARM1(r)    ((r)[0])
+#define PT_PARM2(r)    ((r)[1])
+#define PT_PARM3(r)    ((r)[2])
+#define PT_PARM4(r)    ((r)[3])
+#define PT_RC(r)       ((r)[0])
+#define PT_SP_ENTRY(r) ((r)[31])
+#define PT_SP_RET(r)   ((r)[31])
+#endif
 #define BPF_ANY_FLAG     0ULL
 #define BPF_NOEXIST_FLAG 1ULL
 
@@ -70,6 +89,10 @@ IN int ctrl_l1_on(const struct bpf_ctrl_cfg *c) {
  * NEVER read tracepoint ctx[0..7] directly (rejected by Linux BPF verifier).
  */
 IN uint32_t read_irq_preempt_bits(const struct bpf_btf_offsets *off) {
+#ifdef PKT_ARCH_X86_64
+    if (!off || !off->task_preempt_count)
+        return 0;
+#endif
     uint64_t task = get_current_task();
     uint32_t pc = 0;
     uint32_t pc_off = OFF_OR(off, task_preempt_count, 16);
@@ -473,7 +496,7 @@ IN void record_sock_sendmsg(uint64_t sk) {
 
 SEC("tp_sock_create")
 int prog_tp_sock_create(uint64_t *regs) {
-    uint64_t sock = regs[0];
+    uint64_t sock = PT_PARM1(regs);
     if (!sock)
         return 0;
     const struct bpf_btf_offsets *off = get_btf();
@@ -487,25 +510,25 @@ int prog_tp_sock_create(uint64_t *regs) {
 
 SEC("kp_tcp_v4_conn")
 int prog_kp_tcp_v4_conn(uint64_t *regs) {
-    record_sock_owner(regs[0]);
+    record_sock_owner(PT_PARM1(regs));
     return 0;
 }
 
 SEC("kp_tcp_v6_conn")
 int prog_kp_tcp_v6_conn(uint64_t *regs) {
-    record_sock_owner(regs[0]);
+    record_sock_owner(PT_PARM1(regs));
     return 0;
 }
 
 SEC("kr_inet_accept")
 int prog_kr_inet_accept(uint64_t *regs) {
-    record_sock_owner(regs[0]);
+    record_sock_owner(PT_RC(regs));
     return 0;
 }
 
 SEC("kp_sk_destruct")
 int prog_kp_sk_destruct(uint64_t *regs) {
-    uint64_t sk = regs[0];
+    uint64_t sk = PT_PARM1(regs);
     if (sk) {
         map_delete(&socks, &sk);
         const struct bpf_btf_offsets *off = get_btf();
@@ -520,13 +543,13 @@ int prog_kp_sk_destruct(uint64_t *regs) {
 
 SEC("kp_tcp_sendmsg")
 int prog_kp_tcp_sendmsg(uint64_t *regs) {
-    record_sock_sendmsg(regs[0]);
+    record_sock_sendmsg(PT_PARM1(regs));
     return 0;
 }
 
 SEC("kp_udp_sendmsg")
 int prog_kp_udp_sendmsg(uint64_t *regs) {
-    record_sock_sendmsg(regs[0]);
+    record_sock_sendmsg(PT_PARM1(regs));
     return 0;
 }
 
@@ -1334,7 +1357,7 @@ IN int handle_qdisc_enq(uint64_t *regs, uint16_t site, int leaf_mode) {
 
     const struct bpf_btf_offsets *off = get_btf();
     uint64_t now = ktime_boot_ns();
-    uint64_t skb = regs[0];
+    uint64_t skb = PT_PARM1(regs);
     struct bpf_active_val *av = skb ? lookup_active(c, skb) : 0;
 
     if (!av || av->lifecycle_state == PKT_STATE_QUARANTINED) {
@@ -1342,7 +1365,7 @@ IN int handle_qdisc_enq(uint64_t *regs, uint16_t site, int leaf_mode) {
             /* Record untracked sentinel so paired kretprobe won't false-fire RET_UNMATCHED */
             struct bpf_call_key ck = {
                 .ctx_id = make_ctx_id(off),
-                .sp = regs[ARM64_SP_IDX],
+                .sp = PT_SP_ENTRY(regs),
                 .site_id = site,
                 .pad = 0,
             };
@@ -1353,7 +1376,7 @@ IN int handle_qdisc_enq(uint64_t *regs, uint16_t site, int leaf_mode) {
     }
 
     uint32_t qh = 0, qp = 0;
-    uint64_t qdisc = regs[1];
+    uint64_t qdisc = PT_PARM2(regs);
     if (qdisc) {
         probe_read_k(&qh, 4, (const void *)(qdisc + OFF_OR(off, qdisc_handle, 56)));
         probe_read_k(&qp, 4, (const void *)(qdisc + OFF_OR(off, qdisc_parent, 60)));
@@ -1380,7 +1403,7 @@ IN int handle_qdisc_enq(uint64_t *regs, uint16_t site, int leaf_mode) {
         uint64_t cid = __sync_fetch_and_add(&c->next_call_id, 1) + 1ULL;
         struct bpf_call_key ck = {
             .ctx_id = make_ctx_id(off),
-            .sp = regs[ARM64_SP_IDX],
+            .sp = PT_SP_ENTRY(regs),
             .site_id = site,
             .pad = 0,
         };
@@ -1416,7 +1439,7 @@ IN int handle_qdisc_enq_ret(uint64_t *regs, uint16_t entry_site, uint16_t ret_si
     uint64_t now = ktime_boot_ns();
     struct bpf_call_key ck = {
         .ctx_id = make_ctx_id(off),
-        .sp = regs[ARM64_SP_IDX],
+        .sp = PT_SP_RET(regs),
         .site_id = entry_site,
         .pad = 0,
     };
@@ -1436,7 +1459,7 @@ IN int handle_qdisc_enq_ret(uint64_t *regs, uint16_t entry_site, uint16_t ret_si
     if (copy.object_id == 0)
         return 0; /* Untracked sentinel */
 
-    int32_t rc = (int32_t)regs[0];
+    int32_t rc = (int32_t)PT_RC(regs);
     uint32_t cls_id = parent_to_classid(copy.qdisc_parent);
     emit_step(c, ret_site, now, copy.object_id, copy.visit_id,
               copy.netns_inum, copy.ifindex, copy.qdisc_handle, copy.qdisc_parent,
@@ -1462,7 +1485,7 @@ IN int handle_qdisc_deq_ret(uint64_t *regs, uint16_t site, int is_fifo_deq) {
     if (ctrl_bypass_on(c) && !c->active_tracked_count)
         return 0;
 
-    uint64_t skb = regs[0];
+    uint64_t skb = PT_RC(regs);
     if (!skb)
         return 0;
     struct bpf_active_val *av = lookup_active(c, skb);
@@ -1630,8 +1653,8 @@ int prog_kp_tcf_classify(uint64_t *regs) {
     if (ctrl_bypass_on(c) && !c->active_tracked_count)
         return 0;
 
-    uint64_t skb = regs[0];
-    uint64_t res_ptr = regs[3];
+    uint64_t skb = PT_PARM1(regs);
+    uint64_t res_ptr = PT_PARM4(regs);
     if (!skb || !res_ptr)
         return 0;
 
@@ -1643,7 +1666,7 @@ int prog_kp_tcf_classify(uint64_t *regs) {
     uint64_t now = ktime_boot_ns();
     struct bpf_call_key ck = {
         .ctx_id = make_ctx_id(off),
-        .sp = regs[ARM64_SP_IDX],
+        .sp = PT_SP_ENTRY(regs),
         .site_id = PKT_SITE_KP_TCF_CLASSIFY,
         .pad = 0,
     };
@@ -1672,7 +1695,7 @@ int prog_kr_tcf_classify(uint64_t *regs) {
     const struct bpf_btf_offsets *off = get_btf();
     struct bpf_call_key ck = {
         .ctx_id = make_ctx_id(off),
-        .sp = regs[ARM64_SP_IDX],
+        .sp = PT_SP_RET(regs),
         .site_id = PKT_SITE_KP_TCF_CLASSIFY,
         .pad = 0,
     };
@@ -1683,7 +1706,7 @@ int prog_kr_tcf_classify(uint64_t *regs) {
     struct bpf_call_val copy = *cv;
     map_delete(&calls, &ck);
 
-    int32_t verdict = (int32_t)regs[0];
+    int32_t verdict = (int32_t)PT_RC(regs);
     if (verdict >= 0 && copy.object_id != 0 && copy.saved_next_visit_id != 0) {
         uint32_t cid = 0;
         uint32_t cid_off = OFF_OR(off, tcf_res_classid, 8);
@@ -1706,7 +1729,7 @@ int prog_kp_sch_direct_xmit(uint64_t *regs) {
     if (ctrl_bypass_on(c) && !c->active_tracked_count)
         return 0;
 
-    uint64_t skb = regs[0];
+    uint64_t skb = PT_PARM1(regs);
     if (!skb)
         return 0;
     struct bpf_active_val *av = lookup_active(c, skb);
@@ -1731,7 +1754,7 @@ int prog_kp_sch_direct_xmit(uint64_t *regs) {
     /* Only emit BYPASS_DIRECT when q->enqueue was genuinely bypassed (§4.2) */
     if (!av->saw_qdisc_enq) {
         uint32_t qh = 0, qp = 0;
-        uint64_t qdisc = regs[1];
+        uint64_t qdisc = PT_PARM2(regs);
         if (qdisc) {
             probe_read_k(&qh, 4, (const void *)(qdisc + OFF_OR(off, qdisc_handle, 56)));
             probe_read_k(&qp, 4, (const void *)(qdisc + OFF_OR(off, qdisc_parent, 60)));
@@ -1751,7 +1774,7 @@ int prog_kp_dev_requeue(uint64_t *regs) {
     if (ctrl_bypass_on(c) && !c->active_tracked_count)
         return 0;
 
-    uint64_t skb = regs[0];
+    uint64_t skb = PT_PARM1(regs);
     if (!skb)
         return 0;
     struct bpf_active_val *av = lookup_active(c, skb);
@@ -1761,7 +1784,7 @@ int prog_kp_dev_requeue(uint64_t *regs) {
     const struct bpf_btf_offsets *off = get_btf();
     uint64_t now = ktime_boot_ns();
     uint32_t qh = 0, qp = 0;
-    uint64_t qdisc = regs[1];
+    uint64_t qdisc = PT_PARM2(regs);
     if (qdisc) {
         probe_read_k(&qh, 4, (const void *)(qdisc + OFF_OR(off, qdisc_handle, 56)));
         probe_read_k(&qp, 4, (const void *)(qdisc + OFF_OR(off, qdisc_parent, 60)));
@@ -2077,12 +2100,12 @@ int prog_kp_skb_clone(uint64_t *regs) {
 
     const struct bpf_btf_offsets *off = get_btf();
     uint64_t now = ktime_boot_ns();
-    uint64_t src_skb = regs[0];
+    uint64_t src_skb = PT_PARM1(regs);
     struct bpf_active_val *av = src_skb ? lookup_active(c, src_skb) : 0;
 
     struct bpf_call_key ck = {
         .ctx_id = make_ctx_id(off),
-        .sp = regs[ARM64_SP_IDX],
+        .sp = PT_SP_ENTRY(regs),
         .site_id = PKT_SITE_KP_SKB_CLONE,
         .pad = 0,
     };
@@ -2119,7 +2142,7 @@ int prog_kr_skb_clone(uint64_t *regs) {
     uint64_t now = ktime_boot_ns();
     struct bpf_call_key ck = {
         .ctx_id = make_ctx_id(off),
-        .sp = regs[ARM64_SP_IDX],
+        .sp = PT_SP_RET(regs),
         .site_id = PKT_SITE_KP_SKB_CLONE,
         .pad = 0,
     };
@@ -2137,7 +2160,7 @@ int prog_kr_skb_clone(uint64_t *regs) {
     struct bpf_call_val copy = *cv;
     map_delete(&calls, &ck);
 
-    uint64_t dst_skb = regs[0];
+    uint64_t dst_skb = PT_RC(regs);
     if (copy.object_id == 0 || !dst_skb)
         return 0;
 
@@ -2170,7 +2193,7 @@ int prog_kp_pskb_expand(uint64_t *regs) {
     if (ctrl_bypass_on(c) && !c->active_tracked_count)
         return 0;
 
-    uint64_t skb = regs[0];
+    uint64_t skb = PT_PARM1(regs);
     if (!skb)
         return 0;
     struct bpf_active_val *av = lookup_active(c, skb);
@@ -2201,7 +2224,7 @@ IN int handle_txq_qstate(uint64_t *regs, uint16_t site, uint8_t state_op) {
     if (c->sample_stride == 0 && (!ctrl_bypass_on(c) ? 0 : !c->active_tracked_count))
         return 0;
 
-    uint64_t dev_queue = regs[0];
+    uint64_t dev_queue = PT_PARM1(regs);
     if (!dev_queue)
         return 0;
 

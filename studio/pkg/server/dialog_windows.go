@@ -21,6 +21,7 @@ import (
 var (
 	modComdlg32              = syscall.NewLazyDLL("comdlg32.dll")
 	procGetSaveFileNameW     = modComdlg32.NewProc("GetSaveFileNameW")
+	procGetOpenFileNameW     = modComdlg32.NewProc("GetOpenFileNameW")
 	procCommDlgExtendedError = modComdlg32.NewProc("CommDlgExtendedError")
 
 	modUser32            = syscall.NewLazyDLL("user32.dll")
@@ -33,6 +34,7 @@ const (
 	ofnOverwritePrompt = 0x00000002
 	ofnNoChangeDir     = 0x00000008
 	ofnPathMustExist   = 0x00000800
+	ofnFileMustExist   = 0x00001000
 	ofnExplorer        = 0x00080000
 
 	wsPopup      = 0x80000000
@@ -150,6 +152,82 @@ func saveFileNative(_ context.Context, defaultName, initialDir, filter string) (
 				return
 			}
 			ch <- res{err: fmt.Errorf("GetSaveFileNameW error 0x%x", extErr)}
+			return
+		}
+		chosen := syscall.UTF16ToString(fileBuf)
+		if chosen == "" {
+			ch <- res{cancelled: true}
+			return
+		}
+		ch <- res{path: chosen}
+	}()
+	r := <-ch
+	return r.path, r.cancelled, r.err
+}
+
+// openFileNative opens the Win32 comdlg32 GetOpenFileNameW modal dialog.
+func openFileNative(_ context.Context, title, initialDir, filter string) (string, bool, error) {
+	type res struct {
+		path      string
+		cancelled bool
+		err       error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		if initialDir != "" {
+			if st, err := os.Stat(initialDir); err != nil || !st.IsDir() {
+				initialDir = ""
+			}
+		}
+		if title == "" {
+			title = "选择文件 - PktPath Studio"
+		}
+		fileBuf := make([]uint16, 4096)
+		filterUTF16 := encodeWin32Filter(filter)
+		titleUTF16, _ := syscall.UTF16PtrFromString(title)
+		var initDirUTF16 *uint16
+		if initialDir != "" {
+			initDirUTF16, _ = syscall.UTF16PtrFromString(initialDir)
+		}
+
+		cls, _ := syscall.UTF16PtrFromString("STATIC")
+		empty, _ := syscall.UTF16PtrFromString("")
+		hwnd, _, _ := procCreateWindowExW.Call(
+			wsExTopmost|wsExToolWnd,
+			uintptr(unsafe.Pointer(cls)),
+			uintptr(unsafe.Pointer(empty)),
+			wsPopup,
+			0, 0, 0, 0,
+			0, 0, 0, 0,
+		)
+		if hwnd != 0 {
+			defer procDestroyWindow.Call(hwnd)
+			_, _, _ = procSetForegroundWnd.Call(hwnd)
+		}
+
+		ofn := openFileNameW{
+			lStructSize:     uint32(unsafe.Sizeof(openFileNameW{})),
+			hwndOwner:       hwnd,
+			lpstrFilter:     &filterUTF16[0],
+			nFilterIndex:    1,
+			lpstrFile:       &fileBuf[0],
+			nMaxFile:        uint32(len(fileBuf)),
+			lpstrInitialDir: initDirUTF16,
+			lpstrTitle:      titleUTF16,
+			flags:           ofnFileMustExist | ofnPathMustExist | ofnNoChangeDir | ofnExplorer,
+		}
+
+		ret, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+		if ret == 0 {
+			extErr, _, _ := procCommDlgExtendedError.Call()
+			if extErr == 0 {
+				ch <- res{cancelled: true}
+				return
+			}
+			ch <- res{err: fmt.Errorf("GetOpenFileNameW error 0x%x", extErr)}
 			return
 		}
 		chosen := syscall.UTF16ToString(fileBuf)

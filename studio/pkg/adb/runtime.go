@@ -20,18 +20,27 @@ import (
 // Embedded runtime file names (as staged by scripts/build_studio.py into
 // studio/assets_stage/).
 const (
-	FileAdb       = "adb.exe"
-	FileAdbWinApi = "AdbWinApi.dll"
-	FileAdbWinUsb = "AdbWinUsbApi.dll"
-	FileAgent     = "pktpath-android-arm64"
-	FileManifest  = "manifest.json"
-	stampName     = ".extracted.json"
+	FileAdb           = "adb.exe"
+	FileAdbWinApi     = "AdbWinApi.dll"
+	FileAdbWinUsb     = "AdbWinUsbApi.dll"
+	FileAgent         = "pktpath-android-arm64"
+	FileAgentLinuxX64 = "pktpath-linux-x86_64"
+	FileAgentLinuxArm = "pktpath-linux-arm64"
+	FileManifest      = "manifest.json"
+	stampName         = ".extracted.json"
 )
 
-// RuntimeFiles lists embedded binaries staged by build_studio.py.
-// Note: adb.exe is NOT embedded; system adb is discovered and invoked strictly
-// with HideWindow + CREATE_NO_WINDOW (zero console window flash on Windows).
-var RuntimeFiles = []string{FileAgent}
+// RuntimeFiles lists embedded collector binaries staged by build_studio.py.
+// Note: adb.exe is NOT embedded; system adb/ssh are discovered and invoked
+// strictly with HideWindow + CREATE_NO_WINDOW (zero console window flash).
+var RuntimeFiles = []string{FileAgent, FileAgentLinuxX64, FileAgentLinuxArm}
+
+// AgentBinary describes one extracted target collector binary.
+type AgentBinary struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
 
 // AssetEntry describes one staged binary (written by build_studio.py).
 type AssetEntry struct {
@@ -51,17 +60,18 @@ type stampEntry struct {
 	ModNano int64  `json:"mod_nano"`
 }
 
-// Runtime is the resolved local toolchain (headless adb + Android agent).
+// Runtime is the resolved local toolchain (system adb/ssh + multi-arch collectors).
 type Runtime struct {
-	Dir         string   `json:"dir"`
-	AdbPath     string   `json:"adb_path"`
-	AgentPath   string   `json:"agent_path"`
-	AgentSHA256 string   `json:"agent_sha256"`
-	AgentSize   int64    `json:"agent_size"`
-	AdbEmbedded bool     `json:"adb_embedded"`
-	Extracted   []string `json:"extracted"` // files (re)written during this startup
-	ExtractMs   float64  `json:"extract_ms"`
-	Notes       []string `json:"notes,omitempty"`
+	Dir         string                 `json:"dir"`
+	AdbPath     string                 `json:"adb_path"`
+	AgentPath   string                 `json:"agent_path"`
+	AgentSHA256 string                 `json:"agent_sha256"`
+	AgentSize   int64                  `json:"agent_size"`
+	Agents      map[string]AgentBinary `json:"agents,omitempty"`
+	AdbEmbedded bool                   `json:"adb_embedded"`
+	Extracted   []string               `json:"extracted"` // files (re)written during this startup
+	ExtractMs   float64                `json:"extract_ms"`
+	Notes       []string               `json:"notes,omitempty"`
 }
 
 // DefaultAppDir returns %LOCALAPPDATA%\PktPathStudio (or a sane fallback).
@@ -139,22 +149,37 @@ func ExtractRuntime(assets fs.FS, dir string) (*Runtime, error) {
 		rt.AdbPath = p
 	}
 
-	if have[FileAgent] {
-		written, err := extractSet(assets, man, dir, []string{FileAgent})
-		if err != nil {
-			return rt, err
+	rt.Agents = map[string]AgentBinary{}
+	agentSpecs := []struct {
+		key  string
+		file string
+	}{
+		{"android-arm64", FileAgent},
+		{"linux-x86_64", FileAgentLinuxX64},
+		{"linux-arm64", FileAgentLinuxArm},
+	}
+	for _, spec := range agentSpecs {
+		if have[spec.file] {
+			written, err := extractSet(assets, man, dir, []string{spec.file})
+			if err != nil {
+				return rt, err
+			}
+			rt.Extracted = append(rt.Extracted, written...)
+			ab := AgentBinary{
+				Path:   filepath.Join(dir, spec.file),
+				SHA256: man.Files[spec.file].SHA256,
+				Size:   man.Files[spec.file].Size,
+			}
+			rt.Agents[spec.key] = ab
+		} else if p := findDiskAgentFile(spec.file); p != "" {
+			if sum, size, err := fileSHA256(p); err == nil {
+				rt.Agents[spec.key] = AgentBinary{Path: p, SHA256: sum, Size: size}
+				rt.Notes = append(rt.Notes, fmt.Sprintf("using on-disk %s: %s", spec.key, p))
+			}
 		}
-		rt.Extracted = append(rt.Extracted, written...)
-		rt.AgentPath = filepath.Join(dir, FileAgent)
-		rt.AgentSHA256 = man.Files[FileAgent].SHA256
-		rt.AgentSize = man.Files[FileAgent].Size
-	} else if p := findDiskAgent(); p != "" {
-		sum, size, err := fileSHA256(p)
-		if err != nil {
-			return rt, err
-		}
-		rt.AgentPath, rt.AgentSHA256, rt.AgentSize = p, sum, size
-		rt.Notes = append(rt.Notes, "using on-disk agent: "+p)
+	}
+	if ab, ok := rt.Agents["android-arm64"]; ok {
+		rt.AgentPath, rt.AgentSHA256, rt.AgentSize = ab.Path, ab.SHA256, ab.Size
 	} else {
 		rt.Notes = append(rt.Notes, "no embedded pktpath-android-arm64 agent found")
 	}
@@ -325,10 +350,12 @@ func findSystemAdb() string {
 	return ""
 }
 
-func findDiskAgent() string {
-	if v := os.Getenv("PKTPATH_AGENT"); v != "" {
-		if st, err := os.Stat(v); err == nil && !st.IsDir() {
-			return v
+func findDiskAgentFile(fileName string) string {
+	if fileName == FileAgent {
+		if v := os.Getenv("PKTPATH_AGENT"); v != "" {
+			if st, err := os.Stat(v); err == nil && !st.IsDir() {
+				return v
+			}
 		}
 	}
 	var roots []string
@@ -339,7 +366,7 @@ func findDiskAgent() string {
 		roots = append(roots, wd)
 	}
 	for _, r := range roots {
-		for _, rel := range []string{FileAgent, filepath.Join("bin", FileAgent), filepath.Join("..", "bin", FileAgent), filepath.Join("..", "..", "bin", FileAgent)} {
+		for _, rel := range []string{fileName, filepath.Join("bin", fileName), filepath.Join("..", "bin", fileName), filepath.Join("..", "..", "bin", fileName)} {
 			p := filepath.Join(r, rel)
 			if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
 				return p

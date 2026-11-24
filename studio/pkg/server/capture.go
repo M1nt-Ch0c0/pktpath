@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"pktpath/studio/pkg/adb"
+	"pktpath/studio/pkg/sshclient"
 )
 
 // Capture phases.
@@ -44,6 +45,7 @@ type captureState struct {
 
 	ID          string
 	Serial      string
+	SSHTarget   *sshclient.Target
 	Mode        string
 	Dev         string
 	Scope       string
@@ -236,21 +238,43 @@ func (s *Server) StartCapture(ctx context.Context, req *CaptureRequest) (*captur
 		return nil, err
 	}
 	args := append([]string(nil), req.Args...)
-	if req.EnablePlugins && s.pluginsDir != "" {
-		if n, perr := s.adb.SyncPlugins(ctx, req.Serial, s.pluginsDir); perr != nil {
-			return nil, fmt.Errorf("sync plugins: %w", perr)
-		} else if n > 0 {
-			args = append(args, "--plugin-dir", adb.RemotePluginsDir)
-		}
-	}
 	id := time.Now().Format("20060102_150405")
-	run, err := s.adb.StartRecord(ctx, req.Serial, id, args)
+
+	var sshTarget *sshclient.Target
+	var run *adb.RemoteRun
+	var err error
+	if tid, isSSH := sshclient.IsSSHSerial(req.Serial); isSSH {
+		t, ok := s.sshStore.Get(tid)
+		if !ok {
+			return nil, fmt.Errorf("SSH target not found: %s", tid)
+		}
+		sshTarget = &t
+		if req.EnablePlugins {
+			paths := s.enabledPluginPaths()
+			if n, perr := s.ssh.SyncPluginFiles(ctx, t, paths); perr != nil {
+				return nil, fmt.Errorf("sync plugins over ssh: %w", perr)
+			} else if n > 0 {
+				args = append(args, "--plugin-dir", s.ssh.RemotePluginsDir(t))
+			}
+		}
+		run, err = s.ssh.StartRecord(ctx, t, id, args)
+	} else {
+		if req.EnablePlugins {
+			paths := s.enabledPluginPaths()
+			if n, perr := s.adb.SyncPluginFiles(ctx, req.Serial, paths); perr != nil {
+				return nil, fmt.Errorf("sync plugins: %w", perr)
+			} else if n > 0 {
+				args = append(args, "--plugin-dir", adb.RemotePluginsDir)
+			}
+		}
+		run, err = s.adb.StartRecord(ctx, req.Serial, id, args)
+	}
 	if err != nil {
 		return nil, err
 	}
 	c := &captureState{
-		ID: id, Serial: req.Serial, Mode: req.Mode, Dev: req.Dev, Scope: req.Scope,
-		DurationSec: req.DurSec, Args: req.Args, Run: run, Started: time.Now(), Phase: phaseRunning,
+		ID: id, Serial: req.Serial, SSHTarget: sshTarget, Mode: req.Mode, Dev: req.Dev, Scope: req.Scope,
+		DurationSec: req.DurSec, Args: args, Run: run, Started: time.Now(), Phase: phaseRunning,
 		done: make(chan struct{}), stopMonitor: make(chan struct{}),
 	}
 	s.capMu.Lock()
@@ -260,13 +284,13 @@ func (s *Server) StartCapture(ctx context.Context, req *CaptureRequest) (*captur
 
 	// Catch immediate failures (bad args, BPF load error) synchronously.
 	time.Sleep(900 * time.Millisecond)
-	alive, lines, _ := s.adb.Poll(ctx, req.Serial, run, 60)
+	alive, lines, _ := s.pollCapture(ctx, c, 60)
 	c.mu.Lock()
 	if lines != nil {
 		c.Logs = lines
 	}
 	c.mu.Unlock()
-	if !alive && !s.adb.RemoteExists(ctx, req.Serial, run.OutDir+"/manifest.json") {
+	if !alive && !s.remoteExistsCapture(ctx, c, run.OutDir+"/manifest.json") {
 		msg := "pktpath record exited immediately"
 		if len(lines) > 0 {
 			msg += ": " + lines[len(lines)-1]
@@ -278,11 +302,39 @@ func (s *Server) StartCapture(ctx context.Context, req *CaptureRequest) (*captur
 			c.mu.Unlock()
 			close(c.done)
 		})
-		go s.adb.CleanupRun(context.Background(), req.Serial, run)
+		go s.cleanupCapture(context.Background(), c)
 		return c, fmt.Errorf("%s", msg)
 	}
 	go s.monitor(c)
 	return c, nil
+}
+
+func (s *Server) pollCapture(ctx context.Context, c *captureState, tail int) (bool, []string, error) {
+	if c.SSHTarget != nil {
+		return s.ssh.Poll(ctx, *c.SSHTarget, c.Run, tail)
+	}
+	return s.adb.Poll(ctx, c.Serial, c.Run, tail)
+}
+
+func (s *Server) signalCapture(ctx context.Context, c *captureState, sig string) error {
+	if c.SSHTarget != nil {
+		return s.ssh.Signal(ctx, *c.SSHTarget, c.Run.PID, sig)
+	}
+	return s.adb.Signal(ctx, c.Serial, c.Run.PID, sig)
+}
+
+func (s *Server) remoteExistsCapture(ctx context.Context, c *captureState, p string) bool {
+	if c.SSHTarget != nil {
+		return s.ssh.RemoteExists(ctx, *c.SSHTarget, p)
+	}
+	return s.adb.RemoteExists(ctx, c.Serial, p)
+}
+
+func (s *Server) cleanupCapture(ctx context.Context, c *captureState) bool {
+	if c.SSHTarget != nil {
+		return s.ssh.CleanupRun(ctx, *c.SSHTarget, c.Run)
+	}
+	return s.adb.CleanupRun(ctx, c.Serial, c.Run)
 }
 
 func (s *Server) monitor(c *captureState) {
@@ -303,7 +355,7 @@ func (s *Server) monitor(c *captureState) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		alive, lines, err := s.adb.Poll(ctx, c.Serial, c.Run, 60)
+		alive, lines, err := s.pollCapture(ctx, c, 60)
 		cancel()
 		if err != nil {
 			continue
@@ -346,20 +398,20 @@ func (s *Server) finalize(c *captureState, selfExit bool) {
 
 		setPhase(phaseStopping)
 		res.CleanExit = true
-		alive, lines, _ := s.adb.Poll(ctx, c.Serial, c.Run, 80)
+		alive, lines, _ := s.pollCapture(ctx, c, 80)
 		if alive {
-			_ = s.adb.Signal(ctx, c.Serial, c.Run.PID, "INT")
+			_ = s.signalCapture(ctx, c, "INT")
 			deadline := time.Now().Add(8 * time.Second)
 			for alive && time.Now().Before(deadline) {
 				time.Sleep(300 * time.Millisecond)
-				alive, lines, _ = s.adb.Poll(ctx, c.Serial, c.Run, 80)
+				alive, lines, _ = s.pollCapture(ctx, c, 80)
 			}
 			if alive {
 				res.CleanExit = false
-				_ = s.adb.Signal(ctx, c.Serial, c.Run.PID, "TERM")
+				_ = s.signalCapture(ctx, c, "TERM")
 				time.Sleep(2 * time.Second)
-				if alive, _, _ = s.adb.Poll(ctx, c.Serial, c.Run, 10); alive {
-					_ = s.adb.Signal(ctx, c.Serial, c.Run.PID, "KILL")
+				if alive, _, _ = s.pollCapture(ctx, c, 10); alive {
+					_ = s.signalCapture(ctx, c, "KILL")
 					time.Sleep(500 * time.Millisecond)
 				}
 			}
@@ -371,32 +423,43 @@ func (s *Server) finalize(c *captureState, selfExit bool) {
 		}
 
 		setPhase(phasePulling)
-		if !s.adb.RemoteExists(ctx, c.Serial, c.Run.OutDir) {
+		if !s.remoteExistsCapture(ctx, c, c.Run.OutDir) {
 			res.Error = "remote run directory missing (record failed?): " + lastOf(lines)
-			res.RemoteCleaned = s.adb.CleanupRun(ctx, c.Serial, c.Run)
+			res.RemoteCleaned = s.cleanupCapture(ctx, c)
 			return
 		}
-		s.adb.PrepareForPull(ctx, c.Serial, c.Run)
 		name := sanitizeName(fmt.Sprintf("%s_%s_%s", c.ID, c.Serial, c.Dev))
 		dst := uniquePath(filepath.Join(s.sessionsRoot, name))
-		tmpParent := filepath.Join(s.sessionsRoot, ".pulling_"+c.ID)
-		_ = os.RemoveAll(tmpParent)
-		if err := s.adb.Pull(ctx, c.Serial, c.Run.OutDir, tmpParent+string(os.PathSeparator), 10*time.Minute); err != nil {
-			res.Error = err.Error()
+		if c.SSHTarget != nil {
+			if err := s.ssh.PullDir(ctx, *c.SSHTarget, c.Run.OutDir, dst, 10*time.Minute); err != nil {
+				res.Error = err.Error()
+				return
+			}
+			if len(lines) > 0 {
+				_ = os.WriteFile(filepath.Join(dst, "studio_record.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+			}
+			res.RemoteCleaned = s.cleanupCapture(ctx, c)
+		} else {
+			s.adb.PrepareForPull(ctx, c.Serial, c.Run)
+			tmpParent := filepath.Join(s.sessionsRoot, ".pulling_"+c.ID)
 			_ = os.RemoveAll(tmpParent)
-			return
+			if err := s.adb.Pull(ctx, c.Serial, c.Run.OutDir, tmpParent+string(os.PathSeparator), 10*time.Minute); err != nil {
+				res.Error = err.Error()
+				_ = os.RemoveAll(tmpParent)
+				return
+			}
+			pulled := filepath.Join(tmpParent, filepath.Base(c.Run.OutDir))
+			if st, err := os.Stat(pulled); err != nil || !st.IsDir() {
+				pulled = tmpParent
+			}
+			if err := os.Rename(pulled, dst); err != nil {
+				res.Error = "move pulled session: " + err.Error()
+				return
+			}
+			_ = os.RemoveAll(tmpParent)
+			_ = s.adb.Pull(ctx, c.Serial, c.Run.LogPath, filepath.Join(dst, "studio_record.log"), time.Minute)
+			res.RemoteCleaned = s.cleanupCapture(ctx, c)
 		}
-		pulled := filepath.Join(tmpParent, filepath.Base(c.Run.OutDir))
-		if st, err := os.Stat(pulled); err != nil || !st.IsDir() {
-			pulled = tmpParent // some adb versions copy contents directly
-		}
-		if err := os.Rename(pulled, dst); err != nil {
-			res.Error = "move pulled session: " + err.Error()
-			return
-		}
-		_ = os.RemoveAll(tmpParent)
-		_ = s.adb.Pull(ctx, c.Serial, c.Run.LogPath, filepath.Join(dst, "studio_record.log"), time.Minute)
-		res.RemoteCleaned = s.adb.CleanupRun(ctx, c.Serial, c.Run)
 
 		setPhase(phaseParsing)
 		id := s.sess.register(dst)
@@ -560,7 +623,7 @@ func (s *Server) handleCaptureFlush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "flush (SIGUSR1) is only meaningful in daemon mode")
 		return
 	}
-	if err := s.adb.Signal(r.Context(), c.Serial, c.Run.PID, "USR1"); err != nil {
+	if err := s.signalCapture(r.Context(), c, "USR1"); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

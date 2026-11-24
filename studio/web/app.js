@@ -194,7 +194,9 @@
    * 2. State
    * ===================================================================== */
   const S = {
-    devices: [], adbMissing: false, pluginsDir: '', plugins: [],
+    transport: 'adb',
+    devices: [], adbDevices: [], sshTargets: [], sshAvailable: true, availableAgents: [],
+    adbMissing: false, pluginsDir: '', plugins: [], pluginSlots: null, pendingPlugin: null,
     serial: '', prepState: 'idle', prepInfo: null, prepErr: '',
     interfaces: [], iface: '', inspect: null, apps: [], uidMap: {},
     app: { uid: -1, label: '全部应用 (不限 UID)' },
@@ -263,9 +265,22 @@
   }
 
   /* =====================================================================
-   * 5. Devices
+   * 5. Target Devices (Android ADB + Linux SSH)
    * ===================================================================== */
   let devLoading = false;
+  function switchTransport(mode) {
+    S.transport = mode === 'ssh' ? 'ssh' : 'adb';
+    setSeg($('#segTransport'), S.transport);
+    $('#paneADB').hidden = S.transport !== 'adb';
+    $('#paneSSH').hidden = S.transport !== 'ssh';
+    if (S.transport === 'adb' && S.adbMissing && !S.serial) {
+      setPrep('bad', '未检测到系统 adb：请安装 Android Platform-Tools 并加入 PATH（可切换右侧「Linux (SSH)」连接任意 Linux 主机，或直接打开离线历史会话）');
+    } else if (S.transport === 'ssh' && S.prepState === 'bad' && /未检测到系统 adb/.test($('#prepStatus').textContent || '')) {
+      setPrep('idle');
+    }
+    renderSSHSelect();
+    updateStartBtn();
+  }
   async function refreshDevices(manual) {
     if (devLoading) return;
     devLoading = true;
@@ -274,23 +289,34 @@
     try {
       const d = await api('/api/devices', { timeout: 20000 });
       S.adbMissing = !!d.adb_missing;
+      S.sshAvailable = d.ssh_available !== false;
+      S.availableAgents = arr(d.available_agents);
       S.devices = arr(d.devices).filter((x) => x && x.serial);
+      S.adbDevices = arr(d.adb_devices).length || S.adbMissing
+        ? arr(d.adb_devices).filter((x) => x && x.serial)
+        : S.devices.filter((x) => (x.transport || 'adb') === 'adb');
+      S.sshTargets = arr(d.ssh_targets);
       renderDeviceSelect();
-      if (S.adbMissing) {
-        setPrep('bad', '未检测到系统 adb：请安装 Android Platform-Tools 并加入 PATH（或启动时通过 --adb 指定）；仍可离线打开历史会话');
-        if (manual) toast('未检测到系统 adb，请先安装 Android Platform-Tools', 'warn');
+      renderSSHSelect();
+      if (S.transport === 'adb' && S.adbMissing && !S.serial) {
+        setPrep('bad', '未检测到系统 adb：请安装 Android Platform-Tools 并加入 PATH（可切换「Linux (SSH)」连接通用 Linux 主机，或直接打开离线历史会话）');
+        if (manual) toast('未检测到系统 adb；可切换 Linux (SSH) 模式或安装 Platform-Tools', 'warn');
       } else if (!S.serial) {
         if (S.prepState === 'bad' && /未检测到系统 adb/.test($('#prepStatus').textContent || '')) setPrep('idle');
-        const ready = S.devices.filter((x) => (x.state || 'device') === 'device');
-        if (ready.length >= 1) { $('#selDevice').value = ready[0].serial; selectDevice(ready[0].serial); }
-        if (manual) toast(S.devices.length ? `发现 ${S.devices.length} 台设备` : '未发现设备：请用 USB 连接手机并开启 USB 调试', S.devices.length ? 'ok' : 'warn');
+        const readyAdb = S.adbDevices.filter((x) => (x.state || 'device') === 'device');
+        if (S.transport === 'adb' && readyAdb.length >= 1) {
+          $('#selDevice').value = readyAdb[0].serial;
+          selectDevice(readyAdb[0].serial);
+        } else if (manual) {
+          toast(S.devices.length ? `发现 ${S.adbDevices.length} 台 Android 设备、${S.sshTargets.length} 台 Linux SSH 主机` : '未发现设备：可连接 Android USB 或在「Linux (SSH)」中添加服务器', S.devices.length ? 'ok' : 'warn');
+        }
       } else if (manual) {
-        toast(S.devices.length ? `发现 ${S.devices.length} 台设备` : '未发现设备：请用 USB 连接手机并开启 USB 调试', S.devices.length ? 'ok' : 'warn');
+        toast(`已刷新：${S.adbDevices.length} 台 Android 设备、${S.sshTargets.length} 台 Linux SSH 主机`, 'ok');
       }
     } catch (e) {
       if (manual || !S.devices.length) {
         const sel = $('#selDevice');
-        if (!S.devices.length) sel.innerHTML = '<option value="">设备服务暂不可用</option>';
+        if (!S.adbDevices.length) sel.innerHTML = '<option value="">设备服务暂不可用</option>';
         if (manual) toast('刷新设备失败：' + e.message, 'bad');
       }
     } finally {
@@ -300,6 +326,10 @@
     }
   }
   function devLabel(d) {
+    if (d.transport === 'ssh' || String(d.serial || '').startsWith('ssh:')) {
+      const host = d.ssh_host ? `${d.ssh_user ? d.ssh_user + '@' : ''}${d.ssh_host}${d.ssh_port && d.ssh_port !== 22 ? ':' + d.ssh_port : ''}` : d.serial;
+      return `Linux SSH · ${d.model || host}${d.arch ? ' · ' + d.arch : ''}`;
+    }
     const name = d.model || d.product || d.serial;
     const parts = [name, d.serial];
     if (d.android_ver) parts.push('Android ' + d.android_ver);
@@ -307,17 +337,103 @@
   }
   function renderDeviceSelect() {
     const sel = $('#selDevice');
-    const cur = S.serial;
-    const emptyLabel = S.adbMissing ? '未检测到系统 adb（请安装 Platform-Tools）' : (S.devices.length ? '请选择设备…' : '未发现设备（USB 连接并开启调试）');
+    const cur = S.serial && !String(S.serial).startsWith('ssh:') ? S.serial : '';
+    const emptyLabel = S.adbMissing ? '未检测到系统 adb（请安装 Platform-Tools）' : (S.adbDevices.length ? '请选择 Android 设备…' : '未发现 USB 设备（可切换 Linux SSH）');
     let html = `<option value="">${emptyLabel}</option>`;
-    for (const d of S.devices) {
+    for (const d of S.adbDevices) {
       const st = d.state || 'device';
       const extra = st === 'device' ? '' : st === 'unauthorized' ? '（请在手机上允许 USB 调试）' : `（${st}）`;
       html += `<option value="${esc(d.serial)}" ${st !== 'device' ? 'disabled' : ''}>${esc(devLabel(d) + extra)}</option>`;
     }
-    if (cur && !S.devices.some((d) => d.serial === cur)) html += `<option value="${esc(cur)}">${esc(cur)}（已断开）</option>`;
+    if (cur && !S.adbDevices.some((d) => d.serial === cur)) html += `<option value="${esc(cur)}">${esc(cur)}（已断开）</option>`;
     sel.innerHTML = html;
     sel.value = cur || '';
+  }
+  function renderSSHSelect() {
+    const sel = $('#selSSH');
+    if (!sel) return;
+    const cur = String(S.serial || '').startsWith('ssh:') ? S.serial : '';
+    const empty = !S.sshAvailable
+      ? '系统未安装 ssh 客户端（请启用 Windows OpenSSH）'
+      : (S.sshTargets.length ? '请选择 Linux SSH 主机…' : '尚未添加主机（点击右侧「+ 添加」）');
+    let html = `<option value="">${empty}</option>`;
+    for (const t of S.sshTargets) {
+      const ser = 'ssh:' + t.id;
+      const addr = `${t.user ? t.user + '@' : ''}${t.host}${t.port && t.port !== 22 ? ':' + t.port : ''}`;
+      html += `<option value="${esc(ser)}">${esc(t.name || addr)} (${esc(addr)})</option>`;
+    }
+    sel.innerHTML = html;
+    sel.value = cur;
+    const delBtn = $('#btnDeleteSSH');
+    if (delBtn) delBtn.hidden = !cur;
+  }
+  function sshFormPayload() {
+    return {
+      name: $('#sshName').value.trim(),
+      host: $('#sshHost').value.trim(),
+      port: toNum($('#sshPort').value) || 22,
+      user: $('#sshUser').value.trim(),
+      identity_file: $('#sshKey').value.trim(),
+      use_sudo: $('#sshSudo').checked,
+    };
+  }
+  async function testSSHConnection() {
+    const req = sshFormPayload();
+    if (!req.host) { toast('请先输入主机 IP 或域名', 'warn'); return; }
+    const out = $('#sshTestOut');
+    out.hidden = false;
+    out.className = 'ssh-test-out';
+    out.innerHTML = '<span class="spinner"></span> 正在通过系统 SSH 探测远程主机架构与内核…';
+    try {
+      const r = await api('/api/ssh/test', { body: req, timeout: 20000 });
+      const pr = obj(r.probe);
+      const agentTip = r.agent_key ? `已内置匹配采集器 (${r.agent_key})` : `⚠ 暂未内置 ${pr.arch || '?'} 采集器`;
+      out.className = 'ssh-test-out ok';
+      out.textContent = `✔ 连接成功 · ${pr.hostname || req.host} · ${pr.arch || '?'} · Linux ${pr.kernel || '?'} · 权限=${pr.root_mode || '?'} · ${agentTip}`;
+    } catch (e) {
+      out.className = 'ssh-test-out bad';
+      out.textContent = '✖ 连接失败：' + e.message;
+    }
+  }
+  async function saveSSHHost() {
+    const req = sshFormPayload();
+    if (!req.host) { toast('请输入主机 IP 或域名', 'warn'); return; }
+    try {
+      const r = await api('/api/ssh/targets', { body: req, timeout: 15000 });
+      S.sshTargets = arr(r.targets);
+      $('#sshForm').hidden = true;
+      $('#sshTestOut').hidden = true;
+      await refreshDevices(false);
+      switchTransport('ssh');
+      if (r.serial) {
+        $('#selSSH').value = r.serial;
+        selectDevice(r.serial);
+      }
+      toast(`已保存 Linux SSH 主机：${(r.target && r.target.name) || req.host}`, 'ok');
+    } catch (e) {
+      toast('保存 SSH 主机失败：' + e.message, 'bad');
+    }
+  }
+  async function deleteCurrentSSH() {
+    if (!String(S.serial || '').startsWith('ssh:')) return;
+    const id = S.serial.slice(4);
+    if (!window.confirm('确定删除该 SSH 主机配置吗？')) return;
+    try {
+      await api('/api/ssh/targets?' + qs({ id }), { method: 'DELETE', timeout: 10000 });
+      selectDevice('');
+      await refreshDevices(false);
+      toast('已删除 SSH 主机配置', 'ok');
+    } catch (e) {
+      toast('删除失败：' + e.message, 'bad');
+    }
+  }
+  async function pickSSHKeyFile() {
+    try {
+      const r = await api('/api/dialog/open-file', { body: { title: '选择 SSH 私钥文件', filter: 'All Files (*.*)|*.*' }, timeout: 0 });
+      if (r && r.path) $('#sshKey').value = r.path;
+    } catch (e) {
+      if (!/cancel/i.test(e.message)) toast('选择私钥失败：' + e.message, 'bad');
+    }
   }
   function curDevice() { return S.devices.find((d) => d.serial === S.serial) || null; }
   function renderDevicePill() {
@@ -326,20 +442,22 @@
     dot.className = 'dot';
     badge.hidden = true;
     if (!S.serial) {
-      txt.textContent = S.devices.length ? `${S.devices.length} 台设备可用 · 请选择` : '未连接设备';
+      txt.textContent = S.devices.length ? `${S.devices.length} 台目标可用 · 请选择` : '未连接目标设备';
       if (S.devices.length) dot.classList.add('warn');
       return;
     }
     if (!d) { txt.textContent = `${S.serial} · 已断开`; dot.classList.add('bad'); return; }
     const kernel = (S.prepInfo && S.prepInfo.kernel) || d.kernel || '';
-    txt.textContent = [d.model || d.product || d.serial, d.serial, kernel ? 'Linux ' + String(kernel).split('-')[0] : ''].filter(Boolean).join(' · ');
+    const arch = (S.prepInfo && S.prepInfo.arch) || d.arch || '';
+    const prefix = d.transport === 'ssh' ? 'SSH · ' : '';
+    txt.textContent = [prefix + (d.model || d.product || d.serial), d.transport === 'ssh' ? (d.ssh_host || '') : d.serial, arch, kernel ? 'Linux ' + String(kernel).split('-')[0] : ''].filter(Boolean).join(' · ');
     $('#devicePill').title = [devLabel(d), kernel && 'kernel ' + kernel].filter(Boolean).join('\n');
     badge.hidden = false;
     if (S.prepState === 'ok') {
       const rm = String((S.prepInfo && S.prepInfo.root_mode) || d.root_mode || 'root');
       badge.className = 'badge badge-ok';
-      badge.textContent = '已就绪 · ' + (/^(su|root|adb.?root|magisk|ksu|apatch)/i.test(rm) || !rm ? 'root' : rm);
-      badge.title = 'root 方式：' + rm;
+      badge.textContent = '已就绪 · ' + (/^(su|sudo|root|adb.?root|magisk|ksu|apatch)/i.test(rm) || !rm ? rm || 'root' : rm);
+      badge.title = '提权方式：' + rm;
       dot.classList.add('ok');
     } else if (S.prepState === 'loading') {
       badge.className = 'badge badge-warn'; badge.textContent = '准备中…'; dot.classList.add('warn');
@@ -368,22 +486,238 @@
   async function selectDevice(serial) {
     S.serial = serial;
     S.prepInfo = null; S.inspect = null; S.interfaces = []; S.iface = ''; S.apps = []; S.uidMap = {};
+    const isSSH = String(serial || '').startsWith('ssh:');
+    if ($('#btnDeleteSSH')) $('#btnDeleteSSH').hidden = !isSSH;
     renderIfaceSelect(); renderTopo(null);
     if (!serial) { setPrep('idle'); return; }
-    setPrep('loading', '正在准备设备：检测 root、注入采集器…');
+    setPrep('loading', isSSH ? '正在通过 SSH 检测架构、权限并下发对应 Linux 采集器…' : '正在准备设备：检测 root、注入采集器…');
     try {
       const p = await api('/api/device/prepare', { body: { serial }, timeout: 180000 });
       if (S.serial !== serial) return;
       S.prepInfo = p || {};
       const sha = p && p.agent_sha256 ? ' · sha ' + String(p.agent_sha256).slice(0, 8) : '';
-      setPrep('ok', `采集器已就绪 · ${p.root_mode || 'root'}${p.kernel ? ' · 内核 ' + String(p.kernel).split('-')[0] : ''}${sha}`);
+      const archTag = p && p.arch ? ` · ${p.arch}` : '';
+      setPrep('ok', `采集器已就绪 · ${p.root_mode || 'root'}${archTag}${p.kernel ? ' · 内核 ' + String(p.kernel).split('-')[0] : ''}${sha}`);
     } catch (e) {
       if (S.serial !== serial) return;
       S.prepErr = e.message;
-      setPrep('bad', '准备失败：' + e.message + '（请确认手机已 root 并允许 USB 调试）');
+      setPrep('bad', '准备失败：' + e.message + (isSSH ? '（请确认 SSH 密钥免密登录及 root/sudo -n 权限）' : '（请确认设备已 root 并允许 USB 调试）'));
       return;
     }
     await Promise.all([loadInspect(serial, ''), loadApps(serial)]);
+  }
+
+  /* ---- Plugin Manager Drawer & Capability Inspector ---- */
+  function openPluginDrawer() {
+    $('#pluginMask').hidden = false;
+    $('#pluginDrawer').classList.add('open');
+    $('#pluginDrawer').setAttribute('aria-hidden', 'false');
+    loadPlugins();
+  }
+  function closePluginDrawer() {
+    $('#pluginMask').hidden = true;
+    $('#pluginDrawer').classList.remove('open');
+    $('#pluginDrawer').setAttribute('aria-hidden', 'true');
+  }
+  function pluginLiveMatch(plug) {
+    const ins = S.inspect;
+    if (!ins || !S.serial) return null;
+    const fieldsByKey = new Map();
+    for (const pf of arr(ins.plugin_fields)) {
+      fieldsByKey.set(`${pf.struct || 'sock'}.${pf.field}`, pf);
+    }
+    const adaptersById = new Map();
+    for (const ad of arr(ins.adapters)) {
+      adaptersById.set(ad.adapter_id, ad);
+    }
+    return { fieldsByKey, adaptersById };
+  }
+  function renderPluginManager() {
+    const list = $('#plugList');
+    const slotsEl = $('#plugSlots');
+    const dirEl = $('#plugDirHint');
+    if (dirEl) dirEl.textContent = S.pluginsDir || '';
+    const sl = S.pluginSlots || { sock_used: 0, sock_max: 4, classful_used: 0, classful_max: 2, leaf_used: 0, leaf_max: 2, enabled_count: 0, total_count: 0 };
+    if (slotsEl) {
+      slotsEl.innerHTML = [
+        `<span class="badge ${sl.sock_used > sl.sock_max ? 'badge-bad' : 'badge-muted'}">Socket 槽位 ${sl.sock_used}/${sl.sock_max}</span>`,
+        `<span class="badge ${sl.classful_used > sl.classful_max ? 'badge-bad' : 'badge-muted'}">Classful 队列 ${sl.classful_used}/${sl.classful_max}</span>`,
+        `<span class="badge ${sl.leaf_used > sl.leaf_max ? 'badge-bad' : 'badge-muted'}">Leaf 队列 ${sl.leaf_used}/${sl.leaf_max}</span>`,
+      ].join('');
+    }
+    const navCnt = $('#navPluginCount');
+    if (navCnt) {
+      navCnt.textContent = String(sl.enabled_count);
+      navCnt.className = 'badge ' + (sl.enabled_count ? 'badge-ok' : 'badge-muted');
+    }
+    const inlineBadge = $('#pluginCountBadge');
+    if (inlineBadge) {
+      inlineBadge.textContent = `${sl.enabled_count} 个已启用`;
+      inlineBadge.className = 'badge ' + (sl.enabled_count ? 'badge-ok' : 'badge-muted');
+    }
+    if (!list) return;
+    if (!S.plugins.length) {
+      list.innerHTML = `<div class="empty-mini" style="padding:20px 10px">当前未加载任何外部插件（运行于 100% 纯上游 Linux 内核模式）<br>点击上方 <b>「＋ 加载 / 导入插件 (.json)」</b> 即可按需扩展 Socket BTF 字段或自定义 TC 队列能力。</div>`;
+      return;
+    }
+    const live = pluginLiveMatch();
+    list.innerHTML = S.plugins.map((p) => {
+      const caps = [];
+      for (const sf of arr(p.sock_field_specs)) {
+        let statusHtml = '<span class="badge badge-muted">连接设备后检测 BTF</span>';
+        if (!p.enabled) {
+          statusHtml = '<span class="badge badge-muted">已停用</span>';
+        } else if (live) {
+          const hit = live.fieldsByKey.get(`${sf.struct || 'sock'}.${sf.field}`);
+          if (hit && hit.resolved) statusHtml = `<span class="badge badge-ok">🟢 BTF 已解析 offset=${esc(hit.offset)}</span>`;
+          else statusHtml = '<span class="badge badge-warn">⚪ 当前内核无此 BTF 字段</span>';
+        }
+        caps.push(`<div class="plug-cap">
+          <span class="plug-cap-tag sock">SOCK BTF</span>
+          <div class="plug-cap-body">
+            <div>${esc(sf.summary)}</div>
+            <div class="plug-cap-meta">struct ${esc(sf.struct)}.${esc(sf.field)} (${esc(sf.size)}B) · role=${esc(sf.role)} · label=${esc(sf.label)}</div>
+          </div>
+          ${statusHtml}
+        </div>`);
+      }
+      for (const q of arr(p.qdisc_specs)) {
+        let statusHtml = '<span class="badge badge-muted">连接设备后检测符号</span>';
+        if (!p.enabled) {
+          statusHtml = '<span class="badge badge-muted">已停用</span>';
+        } else if (live) {
+          const ad = live.adaptersById.get('plugin_qdisc_' + q.id);
+          if (ad && ad.enabled) statusHtml = '<span class="badge badge-ok">🟢 探针已挂载</span>';
+          else if (ad && ad.missing_reason) statusHtml = `<span class="badge badge-muted" title="${esc(ad.missing_reason)}">⚪ ${esc(/not used/i.test(ad.missing_reason) ? '当前网卡未使用' : ad.missing_reason)}</span>`;
+          else statusHtml = '<span class="badge badge-muted">⚪ 未匹配</span>';
+        }
+        const syms = q.dequeue_sym ? `${q.enqueue_sym} / ${q.dequeue_sym}` : q.enqueue_sym;
+        caps.push(`<div class="plug-cap">
+          <span class="plug-cap-tag qdisc">${esc(String(q.mode || '').toUpperCase())}</span>
+          <div class="plug-cap-body">
+            <div>${esc(q.summary)}</div>
+            <div class="plug-cap-meta">kind=${esc(q.kind)} · sym=${esc(syms)}</div>
+          </div>
+          ${statusHtml}
+        </div>`);
+      }
+      const errHtml = p.error ? `<div class="banner banner-bad"><span class="ico">✖</span><div>${esc(p.error)}</div></div>` : '';
+      const warnHtml = arr(p.warnings).length ? `<div class="banner banner-warn"><span class="ico">⚠</span><div>${arr(p.warnings).map(esc).join('<br>')}</div></div>` : '';
+      return `<div class="plug-card ${p.enabled ? '' : 'disabled'}" data-file="${esc(p.file)}">
+        <div class="plug-card-head">
+          <div style="flex:1;min-width:0">
+            <div class="plug-card-title">
+              <span>🔌 ${esc(p.name || p.file)}</span>
+              ${p.version ? `<span class="badge badge-muted">v${esc(p.version)}</span>` : ''}
+              <span class="plug-card-file">${esc(p.file)}</span>
+            </div>
+            ${p.description ? `<div class="plug-card-desc">${esc(p.description)}</div>` : ''}
+          </div>
+          <label class="switch" title="${p.enabled ? '点击停用此插件' : '点击启用此插件'}">
+            <input type="checkbox" class="plug-toggle" data-file="${esc(p.file)}" ${p.enabled ? 'checked' : ''}>
+            <span class="slider"></span>
+          </label>
+          <button type="button" class="btn btn-ghost btn-sm plug-del" data-file="${esc(p.file)}" title="卸载并删除该插件文件">删除</button>
+        </div>
+        ${errHtml}${warnHtml}
+        <div class="plug-cap-list">${caps.join('') || '<div class="empty-mini">该插件未声明可用能力</div>'}</div>
+      </div>`;
+    }).join('');
+  }
+  function renderPluginPreview() {
+    const box = $('#plugPreview');
+    if (!box) return;
+    const pend = S.pendingPlugin;
+    if (!pend) { box.hidden = true; box.innerHTML = ''; return; }
+    const p = pend.plugin;
+    const caps = arr(p.capabilities);
+    const warns = arr(p.warnings);
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="plug-preview-head">
+        <h3>✨ 插件能力预览：${esc(p.name || p.file)}</h3>
+        ${p.version ? `<span class="badge badge-muted">v${esc(p.version)}</span>` : ''}
+        <span class="plug-card-file">${esc(p.file)}</span>
+      </div>
+      ${p.description ? `<div class="plug-card-desc">${esc(p.description)}</div>` : ''}
+      <div style="font-size:12.5px;font-weight:600">加载该插件后，将为系统提供以下能力（共 ${caps.length} 项）：</div>
+      <div class="plug-cap-list">
+        ${arr(p.sock_field_specs).map((sf) => `<div class="plug-cap"><span class="plug-cap-tag sock">SOCK BTF</span><div class="plug-cap-body">${esc(sf.summary)}</div></div>`).join('')}
+        ${arr(p.qdisc_specs).map((q) => `<div class="plug-cap"><span class="plug-cap-tag qdisc">${esc(String(q.mode || '').toUpperCase())}</span><div class="plug-cap-body">${esc(q.summary)}</div></div>`).join('')}
+        ${!caps.length ? '<div class="empty-mini">未检测到有效能力声明</div>' : ''}
+      </div>
+      ${warns.length ? `<div class="banner banner-warn"><span class="ico">⚠</span><div>${warns.map(esc).join('<br>')}</div></div>` : ''}
+      <div class="plug-preview-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="btnConfirmImportPlugin">✔ 确认加载此插件</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnCancelImportPlugin">取消</button>
+      </div>`;
+  }
+  async function startImportPlugin() {
+    try {
+      const picked = await api('/api/dialog/open-file', {
+        body: { title: '选择 PktPath 插件文件 (.json)', filter: 'PktPath Plugin (*.json)|*.json|All Files (*.*)|*.*' },
+        timeout: 0,
+      });
+      if (!picked || picked.cancelled || !picked.path) return;
+      const prev = await api('/api/plugins/preview', { body: { path: picked.path }, timeout: 15000 });
+      S.pendingPlugin = { path: picked.path, plugin: prev.plugin };
+      renderPluginPreview();
+    } catch (e) {
+      if (!/cancel/i.test(e.message)) toast('读取插件失败：' + e.message, 'bad');
+    }
+  }
+  async function confirmImportPlugin() {
+    if (!S.pendingPlugin) return;
+    const req = S.pendingPlugin.path ? { path: S.pendingPlugin.path } : { filename: S.pendingPlugin.filename, content: S.pendingPlugin.content };
+    try {
+      const r = await api('/api/plugins/import', { body: req, timeout: 15000 });
+      const imp = r.imported || S.pendingPlugin.plugin;
+      S.pendingPlugin = null;
+      S.plugins = arr(r.plugins);
+      S.pluginSlots = r.slots || S.pluginSlots;
+      renderPluginPreview();
+      renderPluginManager();
+      const capSummary = arr(imp && imp.capabilities).slice(0, 2).join('；') || '已注册到插件目录';
+      toast(`已加载插件「${(imp && imp.name) || 'plugin'}」：${capSummary}`, 'ok', 6500);
+      if (S.serial && S.iface && S.prepState === 'ok') loadInspect(S.serial, S.iface);
+    } catch (e) {
+      toast('导入插件失败：' + e.message, 'bad');
+    }
+  }
+  async function togglePlugin(file, enabled) {
+    try {
+      const r = await api('/api/plugins/toggle', { body: { file, enabled }, timeout: 10000 });
+      S.plugins = arr(r.plugins);
+      S.pluginSlots = r.slots || S.pluginSlots;
+      renderPluginManager();
+      toast(`${enabled ? '已启用' : '已停用'}插件 ${file}`, 'ok');
+      if (S.serial && S.iface && S.prepState === 'ok') loadInspect(S.serial, S.iface);
+    } catch (e) {
+      toast('切换插件状态失败：' + e.message, 'bad');
+      loadPlugins();
+    }
+  }
+  async function deletePlugin(file) {
+    if (!window.confirm(`确定卸载并删除插件文件 ${file} 吗？`)) return;
+    try {
+      const r = await api('/api/plugins/delete', { body: { file }, timeout: 10000 });
+      S.plugins = arr(r.plugins);
+      S.pluginSlots = r.slots || S.pluginSlots;
+      renderPluginManager();
+      toast(`已卸载插件 ${file}`, 'ok');
+      if (S.serial && S.iface && S.prepState === 'ok') loadInspect(S.serial, S.iface);
+    } catch (e) {
+      toast('卸载插件失败：' + e.message, 'bad');
+    }
+  }
+  async function loadPlugins() {
+    try {
+      const d = await api('/api/plugins', { timeout: 10000 });
+      S.pluginsDir = d.plugins_dir || '';
+      S.plugins = arr(d.plugins);
+      S.pluginSlots = d.slots || null;
+      renderPluginManager();
+    } catch (_) { /* ignore */ }
   }
 
   /* ---- interfaces & topology ---- */
@@ -392,21 +726,6 @@
     if (Array.isArray(a)) return a.map(String).filter(Boolean);
     if (typeof a === 'string') return a.split(/[\s,]+/).filter(Boolean);
     return [];
-  }
-  async function loadPlugins() {
-    try {
-      const d = await api('/api/plugins', { timeout: 10000 });
-      S.pluginsDir = d.plugins_dir || '';
-      S.plugins = arr(d.plugins);
-      const b = $('#pluginCountBadge');
-      if (b) {
-        b.textContent = `${S.plugins.length} 个插件`;
-        b.className = 'badge ' + (S.plugins.length ? 'badge-ok' : 'badge-muted');
-        b.title = S.plugins.length
-          ? S.plugins.map((p) => `${p.name || p.file} (sock:${p.sock_fields || 0}, qdisc:${p.qdiscs || 0})${p.error ? ' [错误: ' + p.error + ']' : ''}`).join('\n')
-          : `插件目录：${S.pluginsDir || '(未配置)'}\n放入自定义 .json 插件后自动生效`;
-      }
-    } catch (_) { /* ignore */ }
   }
   async function loadInspect(serial, dev) {
     const tree = $('#topoTree');
@@ -426,6 +745,7 @@
       }
       renderIfaceSelect();
       renderTopo(S.inspect);
+      renderPluginManager();
     } catch (e) {
       if (S.serial !== serial) return;
       tree.innerHTML = `<div class="empty-mini">读取失败：${esc(e.message)}</div>`;
@@ -761,9 +1081,9 @@
   function updateStartBtn() {
     const btn = $('#btnStart'), hint = $('#startHint');
     let why = '';
-    if (!S.serial) why = '请先连接并选择 Android 设备';
-    else if (S.prepState === 'loading') why = '正在准备设备…';
-    else if (S.prepState !== 'ok') why = '设备未就绪（需要 root）';
+    if (!S.serial) why = '请先选择目标设备（Android ADB 或 Linux SSH）';
+    else if (S.prepState === 'loading') why = '正在准备目标设备…';
+    else if (S.prepState !== 'ok') why = '目标设备未就绪（需要 root / sudo）';
     else if (!S.iface) why = '请选择网卡';
     btn.disabled = !!why || S.capturing;
     btn.hidden = S.capturing;
@@ -2040,7 +2360,25 @@
     $('#btnQuitApp').addEventListener('click', quitApp);
     $('#btnRailToggle').addEventListener('click', toggleRail);
     $('#btnRefreshDevices').addEventListener('click', () => refreshDevices(true));
-    $('#devicePill').addEventListener('click', () => { if (document.body.classList.contains('rail-collapsed')) toggleRail(); $('#selDevice').focus(); });
+    $('#devicePill').addEventListener('click', () => { if (document.body.classList.contains('rail-collapsed')) toggleRail(); (S.transport === 'ssh' ? $('#selSSH') : $('#selDevice')).focus(); });
+    $('#btnOpenPlugins').addEventListener('click', openPluginDrawer);
+    $('#btnManagePluginsInline').addEventListener('click', openPluginDrawer);
+    $('#plugClose').addEventListener('click', closePluginDrawer);
+    $('#pluginMask').addEventListener('click', closePluginDrawer);
+    $('#btnImportPlugin').addEventListener('click', startImportPlugin);
+    $('#btnRefreshPlugins').addEventListener('click', () => { loadPlugins(); toast('已刷新插件列表', 'ok'); });
+    $('#plugPreview').addEventListener('click', (e) => {
+      if (e.target.closest('#btnConfirmImportPlugin')) confirmImportPlugin();
+      else if (e.target.closest('#btnCancelImportPlugin')) { S.pendingPlugin = null; renderPluginPreview(); }
+    });
+    $('#plugList').addEventListener('change', (e) => {
+      const inp = e.target.closest('.plug-toggle');
+      if (inp) togglePlugin(inp.dataset.file, inp.checked);
+    });
+    $('#plugList').addEventListener('click', (e) => {
+      const del = e.target.closest('.plug-del');
+      if (del) deletePlugin(del.dataset.file);
+    });
     $('#btnOpenFolder').addEventListener('click', openFolder);
     $('#btnHistory').addEventListener('click', (e) => { e.stopPropagation(); toggleHistory(); });
     $('#btnHistoryReload').addEventListener('click', (e) => { e.stopPropagation(); loadSessions(); });
@@ -2057,13 +2395,27 @@
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (!$('#historyMenu').hidden) toggleHistory(false);
+        if ($('#pluginDrawer').classList.contains('open')) closePluginDrawer();
+        else if (!$('#historyMenu').hidden) toggleHistory(false);
         else if ($('#drawer').classList.contains('open')) closeDrawer();
       }
     });
 
-    // ① device / iface
+    // ① target device (ADB / SSH) & iface
+    bindSeg($('#segTransport'), (v) => switchTransport(v));
     $('#selDevice').addEventListener('change', (e) => selectDevice(e.target.value));
+    $('#selSSH').addEventListener('change', (e) => selectDevice(e.target.value));
+    $('#btnToggleSSHForm').addEventListener('click', () => {
+      const f = $('#sshForm');
+      f.hidden = !f.hidden;
+      $('#sshTestOut').hidden = true;
+      if (!f.hidden) $('#sshHost').focus();
+    });
+    $('#btnSSHCancel').addEventListener('click', () => { $('#sshForm').hidden = true; $('#sshTestOut').hidden = true; });
+    $('#btnSSHTest').addEventListener('click', testSSHConnection);
+    $('#btnSSHSave').addEventListener('click', saveSSHHost);
+    $('#btnDeleteSSH').addEventListener('click', deleteCurrentSSH);
+    $('#btnPickSSHKey').addEventListener('click', pickSSHKeyFile);
     $('#selIface').addEventListener('change', (e) => {
       S.iface = e.target.value;
       updateStartBtn();
@@ -2284,8 +2636,27 @@
       const p = path.split('?')[0];
       const q = new URLSearchParams(path.split('?')[1] || '');
       switch (p) {
-        case '/api/plugins': return { ok: true, plugins_dir: 'C:\\Users\\demo\\AppData\\Local\\PktPathStudio\\plugins', plugins: [] };
-        case '/api/devices': return { adb_missing: false, devices: [{ serial: 'emulator-5554', model: 'Pixel 8', product: 'shiba', state: 'device', android_ver: '14', kernel: '6.1.157-android14-11', root_mode: 'adbd-root', agent_ready: true }, { serial: 'demo-device-02', model: 'Android Tablet', product: 'tablet', state: 'device', android_ver: '15', kernel: '6.12.0', root_mode: 'su', agent_ready: false }] };
+        case '/api/plugins': return {
+          ok: true,
+          plugins_dir: 'C:\\Users\\demo\\AppData\\Local\\PktPathStudio\\plugins',
+          slots: { sock_used: 1, sock_max: 4, classful_used: 0, classful_max: 2, leaf_used: 1, leaf_max: 2, enabled_count: 1, total_count: 1 },
+          plugins: [{
+            id: 'demo_ext', file: 'demo_ext.json', name: '示例插件：Socket Mark + Netem', version: '1.0',
+            description: '演示运行时加载自定义 BTF 字段与叶子队列能力', enabled: true, sock_fields: 1, qdiscs: 1,
+            sock_field_specs: [{ struct: 'sock', field: 'sk_mark', size: 4, role: 'tag', label: 'sock_mark', summary: '通过内核 BTF 动态读取 struct sock.sk_mark (4B)，为每个样本附加扩展标签 [sock_mark]' }],
+            qdisc_specs: [{ id: 'netem_leaf', name: 'Netem Leaf', kind: 'netem', mode: 'leaf', enqueue_sym: 'netem_enqueue', dequeue_sym: 'netem_dequeue', summary: '追踪自定义叶子队列 NETEM (leaf)：挂钩 netem_enqueue / netem_dequeue，精确测量单包排队驻留耗时' }],
+            capabilities: ['通过内核 BTF 动态读取 struct sock.sk_mark (4B)，为每个样本附加扩展标签 [sock_mark]', '追踪自定义叶子队列 NETEM (leaf)：挂钩 netem_enqueue / netem_dequeue，精确测量单包排队驻留耗时'],
+          }],
+        };
+        case '/api/devices': return {
+          adb_missing: false, ssh_available: true, available_agents: ['android-arm64', 'linux-x86_64'],
+          adb_devices: [{ serial: 'emulator-5554', transport: 'adb', model: 'Pixel 8', product: 'shiba', state: 'device', android_ver: '14', kernel: '6.1.157-android14-11', root_mode: 'adbd-root', agent_ready: true }],
+          ssh_targets: [{ id: 'demo-gw', name: 'Linux Gateway (x86_64)', host: '192.0.2.10', port: 22, user: 'root', use_sudo: true }],
+          devices: [
+            { serial: 'emulator-5554', transport: 'adb', model: 'Pixel 8', product: 'shiba', state: 'device', android_ver: '14', kernel: '6.1.157-android14-11', root_mode: 'adbd-root', agent_ready: true },
+            { serial: 'ssh:demo-gw', transport: 'ssh', model: 'Linux Gateway (x86_64)', product: 'Linux SSH', state: 'device', arch: 'x86_64', kernel: '6.8.0-generic', root_mode: 'root', agent_ready: true, ssh_host: '192.0.2.10', ssh_user: 'root', ssh_port: 22 },
+          ],
+        };
         case '/api/device/prepare': return { ok: true, root_mode: 'adbd-root', kernel: '6.1.157-android14-11', agent_sha256: '9f2c4e1ab3d7' };
         case '/api/device/inspect': return {
           interfaces: [{ name: 'lo', state: 'UNKNOWN', addrs: ['127.0.0.1/8'] }, { name: 'wlan0', state: 'UP', addrs: ['192.0.2.57/24', 'fe80::1/64'] }, { name: 'p2p0', state: 'DOWN', addrs: [] }, { name: 'rmnet_data0', state: 'UP', addrs: ['198.51.100.5/30'] }],

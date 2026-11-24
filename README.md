@@ -8,10 +8,10 @@ It traces individual packets through the Linux egress/TC/qdisc/driver pipeline (
 
 ## PktPath Studio (Windows Desktop Workbench)
 
-**PktPath Studio** (`bin/pktpath-studio.exe`) is a single-file Windows GUI workbench (`CGO_ENABLED=0`, `PE Subsystem = Windows GUI`, **zero black console window flash**) that embeds:
+**PktPath Studio** (`bin/pktpath-studio.exe`) is a single-file Windows GUI workbench (`CGO_ENABLED=0`, `PE Subsystem = Windows GUI`, **zero black console window flash**) supporting **Android (ADB)**, **remote Linux hosts (SSH, `x86_64` & `arm64`)**, and **offline session analysis**. It embeds:
 
-- `pktpath-android-arm64` (device-side eBPF collector, auto-pushed & SHA-256 verified)
-- Offline high-DPI Web UI (opens in your default browser, or native Win32 WebView2 with `--window`)
+- `pktpath-android-arm64` & `pktpath-linux-x86_64` (multi-arch eBPF collectors, auto-matched by remote `uname -m` & SHA-256 verified)
+- Offline high-DPI Web UI with a built-in **Plugin Manager & Capability Inspector** (import `.json` plugins with pre-load capability preview, per-plugin enable/disable toggles, and live kernel BTF/symbol match status)
 - Pure-Go offline reconstruction engine, `.pcapng` exporter, and privacy redactor
 
 ### System ADB Requirement (No Bundled `adb.exe`)
