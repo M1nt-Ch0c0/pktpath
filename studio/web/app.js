@@ -269,13 +269,15 @@
    * ===================================================================== */
   let devLoading = false;
   function switchTransport(mode) {
-    S.transport = mode === 'ssh' ? 'ssh' : 'adb';
+    S.transport = mode === 'ssh' ? 'ssh' : (mode === 'offline' ? 'offline' : 'adb');
     setSeg($('#segTransport'), S.transport);
     $('#paneADB').hidden = S.transport !== 'adb';
     $('#paneSSH').hidden = S.transport !== 'ssh';
+    const po = $('#paneOffline');
+    if (po) po.hidden = S.transport !== 'offline';
     if (S.transport === 'adb' && S.adbMissing && !S.serial) {
-      setPrep('bad', '未检测到系统 adb：请安装 Android Platform-Tools 并加入 PATH（可切换右侧「Linux (SSH)」连接任意 Linux 主机，或直接打开离线历史会话）');
-    } else if (S.transport === 'ssh' && S.prepState === 'bad' && /未检测到系统 adb/.test($('#prepStatus').textContent || '')) {
+      setPrep('bad', '未检测到系统 adb：请安装 Android Platform-Tools 并加入 PATH（可切换「Linux SSH」或「离线会话」，或在「插件中心」关闭 Android 插件）');
+    } else if (S.transport !== 'adb' && S.prepState === 'bad' && /未检测到系统 adb/.test($('#prepStatus').textContent || '')) {
       setPrep('idle');
     }
     renderSSHSelect();
@@ -509,15 +511,15 @@
 
   /* ---- Plugin Manager Drawer & Capability Inspector ---- */
   function openPluginDrawer() {
-    $('#pluginMask').hidden = false;
-    $('#pluginDrawer').classList.add('open');
-    $('#pluginDrawer').setAttribute('aria-hidden', 'false');
-    loadPlugins();
+    if (window.PktPathStudio && typeof window.PktPathStudio.openPluginCenter === 'function') {
+      window.PktPathStudio.openPluginCenter();
+      return;
+    }
   }
   function closePluginDrawer() {
-    $('#pluginMask').hidden = true;
-    $('#pluginDrawer').classList.remove('open');
-    $('#pluginDrawer').setAttribute('aria-hidden', 'true');
+    if (window.PktPathStudio && typeof window.PktPathStudio.openWorkbench === 'function') {
+      window.PktPathStudio.openWorkbench();
+    }
   }
   function pluginLiveMatch(plug) {
     const ins = S.inspect;
@@ -1467,6 +1469,9 @@
     renderCharts();
     renderUidFilter();
     renderTable();
+    if (window.PktPathStudio && typeof window.PktPathStudio._onSessionRendered === 'function') {
+      window.PktPathStudio._onSessionRendered(S.overview, S.sessionId);
+    }
   }
 
   /* ---- KPI strip ---- */
@@ -2748,6 +2753,39 @@
       }
     }
   }
+
+  // Expose safe bridge for plugin-center.js & external UI slot plugins
+  window.PktPathStudio = {
+    api,
+    toast,
+    esc,
+    getState: () => S,
+    switchTransport,
+    openSample,
+    showSession,
+    openFolder,
+    revealPath,
+    showSavedBar,
+    refreshDevices,
+    loadSessions,
+    loadInspect: () => { if (S.serial && S.iface && S.prepState === 'ok') loadInspect(S.serial, S.iface); },
+    reloadCurrentSession: () => { if (S.sessionId) showSession(S.sessionId); },
+    applyCollectorDefaults: (col) => {
+      if (!col) return;
+      if (col.default_scope && $('#selScope')) $('#selScope').value = col.default_scope;
+      if (col.default_sample && $('#segSample')) { setSeg($('#segSample'), col.default_sample); S.sample = col.default_sample; }
+      if (col.default_duration_sec && $('#segDuration')) {
+        S.duration = Number(col.default_duration_sec) || 10;
+        setSeg($('#segDuration'), String(S.duration));
+      }
+      if ($('#chkCapHdr')) $('#chkCapHdr').checked = Number(col.capture_hdr_bytes || 0) > 0;
+      if ($('#chkSendmsg')) $('#chkSendmsg').checked = !!col.profile_sendmsg;
+      if ($('#chkPartial')) $('#chkPartial').checked = !!col.allow_partial;
+      if ($('#chkPlugins')) $('#chkPlugins').checked = col.enable_kernel_exts !== false;
+    },
+    _onSessionRendered: null,
+  };
+
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();

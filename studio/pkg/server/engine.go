@@ -15,6 +15,7 @@ import (
 
 type loadedSession struct {
 	sess     *reconstruct.Session
+	ovObj    *reconstruct.SessionOverview
 	overview json.RawMessage
 	samples  int
 }
@@ -30,7 +31,7 @@ func engineLoad(id, dir string) (*loadedSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &loadedSession{sess: s, overview: raw, samples: n}, nil
+	return &loadedSession{sess: s, ovObj: ov, overview: raw, samples: n}, nil
 }
 
 func marshalOverviewWithPath(ov any, id, dir string) (json.RawMessage, error) {

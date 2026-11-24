@@ -283,18 +283,8 @@ static int parse_qdisc_obj(struct js_cur *c, const char *plugin_id,
         snprintf(qd.name, sizeof(qd.name), "%s Qdisc Plugin", qd.kind);
 
     if (qd.is_leaf) {
-        if (*leaf_slots_used >= 2) {
-            if (err_buf && err_cap)
-                snprintf(err_buf, err_cap, "exceeded max 2 leaf qdisc plugin slots");
-            return -1;
-        }
         qd.slot_idx = (*leaf_slots_used)++;
     } else {
-        if (*cls_slots_used >= 2) {
-            if (err_buf && err_cap)
-                snprintf(err_buf, err_cap, "exceeded max 2 classful qdisc plugin slots");
-            return -1;
-        }
         qd.slot_idx = (*cls_slots_used)++;
     }
     if (reg->num_qdiscs >= DEV_MAX_PLUGIN_QDISCS) {

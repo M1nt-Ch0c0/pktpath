@@ -311,6 +311,9 @@ struct site_plan {
     bool        desired;
     bool        available;
     bool        attached;
+    uint16_t    dyn_patch_enq_site; /* runtime BPF imm patch for PKT_SITE_DYN_ENQ_SENTINEL */
+    uint16_t    dyn_patch_ret_site; /* runtime BPF imm patch for PKT_SITE_DYN_RET_SENTINEL */
+    char        site_name[96];    /* custom display name for cloned dynamic sites */
     char        target_sym[128];  /* override symbol for dynamic plugin slots */
     char        qdisc_kind[32];   /* optional qdisc kind hint for dict.json / topo */
     char        resolved_sym[128];
@@ -367,14 +370,10 @@ static uint8_t default_stage_for_site(uint16_t site_id) {
     case PKT_SITE_TP_XMIT_RET:        return PKT_STAGE_XMIT_RET;
     case PKT_SITE_TP_KFREE_SKB:       return PKT_STAGE_DROP;
     case PKT_SITE_TP_CONSUME_SKB:     return PKT_STAGE_CONSUME;
-    case PKT_SITE_KP_PLUG_CLS0_ENQ:
-    case PKT_SITE_KP_PLUG_CLS1_ENQ:   return PKT_STAGE_CLASSIFY;
-    case PKT_SITE_KP_PLUG_LEAF0_ENQ:
-    case PKT_SITE_KP_PLUG_LEAF1_ENQ:  return PKT_STAGE_QDISC_ENQ;
-    case PKT_SITE_KR_PLUG_LEAF0_ENQ:
-    case PKT_SITE_KR_PLUG_LEAF1_ENQ:  return PKT_STAGE_QDISC_ENQ_RET;
-    case PKT_SITE_KR_PLUG_LEAF0_DEQ:
-    case PKT_SITE_KR_PLUG_LEAF1_DEQ:  return PKT_STAGE_QDISC_DEQ;
+    case PKT_SITE_TMPL_PLUG_CLS_ENQ:  return PKT_STAGE_CLASSIFY;
+    case PKT_SITE_TMPL_PLUG_LEAF_ENQ: return PKT_STAGE_QDISC_ENQ;
+    case PKT_SITE_TMPL_PLUG_LEAF_RET: return PKT_STAGE_QDISC_ENQ_RET;
+    case PKT_SITE_TMPL_PLUG_LEAF_DEQ: return PKT_STAGE_QDISC_DEQ;
     default:                          return 0;
     }
 }
@@ -535,14 +534,19 @@ static void populate_bpf_btf_offsets(const struct probe_plan *plan,
     bo->dev_tx_queues        = r->dev_tx_queues;
     bo->netdev_queue_sz      = r->netdev_queue_sz;
     bo->tcf_res_classid      = r->tcf_res_classid;
+    uint32_t max_slot = 0, valid_mask = 0;
     for (int i = 0; i < plan->plugins.num_sock_fields && i < (int)PKT_MAX_SOCK_PLUGINS; i++) {
         const struct dev_plugin_sock_field *sf = &plan->plugins.sock_fields[i];
         if (sf->resolved && sf->resolved_offset > 0) {
             bo->sock_plugins[i].offset = sf->resolved_offset;
             bo->sock_plugins[i].size   = sf->size;
             bo->sock_plugins[i].role   = sf->role;
+            valid_mask |= (1U << i);
+            max_slot = (uint32_t)(i + 1);
         }
     }
+    bo->sock_plugin_count      = max_slot;
+    bo->sock_plugin_valid_mask = valid_mask;
 }
 
 static const char *site_qdisc_kind(const struct probe_plan *plan, uint16_t site_id) {
@@ -721,49 +725,27 @@ static int build_probe_plan(const struct dev_cli_opts *opts,
         snprintf(ad->missed_source, sizeof(ad->missed_source), "%s", kp_missed_src);
     }
 
-    /* 6. Resolve compiled BPF programs (built-in + bound dynamic plugin slots) */
+    /* 6. Resolve compiled BPF programs (built-in probes + dynamically cloned plugin templates) */
+    int tmpl_cls_idx = -1, tmpl_leaf_enq_idx = -1, tmpl_leaf_ret_idx = -1, tmpl_leaf_deq_idx = -1;
     uint32_t nprogs = (uint32_t)PKT_BPF_PROG_COUNT;
-    for (uint32_t i = 0; i < nprogs && plan->num_sites < DEV_MAX_SITES; i++) {
+    for (uint32_t i = 0; i < nprogs; i++) {
         const struct bpf_prog_img *im = &pkt_bpf_progs[i];
+        if (im->site_id == PKT_SITE_TMPL_PLUG_CLS_ENQ)  { tmpl_cls_idx      = (int)i; continue; }
+        if (im->site_id == PKT_SITE_TMPL_PLUG_LEAF_ENQ) { tmpl_leaf_enq_idx = (int)i; continue; }
+        if (im->site_id == PKT_SITE_TMPL_PLUG_LEAF_RET) { tmpl_leaf_ret_idx = (int)i; continue; }
+        if (im->site_id == PKT_SITE_TMPL_PLUG_LEAF_DEQ) { tmpl_leaf_deq_idx = (int)i; continue; }
+        if (plan->num_sites >= DEV_MAX_SITES) break;
+
         int aidx = adapter_for_site(im->site_id);
+        if (aidx < 0) continue;
         const char *sym_name = im->attach_name;
         const char *qkind_hint = inferred_qdisc_kind_for_site(im->site_id);
         bool desired = true;
 
-        if (aidx < 0) {
-            /* Dynamic qdisc plugin slot: check if a loaded plugin binds this site_id */
-            int matched_q = -1;
-            const char *bound_sym = NULL;
-            for (int q = 0; q < plan->plugins.num_qdiscs; q++) {
-                const struct dev_plugin_qdisc *pq = &plan->plugins.qdiscs[q];
-                if (!pq->is_leaf) {
-                    uint16_t want = (pq->slot_idx == 0) ? PKT_SITE_KP_PLUG_CLS0_ENQ : PKT_SITE_KP_PLUG_CLS1_ENQ;
-                    if (im->site_id == want) { matched_q = q; bound_sym = pq->enqueue_sym; break; }
-                } else {
-                    uint16_t s_enq = (pq->slot_idx == 0) ? PKT_SITE_KP_PLUG_LEAF0_ENQ : PKT_SITE_KP_PLUG_LEAF1_ENQ;
-                    uint16_t s_ret = (pq->slot_idx == 0) ? PKT_SITE_KR_PLUG_LEAF0_ENQ : PKT_SITE_KR_PLUG_LEAF1_ENQ;
-                    uint16_t s_deq = (pq->slot_idx == 0) ? PKT_SITE_KR_PLUG_LEAF0_DEQ : PKT_SITE_KR_PLUG_LEAF1_DEQ;
-                    if (im->site_id == s_enq || im->site_id == s_ret) {
-                        matched_q = q; bound_sym = pq->enqueue_sym; break;
-                    }
-                    if (im->site_id == s_deq) {
-                        matched_q = q; bound_sym = pq->dequeue_sym; break;
-                    }
-                }
-            }
-            if (matched_q < 0 || qdisc_plug_adapt_idx[matched_q] < 0 || !bound_sym || !bound_sym[0])
-                continue; /* Unbound plugin slot: skip completely */
-            aidx = qdisc_plug_adapt_idx[matched_q];
-            sym_name = bound_sym;
-            qkind_hint = plan->plugins.qdiscs[matched_q].kind;
-            desired = (plan->target_ifindex == 0) ||
-                      topo_dev_has_qdisc_kind(topo, plan->target_ifindex, qkind_hint);
-        } else {
-            if (aidx == ADAPT_L1_SENDMSG && !opts->profile_sendmsg) desired = false;
-            if (aidx == ADAPT_L2_PFIFO && !dev_uses_pfifo) desired = false;
-            if (aidx == ADAPT_L2_FIFO && !dev_uses_fifo) desired = false;
-            if (aidx == ADAPT_L2_SFQ && !dev_uses_sfq) desired = false;
-        }
+        if (aidx == ADAPT_L1_SENDMSG && !opts->profile_sendmsg) desired = false;
+        if (aidx == ADAPT_L2_PFIFO && !dev_uses_pfifo) desired = false;
+        if (aidx == ADAPT_L2_FIFO && !dev_uses_fifo) desired = false;
+        if (aidx == ADAPT_L2_SFQ && !dev_uses_sfq) desired = false;
 
         struct site_plan *sp = &plan->sites[plan->num_sites++];
         memset(sp, 0, sizeof(*sp));
@@ -798,6 +780,94 @@ static int build_probe_plan(const struct dev_cli_opts *opts,
                 sp->available = false;
                 snprintf(sp->missing_reason, sizeof(sp->missing_reason),
                          "symbol '%s' absent/inlined", sym_name);
+            }
+        }
+    }
+
+    /* 6b. Dynamically clone BPF template programs for every loaded plugin qdisc (no 2-slot cap!) */
+    uint16_t next_dyn_site = PKT_SITE_DYN_BASE;
+    for (int q = 0; q < plan->plugins.num_qdiscs; q++) {
+        const struct dev_plugin_qdisc *pq = &plan->plugins.qdiscs[q];
+        int aidx = qdisc_plug_adapt_idx[q];
+        if (aidx < 0) continue;
+        bool desired = (plan->target_ifindex == 0) ||
+                       topo_dev_has_qdisc_kind(topo, plan->target_ifindex, pq->kind);
+
+        if (!pq->is_leaf) {
+            if (tmpl_cls_idx < 0 || !pq->enqueue_sym[0] || plan->num_sites >= DEV_MAX_SITES)
+                continue;
+            uint16_t s_enq = next_dyn_site++;
+            struct site_plan *sp = &plan->sites[plan->num_sites++];
+            memset(sp, 0, sizeof(*sp));
+            sp->site_id            = s_enq;
+            sp->prog_idx           = tmpl_cls_idx;
+            sp->adapter_idx        = aidx;
+            sp->stage              = PKT_STAGE_CLASSIFY;
+            sp->prog_fd            = -1;
+            sp->desired            = desired;
+            sp->dyn_patch_enq_site = s_enq;
+            snprintf(sp->site_name, sizeof(sp->site_name), "kp_plug_%s_enq", pq->kind);
+            snprintf(sp->target_sym, sizeof(sp->target_sym), "%s", pq->enqueue_sym);
+            snprintf(sp->qdisc_kind, sizeof(sp->qdisc_kind), "%s", pq->kind);
+
+            int rc = ksym_resolve(kdb, pq->enqueue_sym, sp->resolved_sym, sizeof(sp->resolved_sym));
+            if (rc == 0) {
+                sp->available = true;
+            } else if (rc == -2) {
+                snprintf(sp->missing_reason, sizeof(sp->missing_reason),
+                         "ambiguous ThinLTO symbol '%s'", pq->enqueue_sym);
+            } else {
+                snprintf(sp->missing_reason, sizeof(sp->missing_reason),
+                         "symbol '%s' absent/inlined", pq->enqueue_sym);
+            }
+        } else {
+            if (tmpl_leaf_enq_idx < 0 || tmpl_leaf_ret_idx < 0 || tmpl_leaf_deq_idx < 0)
+                continue;
+            if (!pq->enqueue_sym[0] || !pq->dequeue_sym[0] || plan->num_sites + 3U > DEV_MAX_SITES)
+                continue;
+            uint16_t s_enq = next_dyn_site++;
+            uint16_t s_ret = next_dyn_site++;
+            uint16_t s_deq = next_dyn_site++;
+
+            const struct {
+                uint16_t    sid;
+                int         pidx;
+                uint8_t     stage;
+                uint16_t    patch_enq;
+                uint16_t    patch_ret;
+                const char *sym;
+                const char *suffix;
+            } legs[3] = {
+                {s_enq, tmpl_leaf_enq_idx, PKT_STAGE_QDISC_ENQ,     s_enq, 0,     pq->enqueue_sym, "enq"},
+                {s_ret, tmpl_leaf_ret_idx, PKT_STAGE_QDISC_ENQ_RET, s_enq, s_ret, pq->enqueue_sym, "enq_ret"},
+                {s_deq, tmpl_leaf_deq_idx, PKT_STAGE_QDISC_DEQ,     s_deq, 0,     pq->dequeue_sym, "deq"},
+            };
+
+            for (int leg = 0; leg < 3; leg++) {
+                struct site_plan *sp = &plan->sites[plan->num_sites++];
+                memset(sp, 0, sizeof(*sp));
+                sp->site_id            = legs[leg].sid;
+                sp->prog_idx           = legs[leg].pidx;
+                sp->adapter_idx        = aidx;
+                sp->stage              = legs[leg].stage;
+                sp->prog_fd            = -1;
+                sp->desired            = desired;
+                sp->dyn_patch_enq_site = legs[leg].patch_enq;
+                sp->dyn_patch_ret_site = legs[leg].patch_ret;
+                snprintf(sp->site_name, sizeof(sp->site_name), "plug_%s_%s", pq->kind, legs[leg].suffix);
+                snprintf(sp->target_sym, sizeof(sp->target_sym), "%s", legs[leg].sym);
+                snprintf(sp->qdisc_kind, sizeof(sp->qdisc_kind), "%s", pq->kind);
+
+                int rc = ksym_resolve(kdb, legs[leg].sym, sp->resolved_sym, sizeof(sp->resolved_sym));
+                if (rc == 0) {
+                    sp->available = true;
+                } else if (rc == -2) {
+                    snprintf(sp->missing_reason, sizeof(sp->missing_reason),
+                             "ambiguous ThinLTO symbol '%s'", legs[leg].sym);
+                } else {
+                    snprintf(sp->missing_reason, sizeof(sp->missing_reason),
+                             "symbol '%s' absent/inlined", legs[leg].sym);
+                }
             }
         }
     }
@@ -1612,10 +1682,13 @@ static void transcode_bpf_record(struct recorder_ctx *rec, const uint8_t *raw, u
         tlv_put_u32(out, &off, PKT_TLV_SUM_SKB_MARK, sm->skb_mark);
         tlv_put_u32(out, &off, PKT_TLV_SUM_SKB_PRIORITY, sm->skb_priority);
 
+        bool emitted_tgid = false;
         if (sm->valid_flags & PKT_SUM_F_UID)
             tlv_put_u32(out, &off, PKT_TLV_SUM_UID, sm->uid);
-        if (sm->valid_flags & PKT_SUM_F_TGID)
+        if (sm->valid_flags & PKT_SUM_F_TGID) {
             tlv_put_u32(out, &off, PKT_TLV_SUM_TGID, sm->tgid);
+            emitted_tgid = (sm->tgid != 0);
+        }
         if (sm->valid_flags & PKT_SUM_F_COMM)
             tlv_put(out, &off, PKT_TLV_SUM_COMM, sm->comm, 16);
 
@@ -1625,8 +1698,19 @@ static void transcode_bpf_record(struct recorder_ctx *rec, const uint8_t *raw, u
             tlv_put_u64(out, &off, PKT_TLV_SUM_SKB_CREATE_TS, sm->skb_create_ts);
         if (sm->valid_flags & PKT_SUM_F_PLUGIN_VALS) {
             for (uint32_t pi = 0; pi < PKT_MAX_SOCK_PLUGINS; pi++) {
-                if (sm->plugin_mask & (1U << pi))
+                if (!(sm->plugin_mask & (1U << pi)))
+                    continue;
+                uint8_t role = (pi < (uint32_t)rec->plan.plugins.num_sock_fields)
+                                   ? rec->plan.plugins.sock_fields[pi].role
+                                   : PKT_SOCK_PLUG_TAG;
+                if (role == PKT_SOCK_PLUG_TGID_FALLBACK) {
+                    if (!emitted_tgid && sm->plugin_vals[pi] != 0) {
+                        tlv_put_u32(out, &off, PKT_TLV_SUM_TGID, (uint32_t)sm->plugin_vals[pi]);
+                        emitted_tgid = true;
+                    }
+                } else {
                     tlv_put_u64(out, &off, (uint16_t)(PKT_TLV_SUM_PLUGIN_VAL0 + pi), sm->plugin_vals[pi]);
+                }
             }
         }
 
@@ -1824,7 +1908,7 @@ static int write_manifest_and_dict(struct recorder_ctx *rec) {
         const char *aid = rec->plan.adapters[sp->adapter_idx].adapter_id;
         fprintf(fp, "    {\"site_idx\": %u, \"adapter_id\": ", sp->site_id);
         json_write_escaped(fp, aid);
-        fprintf(fp, ", \"name\": "); json_write_escaped(fp, im->sec_name);
+        fprintf(fp, ", \"name\": "); json_write_escaped(fp, sp->site_name[0] ? sp->site_name : im->sec_name);
         fprintf(fp, ", \"symbol\": "); json_write_escaped(fp, sp->resolved_sym[0] ? sp->resolved_sym : sp->target_sym);
         fprintf(fp, ", \"qdisc_kind\": "); json_write_escaped(fp, sp->qdisc_kind);
         fprintf(fp, ", \"probe_type\": "); json_write_escaped(fp, ptype);
@@ -2378,6 +2462,21 @@ static int load_and_attach_probes(struct recorder_ctx *rec) {
         struct bpf_insn *insns = malloc(code_bytes);
         if (!insns) return -1;
         memcpy(insns, im->insns, code_bytes);
+
+        /* Patch dynamic template site_id sentinels BEFORE map FD relocation */
+        if (sp->dyn_patch_enq_site != 0 || sp->dyn_patch_ret_site != 0) {
+            for (uint32_t k = 0; k < im->insn_cnt; k++) {
+                if (insns[k].code == (BPF_LD | BPF_DW | BPF_IMM))
+                    continue;
+                if (sp->dyn_patch_enq_site != 0 &&
+                    insns[k].imm == (int32_t)PKT_SITE_DYN_ENQ_SENTINEL) {
+                    insns[k].imm = (int32_t)sp->dyn_patch_enq_site;
+                } else if (sp->dyn_patch_ret_site != 0 &&
+                           insns[k].imm == (int32_t)PKT_SITE_DYN_RET_SENTINEL) {
+                    insns[k].imm = (int32_t)sp->dyn_patch_ret_site;
+                }
+            }
+        }
 
         for (uint32_t r = 0; r < im->reloc_cnt; r++) {
             uint32_t ix = im->relocs[r].insn_idx;

@@ -26,7 +26,7 @@ import (
 	"pktpath/studio/pkg/server"
 )
 
-const studioVersion = "1.2.0"
+const studioVersion = "2.0.0"
 
 type instanceInfo struct {
 	PID  int    `json:"pid"`

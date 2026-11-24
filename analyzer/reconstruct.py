@@ -960,7 +960,7 @@ def _extract_attribution(obj: ObjectNode) -> dict[str, Any]:
             val = s.get(k)
             if val is not None and k not in attr:
                 attr[k] = val
-        for slot in range(4):
+        for slot in range(16):
             pv = s.get(f"plugin_val{slot}")
             if pv is not None:
                 attr.setdefault("plugin_vals", {})[slot] = pv

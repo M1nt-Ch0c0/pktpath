@@ -245,7 +245,7 @@ func parsePluginManifest(fileName string, rawBytes []byte, enabled bool) PluginD
 func (s *Server) listPluginsDetailed() ([]PluginDetail, PluginSlots) {
 	st := s.readPluginState()
 	list := []PluginDetail{}
-	slots := PluginSlots{SockMax: 4, ClassfulMax: 2, LeafMax: 2}
+	slots := PluginSlots{SockMax: 16, ClassfulMax: 32, LeafMax: 32}
 
 	ents, err := os.ReadDir(s.pluginsDir)
 	if err != nil {

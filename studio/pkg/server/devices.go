@@ -137,10 +137,13 @@ func (s *Server) availableAgentKeys() []string {
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	adbEnabled := s.kernel == nil || s.kernel.HasTransportKind("adb")
+	sshEnabled := s.kernel == nil || s.kernel.HasTransportKind("ssh")
+
 	adbMissing := s.opts.Runtime.AdbPath == ""
 	devs := []DeviceInfo{}
 	var adbErr string
-	if !adbMissing {
+	if adbEnabled && !adbMissing {
 		list, err := s.ListDevices(r.Context())
 		if err != nil {
 			adbErr = err.Error()
@@ -148,8 +151,12 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 			devs = list
 		}
 	}
-	sshTargets := s.sshStore.List()
-	sshDevs := s.sshDevicesSnapshot()
+	sshTargets := []sshclient.Target{}
+	sshDevs := []DeviceInfo{}
+	if sshEnabled {
+		sshTargets = s.sshStore.List()
+		sshDevs = s.sshDevicesSnapshot()
+	}
 	all := append([]DeviceInfo{}, devs...)
 	all = append(all, sshDevs...)
 
@@ -157,6 +164,8 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		"devices":          all,
 		"adb_devices":      devs,
 		"ssh_targets":      sshTargets,
+		"adb_enabled":      adbEnabled,
+		"ssh_enabled":      sshEnabled,
 		"adb_path":         s.opts.Runtime.AdbPath,
 		"adb_missing":      adbMissing,
 		"adb_error":        adbErr,
@@ -527,7 +536,7 @@ func (s *Server) Inspect(ctx context.Context, serial, dev, scope string, enableP
 		}
 		cmd := adb.ShQuote(s.ssh.RemoteAgentPath(t)) + " inspect --dev " + adb.ShQuote(dev) + " --scope " + adb.ShQuote(scope)
 		if enablePlugins {
-			paths := s.enabledPluginPaths()
+			paths := s.activeKernelPluginFiles()
 			if n, perr := s.ssh.SyncPluginFiles(ctx, t, paths); perr == nil && n > 0 {
 				cmd += " --plugin-dir " + adb.ShQuote(s.ssh.RemotePluginsDir(t))
 			}
@@ -561,7 +570,7 @@ func (s *Server) Inspect(ctx context.Context, serial, dev, scope string, enableP
 	}
 	cmd := adb.RemoteAgent + " inspect --dev " + adb.ShQuote(dev) + " --scope " + adb.ShQuote(scope)
 	if enablePlugins {
-		paths := s.enabledPluginPaths()
+		paths := s.activeKernelPluginFiles()
 		if n, perr := s.adb.SyncPluginFiles(ctx, serial, paths); perr == nil && n > 0 {
 			cmd += " --plugin-dir " + adb.ShQuote(adb.RemotePluginsDir)
 		}

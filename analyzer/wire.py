@@ -226,6 +226,8 @@ TLV_SUM_ENQUEUE_TID = 0x0316
 TLV_SUM_SKB_CREATE_TS = 0x0317
 TLV_SUM_HDR_BYTES = 0x0319
 TLV_SUM_LINKTYPE = 0x031A
+TLV_SUM_PLUGIN_VAL_BASE = 0x0320
+TLV_SUM_PLUGIN_VAL_COUNT = 16
 TLV_SUM_PLUGIN_VAL0 = 0x0320
 TLV_SUM_PLUGIN_VAL1 = 0x0321
 TLV_SUM_PLUGIN_VAL2 = 0x0322
@@ -302,10 +304,10 @@ KNOWN_TLV_SPECS: dict[int, tuple[str, str]] = {
     TLV_SUM_SKB_CREATE_TS: ("skb_create_ts", "u64"),
     TLV_SUM_HDR_BYTES: ("hdr_bytes", "bytes"),
     TLV_SUM_LINKTYPE: ("linktype", "u16"),
-    TLV_SUM_PLUGIN_VAL0: ("plugin_val0", "u64"),
-    TLV_SUM_PLUGIN_VAL1: ("plugin_val1", "u64"),
-    TLV_SUM_PLUGIN_VAL2: ("plugin_val2", "u64"),
-    TLV_SUM_PLUGIN_VAL3: ("plugin_val3", "u64"),
+    **{
+        TLV_SUM_PLUGIN_VAL_BASE + i: (f"plugin_val{i}", "u64")
+        for i in range(TLV_SUM_PLUGIN_VAL_COUNT)
+    },
     # QSTATE
     TLV_QS_QUEUE_GEN: ("queue_gen", "u64"),
     TLV_QS_IFINDEX: ("ifindex", "u32"),

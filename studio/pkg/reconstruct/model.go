@@ -791,7 +791,7 @@ func extractAttribution(obj *ObjectNode) Attribution {
 		if v, ok := sm.Get("skb_create_ts"); ok && a.SkbCreateTs == nil {
 			a.SkbCreateTs = u64p(v)
 		}
-		for slot := 0; slot < 4; slot++ {
+		for slot := 0; slot < 16; slot++ {
 			k := fmt.Sprintf("plugin_val%d", slot)
 			if v, ok := sm.Get(k); ok {
 				if a.PluginVals == nil {

@@ -223,10 +223,12 @@ enum pkt_qual_kind {
 #define PKT_TLV_SUM_SKB_CREATE_TS    0x0317U /* u64 */
 #define PKT_TLV_SUM_HDR_BYTES        0x0319U /* variable bytes */
 #define PKT_TLV_SUM_LINKTYPE         0x031AU /* u16 (1=ETH, 101=RAW_IP) */
-#define PKT_TLV_SUM_PLUGIN_VAL0      0x0320U /* u64: custom sock plugin slot 0 */
-#define PKT_TLV_SUM_PLUGIN_VAL1      0x0321U /* u64: custom sock plugin slot 1 */
-#define PKT_TLV_SUM_PLUGIN_VAL2      0x0322U /* u64: custom sock plugin slot 2 */
-#define PKT_TLV_SUM_PLUGIN_VAL3      0x0323U /* u64: custom sock plugin slot 3 */
+#define PKT_TLV_SUM_PLUGIN_VAL_BASE  0x0320U /* u64: custom sock plugin field i = BASE + i (0..15) */
+#define PKT_TLV_SUM_PLUGIN_VAL_MAX   0x032FU
+#define PKT_TLV_SUM_PLUGIN_VAL0      0x0320U
+#define PKT_TLV_SUM_PLUGIN_VAL1      0x0321U
+#define PKT_TLV_SUM_PLUGIN_VAL2      0x0322U
+#define PKT_TLV_SUM_PLUGIN_VAL3      0x0323U
 
 /* QSTATE (kind = 5) */
 #define PKT_TLV_QS_QUEUE_GEN         0x0401U /* u64 */

@@ -250,7 +250,7 @@ func (s *Server) StartCapture(ctx context.Context, req *CaptureRequest) (*captur
 		}
 		sshTarget = &t
 		if req.EnablePlugins {
-			paths := s.enabledPluginPaths()
+			paths := s.activeKernelPluginFiles()
 			if n, perr := s.ssh.SyncPluginFiles(ctx, t, paths); perr != nil {
 				return nil, fmt.Errorf("sync plugins over ssh: %w", perr)
 			} else if n > 0 {
@@ -260,7 +260,7 @@ func (s *Server) StartCapture(ctx context.Context, req *CaptureRequest) (*captur
 		run, err = s.ssh.StartRecord(ctx, t, id, args)
 	} else {
 		if req.EnablePlugins {
-			paths := s.enabledPluginPaths()
+			paths := s.activeKernelPluginFiles()
 			if n, perr := s.adb.SyncPluginFiles(ctx, req.Serial, paths); perr != nil {
 				return nil, fmt.Errorf("sync plugins: %w", perr)
 			} else if n > 0 {
@@ -464,12 +464,12 @@ func (s *Server) finalize(c *captureState, selfExit bool) {
 		setPhase(phaseParsing)
 		id := s.sess.register(dst)
 		res.SessionID, res.SessionPath = id, dst
-		ov, err := s.sess.overview(id)
+		realID, realDir, ls, err := s.sess.load(id)
 		if err != nil {
 			res.Error = "reconstruct: " + err.Error()
 			return
 		}
-		res.Overview = ov
+		res.Overview = s.enrichOverview(ctx, realID, realDir, ls)
 		res.OK = true
 	})
 }

@@ -12,8 +12,8 @@
  * ========================================================================== */
 
 #define DEV_MAX_CPUS            64
-#define DEV_MAX_SITES           64
-#define DEV_MAX_ADAPTERS        24
+#define DEV_MAX_SITES           192
+#define DEV_MAX_ADAPTERS        64
 #define DEV_MAX_TOPO_DEVICES    256
 #define DEV_MAX_TOPO_QDISCS     1024
 #define DEV_MAX_TOPO_CLASSES    512
@@ -33,9 +33,9 @@ enum dev_scope {
     SCOPE_FWD       = 4,
 };
 
-#define DEV_MAX_PLUGIN_PATHS    8
-#define DEV_MAX_PLUGIN_SOCKS    4
-#define DEV_MAX_PLUGIN_QDISCS   4
+#define DEV_MAX_PLUGIN_PATHS    32
+#define DEV_MAX_PLUGIN_SOCKS    16
+#define DEV_MAX_PLUGIN_QDISCS   32
 
 enum dev_mode {
     MODE_ONESHOT = 0,

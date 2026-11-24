@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"pktpath/studio/pkg/adb"
+	"pktpath/studio/pkg/kernel"
 	"pktpath/studio/pkg/sshclient"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	adb          *adb.Client
 	ssh          *sshclient.Client
 	sshStore     *sshclient.Store
+	kernel       *kernel.Kernel
 	sessionsRoot string
 	pluginsDir   string
 	log          *log.Logger
@@ -101,6 +103,7 @@ func New(opts Options) *Server {
 		quitReqCh:    make(chan struct{}),
 	}
 	s.sess = newSessionStore(root, filepath.Join(opts.AppDir, "opened_sessions.json"))
+	s.initKernel()
 	return s
 }
 
@@ -157,6 +160,9 @@ func (s *Server) Serve(ln net.Listener) error {
 func (s *Server) Shutdown(ctx context.Context) {
 	s.sseStopOnce.Do(func() { close(s.sseStopCh) })
 	s.StopActiveCapture(ctx)
+	if s.kernel != nil {
+		s.kernel.Shutdown()
+	}
 	if s.http != nil {
 		sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
@@ -168,6 +174,16 @@ func (s *Server) Shutdown(ctx context.Context) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/kernel/state", s.handleKernelState)
+	mux.HandleFunc("POST /api/kernel/plugins/toggle", s.handleKernelPluginToggle)
+	mux.HandleFunc("POST /api/kernel/plugins/config", s.handleKernelPluginConfig)
+	mux.HandleFunc("POST /api/kernel/plugins/reset", s.handleKernelPluginReset)
+	mux.HandleFunc("POST /api/kernel/plugins/reload", s.handleKernelPluginReload)
+	mux.HandleFunc("POST /api/kernel/plugins/preview", s.handleKernelPluginPreview)
+	mux.HandleFunc("POST /api/kernel/plugins/install", s.handleKernelPluginInstall)
+	mux.HandleFunc("POST /api/kernel/plugins/uninstall", s.handleKernelPluginUninstall)
+	mux.HandleFunc("POST /api/kernel/export", s.handleKernelExport)
+	mux.HandleFunc("GET /api/kernel/plugin-asset/{id}/{path...}", s.handleKernelPluginAsset)
 	mux.HandleFunc("GET /api/plugins", s.handlePlugins)
 	mux.HandleFunc("POST /api/plugins/preview", s.handlePluginsPreview)
 	mux.HandleFunc("POST /api/plugins/import", s.handlePluginsImport)
@@ -308,16 +324,19 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	snap := s.kernel.Snapshot(s.opts.Version)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"pid":            os.Getpid(),
-		"version":        s.opts.Version,
-		"runtime":        s.opts.Runtime,
-		"adb_missing":    s.opts.Runtime.AdbPath == "",
-		"ssh_available":  s.ssh != nil && s.ssh.Available(),
-		"sessions_root":  s.sessionsRoot,
-		"plugins_dir":    s.pluginsDir,
-		"active_clients": s.activeClients.Load(),
+		"ok":                    true,
+		"pid":                   os.Getpid(),
+		"version":               s.opts.Version,
+		"runtime":               s.opts.Runtime,
+		"adb_missing":           s.opts.Runtime.AdbPath == "",
+		"ssh_available":         s.ssh != nil && s.ssh.Available(),
+		"sessions_root":         s.sessionsRoot,
+		"plugins_dir":           s.pluginsDir,
+		"active_clients":        s.activeClients.Load(),
+		"kernel_plugins_active": snap.ActivePlugins,
+		"kernel_plugins_total":  snap.TotalPlugins,
 	})
 }
 

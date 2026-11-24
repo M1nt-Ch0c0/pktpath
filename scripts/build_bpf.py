@@ -77,15 +77,11 @@ PROBES = [
     ("kr_sfq_deq",         "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_SFQ_DEQ",         None,  "sfq_dequeue"),
     ("kp_tcf_classify",    "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_KP_TCF_CLASSIFY",    None,  "tcf_classify"),
     ("kr_tcf_classify",    "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_TCF_CLASSIFY",    None,  "tcf_classify"),
-    # L2 Runtime Qdisc Plugin Slots (8 — attach target bound dynamically from --plugin JSON)
-    ("kp_plug_cls0_enq",   "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_KP_PLUG_CLS0_ENQ",   None,  ""),
-    ("kp_plug_cls1_enq",   "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_KP_PLUG_CLS1_ENQ",   None,  ""),
-    ("kp_plug_leaf0_enq",  "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_KP_PLUG_LEAF0_ENQ",  None,  ""),
-    ("kr_plug_leaf0_enq",  "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_PLUG_LEAF0_ENQ",  None,  ""),
-    ("kr_plug_leaf0_deq",  "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_PLUG_LEAF0_DEQ",  None,  ""),
-    ("kp_plug_leaf1_enq",  "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_KP_PLUG_LEAF1_ENQ",  None,  ""),
-    ("kr_plug_leaf1_enq",  "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_PLUG_LEAF1_ENQ",  None,  ""),
-    ("kr_plug_leaf1_deq",  "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_KR_PLUG_LEAF1_DEQ",  None,  ""),
+    # L2 Reusable Dynamic Qdisc Probe Templates (4 — cloned & patched per plugin at runtime)
+    ("kp_plug_cls_tmpl",      "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_TMPL_PLUG_CLS_ENQ",  None,  ""),
+    ("kp_plug_leaf_enq_tmpl", "PKT_BPF_PROG_TYPE_KPROBE",     0, 2, "PKT_SITE_TMPL_PLUG_LEAF_ENQ", None,  ""),
+    ("kr_plug_leaf_enq_tmpl", "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_TMPL_PLUG_LEAF_RET", None,  ""),
+    ("kr_plug_leaf_deq_tmpl", "PKT_BPF_PROG_TYPE_KPROBE",     1, 2, "PKT_SITE_TMPL_PLUG_LEAF_DEQ", None,  ""),
 ]
 
 

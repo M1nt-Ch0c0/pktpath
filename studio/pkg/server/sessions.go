@@ -333,18 +333,18 @@ func (s *Server) handleSessionsOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := s.sess.register(p)
-	_, _, ls, err := s.sess.load(id)
+	realID, realDir, ls, err := s.sess.load(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "reconstruct failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
-		"session_id":   id,
-		"id":           id,
-		"session_path": p,
-		"path":         p,
-		"overview":     ls.overview,
+		"session_id":   realID,
+		"id":           realID,
+		"session_path": realDir,
+		"path":         realDir,
+		"overview":     s.enrichOverview(r.Context(), realID, realDir, ls),
 	})
 }
 
@@ -456,7 +456,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing id query parameter")
 		return
 	}
-	ov, err := s.sess.overview(id)
+	realID, dir, ls, err := s.sess.load(id)
 	if err != nil {
 		code := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "not found") {
@@ -465,7 +465,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ov)
+	writeJSON(w, http.StatusOK, s.enrichOverview(r.Context(), realID, dir, ls))
 }
 
 func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {

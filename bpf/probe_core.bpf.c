@@ -344,61 +344,38 @@ IN void emit_quality(struct bpf_ctrl_cfg *c, uint16_t site, uint64_t ts_ns,
 
 /* ==================== 6. L1 Socket Ownership & Pluggable Sock-Field Extensions ==================== */
 
-IN int read_sock_plugin_val(uint64_t sk, const struct bpf_sock_field_spec *sp, uint64_t *out) {
-    if (!sp || !sp->offset || sp->role == PKT_SOCK_PLUG_NONE)
-        return 0;
-    uint64_t v = 0;
-    uint8_t sz = sp->size;
-    if (sz == 1U) {
-        uint8_t b = 0;
-        if (probe_read_k(&b, 1, (const void *)(sk + sp->offset)) != 0)
-            return 0;
-        v = b;
-    } else if (sz == 2U) {
-        uint16_t h = 0;
-        if (probe_read_k(&h, 2, (const void *)(sk + sp->offset)) != 0)
-            return 0;
-        v = h;
-    } else if (sz == 4U) {
-        uint32_t w = 0;
-        if (probe_read_k(&w, 4, (const void *)(sk + sp->offset)) != 0)
-            return 0;
-        v = w;
-    } else {
-        if (probe_read_k(&v, 8, (const void *)(sk + sp->offset)) != 0)
-            return 0;
-    }
-    *out = v;
-    return 1;
-}
-
-IN void apply_sock_plugin_slot(uint64_t sk, const struct bpf_btf_offsets *off,
-                               uint32_t slot, uint32_t *tgid_out,
-                               uint64_t *vals_out, uint32_t *mask_out) {
-    const struct bpf_sock_field_spec *sp = &off->sock_plugins[slot];
-    uint64_t v = 0;
-    if (!read_sock_plugin_val(sk, sp, &v))
+IN void populate_sock_plugins_raw(uint64_t sk, const struct bpf_btf_offsets *off,
+                                  uint32_t *tgid_io, uint64_t *vals_out, uint32_t *mask_io) {
+    (void)tgid_io;
+    if (!off || !sk)
         return;
-    if (sp->role == PKT_SOCK_PLUG_TGID_FALLBACK) {
-        if (v && !(*tgid_out))
-            *tgid_out = (uint32_t)v;
-    } else if (sp->role == PKT_SOCK_PLUG_TAG) {
-        vals_out[slot] = v;
-        *mask_out |= (1U << slot);
+    uint32_t n = off->sock_plugin_count;
+    if (n > PKT_MAX_SOCK_PLUGINS)
+        n = PKT_MAX_SOCK_PLUGINS;
+    if (n == 0U)
+        return;
+#pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < PKT_MAX_SOCK_PLUGINS; i++) {
+        if (i >= n)
+            break;
+        uint32_t foff = off->sock_plugins[i].offset;
+        uint32_t fsz  = off->sock_plugins[i].size;
+        uint64_t v = 0;
+        probe_read_k(&v, 8, (const void *)(sk + (uint64_t)foff));
+        uint32_t sh = ((8U - (fsz & 7U)) & 7U) << 3;
+        vals_out[i] = (v << sh) >> sh;
     }
+    *mask_io |= off->sock_plugin_valid_mask;
 }
 
 IN void populate_sock_plugins(uint64_t sk, const struct bpf_ctrl_cfg *c,
                               const struct bpf_btf_offsets *off,
                               struct bpf_sock_owner *val) {
-    if (!(c->flags & PKT_CTRL_F_SOCK_PLUGINS) || !off)
+    if (!(c->flags & PKT_CTRL_F_SOCK_PLUGINS) || !off || !sk)
         return;
     uint32_t p_tgid = val->plugin_tgid;
     uint32_t p_mask = val->plugin_mask;
-    apply_sock_plugin_slot(sk, off, 0, &p_tgid, val->plugin_vals, &p_mask);
-    apply_sock_plugin_slot(sk, off, 1, &p_tgid, val->plugin_vals, &p_mask);
-    apply_sock_plugin_slot(sk, off, 2, &p_tgid, val->plugin_vals, &p_mask);
-    apply_sock_plugin_slot(sk, off, 3, &p_tgid, val->plugin_vals, &p_mask);
+    populate_sock_plugins_raw(sk, off, &p_tgid, val->plugin_vals, &p_mask);
     val->plugin_tgid = p_tgid;
     val->plugin_mask = p_mask;
     if (p_tgid || p_mask)
@@ -976,10 +953,7 @@ IN void emit_summary_from_parsed(struct bpf_ctrl_cfg *c, const struct bpf_btf_of
                     }
                     if (so->plugin_mask) {
                         sm->plugin_mask = so->plugin_mask;
-                        sm->plugin_vals[0] = so->plugin_vals[0];
-                        sm->plugin_vals[1] = so->plugin_vals[1];
-                        sm->plugin_vals[2] = so->plugin_vals[2];
-                        sm->plugin_vals[3] = so->plugin_vals[3];
+                        __builtin_memcpy(sm->plugin_vals, so->plugin_vals, sizeof(sm->plugin_vals));
                         vflags |= PKT_SUM_F_PLUGIN_VALS;
                     }
                 }
@@ -998,10 +972,7 @@ IN void emit_summary_from_parsed(struct bpf_ctrl_cfg *c, const struct bpf_btf_of
                 populate_sock_plugins(p->sk_ptr, c, off, &nv);
                 if (nv.plugin_mask) {
                     sm->plugin_mask = nv.plugin_mask;
-                    sm->plugin_vals[0] = nv.plugin_vals[0];
-                    sm->plugin_vals[1] = nv.plugin_vals[1];
-                    sm->plugin_vals[2] = nv.plugin_vals[2];
-                    sm->plugin_vals[3] = nv.plugin_vals[3];
+                    __builtin_memcpy(sm->plugin_vals, nv.plugin_vals, sizeof(sm->plugin_vals));
                     vflags |= PKT_SUM_F_PLUGIN_VALS;
                 }
                 map_update(&socks, &p->sk_ptr, &nv, BPF_ANY_FLAG);
@@ -1009,10 +980,7 @@ IN void emit_summary_from_parsed(struct bpf_ctrl_cfg *c, const struct bpf_btf_of
                 /* Direct plugin fallback in softirq when sock_owner_map missed */
                 uint32_t p_tgid = 0;
                 uint32_t p_mask = 0;
-                apply_sock_plugin_slot(p->sk_ptr, off, 0, &p_tgid, sm->plugin_vals, &p_mask);
-                apply_sock_plugin_slot(p->sk_ptr, off, 1, &p_tgid, sm->plugin_vals, &p_mask);
-                apply_sock_plugin_slot(p->sk_ptr, off, 2, &p_tgid, sm->plugin_vals, &p_mask);
-                apply_sock_plugin_slot(p->sk_ptr, off, 3, &p_tgid, sm->plugin_vals, &p_mask);
+                populate_sock_plugins_raw(p->sk_ptr, off, &p_tgid, sm->plugin_vals, &p_mask);
                 if (p_tgid && !sm->tgid) {
                     sm->tgid = p_tgid;
                     vflags |= PKT_SUM_F_TGID;
@@ -1524,45 +1492,25 @@ int prog_kp_htb_enq(uint64_t *regs) {
     return handle_qdisc_enq(regs, PKT_SITE_KP_HTB_ENQ, 0);
 }
 
-/* Dynamic runtime qdisc plugin slots (attach symbol configured via --plugin JSON) */
-SEC("kp_plug_cls0_enq")
-int prog_kp_plug_cls0_enq(uint64_t *regs) {
-    return handle_qdisc_enq(regs, PKT_SITE_KP_PLUG_CLS0_ENQ, 0);
+/* Reusable dynamic qdisc probe templates (cloned & site-ID patched at runtime for unlimited plugins) */
+SEC("kp_plug_cls_tmpl")
+int prog_kp_plug_cls_tmpl(uint64_t *regs) {
+    return handle_qdisc_enq(regs, PKT_SITE_DYN_ENQ_SENTINEL, 0);
 }
 
-SEC("kp_plug_cls1_enq")
-int prog_kp_plug_cls1_enq(uint64_t *regs) {
-    return handle_qdisc_enq(regs, PKT_SITE_KP_PLUG_CLS1_ENQ, 0);
+SEC("kp_plug_leaf_enq_tmpl")
+int prog_kp_plug_leaf_enq_tmpl(uint64_t *regs) {
+    return handle_qdisc_enq(regs, PKT_SITE_DYN_ENQ_SENTINEL, 1);
 }
 
-SEC("kp_plug_leaf0_enq")
-int prog_kp_plug_leaf0_enq(uint64_t *regs) {
-    return handle_qdisc_enq(regs, PKT_SITE_KP_PLUG_LEAF0_ENQ, 1);
+SEC("kr_plug_leaf_enq_tmpl")
+int prog_kr_plug_leaf_enq_tmpl(uint64_t *regs) {
+    return handle_qdisc_enq_ret(regs, PKT_SITE_DYN_ENQ_SENTINEL, PKT_SITE_DYN_RET_SENTINEL);
 }
 
-SEC("kr_plug_leaf0_enq")
-int prog_kr_plug_leaf0_enq(uint64_t *regs) {
-    return handle_qdisc_enq_ret(regs, PKT_SITE_KP_PLUG_LEAF0_ENQ, PKT_SITE_KR_PLUG_LEAF0_ENQ);
-}
-
-SEC("kr_plug_leaf0_deq")
-int prog_kr_plug_leaf0_deq(uint64_t *regs) {
-    return handle_qdisc_deq_ret(regs, PKT_SITE_KR_PLUG_LEAF0_DEQ, 0);
-}
-
-SEC("kp_plug_leaf1_enq")
-int prog_kp_plug_leaf1_enq(uint64_t *regs) {
-    return handle_qdisc_enq(regs, PKT_SITE_KP_PLUG_LEAF1_ENQ, 1);
-}
-
-SEC("kr_plug_leaf1_enq")
-int prog_kr_plug_leaf1_enq(uint64_t *regs) {
-    return handle_qdisc_enq_ret(regs, PKT_SITE_KP_PLUG_LEAF1_ENQ, PKT_SITE_KR_PLUG_LEAF1_ENQ);
-}
-
-SEC("kr_plug_leaf1_deq")
-int prog_kr_plug_leaf1_deq(uint64_t *regs) {
-    return handle_qdisc_deq_ret(regs, PKT_SITE_KR_PLUG_LEAF1_DEQ, 0);
+SEC("kr_plug_leaf_deq_tmpl")
+int prog_kr_plug_leaf_deq_tmpl(uint64_t *regs) {
+    return handle_qdisc_deq_ret(regs, PKT_SITE_DYN_ENQ_SENTINEL, 0);
 }
 
 SEC("kp_fq_codel_enq")

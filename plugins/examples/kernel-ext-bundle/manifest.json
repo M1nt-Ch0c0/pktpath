@@ -1,0 +1,47 @@
+{
+  "id": "example.kernel.multi-qdisc",
+  "name": "多队列动态内核扩展包 (NetEm + TBF + FQ + sk_mark)",
+  "version": "2.0.0",
+  "author": "PktPath Community",
+  "description": "演示 PktPath v2.0 动态 BPF 模板克隆与内核 BTF 扩展：单次采集同时挂钩 3 种自定义叶子队列 (netem / tbf / fq) 并读取 struct sock.sk_mark，完全突破旧版 2 槽位上限。",
+  "category": "collector",
+  "icon": "🧬",
+  "tags": ["btf", "netem", "tbf", "fq", "sk_mark"],
+  "kernel_extensions": {
+    "sock_fields": [
+      {
+        "struct": "sock",
+        "field": "sk_mark",
+        "size": 4,
+        "role": "tag",
+        "label": "sock_mark"
+      }
+    ],
+    "qdiscs": [
+      {
+        "id": "ext_netem",
+        "name": "NetEm Delay/Loss Emulator",
+        "kind": "netem",
+        "mode": "leaf",
+        "enqueue_sym": "netem_enqueue",
+        "dequeue_sym": "netem_dequeue"
+      },
+      {
+        "id": "ext_tbf",
+        "name": "TBF Token Bucket Filter",
+        "kind": "tbf",
+        "mode": "leaf",
+        "enqueue_sym": "tbf_enqueue",
+        "dequeue_sym": "tbf_dequeue"
+      },
+      {
+        "id": "ext_fq",
+        "name": "FQ Fair Queue Pacing",
+        "kind": "fq",
+        "mode": "leaf",
+        "enqueue_sym": "fq_enqueue",
+        "dequeue_sym": "fq_dequeue"
+      }
+    ]
+  }
+}

@@ -204,11 +204,23 @@ const (
 	TLVSumEnqueueTid  uint16 = 0x0316
 	TLVSumSkbCreateTs uint16 = 0x0317
 	TLVSumHdrBytes    uint16 = 0x0319
-	TLVSumLinktype    uint16 = 0x031A
-	TLVSumPluginVal0  uint16 = 0x0320
-	TLVSumPluginVal1  uint16 = 0x0321
-	TLVSumPluginVal2  uint16 = 0x0322
-	TLVSumPluginVal3  uint16 = 0x0323
+	TLVSumLinktype     uint16 = 0x031A
+	TLVSumPluginVal0   uint16 = 0x0320
+	TLVSumPluginVal1   uint16 = 0x0321
+	TLVSumPluginVal2   uint16 = 0x0322
+	TLVSumPluginVal3   uint16 = 0x0323
+	TLVSumPluginVal4   uint16 = 0x0324
+	TLVSumPluginVal5   uint16 = 0x0325
+	TLVSumPluginVal6   uint16 = 0x0326
+	TLVSumPluginVal7   uint16 = 0x0327
+	TLVSumPluginVal8   uint16 = 0x0328
+	TLVSumPluginVal9   uint16 = 0x0329
+	TLVSumPluginVal10  uint16 = 0x032A
+	TLVSumPluginVal11  uint16 = 0x032B
+	TLVSumPluginVal12  uint16 = 0x032C
+	TLVSumPluginVal13  uint16 = 0x032D
+	TLVSumPluginVal14  uint16 = 0x032E
+	TLVSumPluginVal15  uint16 = 0x032F
 
 	TLVQSQueueGen uint16 = 0x0401
 	TLVQSIfindex  uint16 = 0x0402
@@ -300,6 +312,18 @@ var knownTLVs = map[uint16]tlvSpec{
 	TLVSumPluginVal1:  {"plugin_val1", codecU64},
 	TLVSumPluginVal2:  {"plugin_val2", codecU64},
 	TLVSumPluginVal3:  {"plugin_val3", codecU64},
+	TLVSumPluginVal4:  {"plugin_val4", codecU64},
+	TLVSumPluginVal5:  {"plugin_val5", codecU64},
+	TLVSumPluginVal6:  {"plugin_val6", codecU64},
+	TLVSumPluginVal7:  {"plugin_val7", codecU64},
+	TLVSumPluginVal8:  {"plugin_val8", codecU64},
+	TLVSumPluginVal9:  {"plugin_val9", codecU64},
+	TLVSumPluginVal10: {"plugin_val10", codecU64},
+	TLVSumPluginVal11: {"plugin_val11", codecU64},
+	TLVSumPluginVal12: {"plugin_val12", codecU64},
+	TLVSumPluginVal13: {"plugin_val13", codecU64},
+	TLVSumPluginVal14: {"plugin_val14", codecU64},
+	TLVSumPluginVal15: {"plugin_val15", codecU64},
 
 	TLVQSQueueGen: {"queue_gen", codecU64},
 	TLVQSIfindex:  {"ifindex", codecU32},

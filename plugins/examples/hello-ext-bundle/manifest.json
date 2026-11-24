@@ -1,0 +1,66 @@
+{
+  "id": "example.sla-auditor",
+  "name": "SLA 时延达标审计外部插件包",
+  "version": "2.0.0",
+  "author": "PktPath Community",
+  "description": "全能外部插件示例：通过单个 .pktplugin/.zip 扩展包同时向微内核注册【可视化配置表单 + 外部后分析器 + 自定义报告导出器 + 工作台 UI 插槽卡片】，无需修改或重新编译 PktPath Studio。",
+  "category": "external",
+  "icon": "🎯",
+  "tags": ["sla", "analyzer", "exporter", "ui-slot", "example"],
+  "config_schema": {
+    "title": "SLA 达标审计配置",
+    "description": "配置单包队列驻留 SLA 预算阈值，保存后立即影响后分析卡片与导出报告。",
+    "fields": [
+      {
+        "key": "latency_budget_ms",
+        "label": "单包队列驻留 SLA 预算上限",
+        "description": "排队驻留低于此阈值的样本计为达标。",
+        "type": "number",
+        "default": 5,
+        "min": 0.1,
+        "max": 1000,
+        "step": 0.5,
+        "unit": "ms"
+      },
+      {
+        "key": "report_title",
+        "label": "自定义导出报告标题",
+        "type": "string",
+        "default": "PktPath SLA 达标审计报告"
+      }
+    ]
+  },
+  "entrypoint": {
+    "command": ["python", "hook.py"]
+  },
+  "analyzers": [
+    {
+      "id": "example.sla-auditor.analyze",
+      "name": "SLA 达标审计分析器",
+      "description": "统计所有样本相对于 SLA 预算的达标率并定位违约样本",
+      "priority": 60
+    }
+  ],
+  "exporters": [
+    {
+      "id": "example.sla-auditor.export-md",
+      "name": "SLA 审计报告导出器",
+      "button_label": "导出 SLA 报告",
+      "icon": "🎯",
+      "description": "由外部插件生成的 SLA 达标率与违约清单 Markdown 报告",
+      "default_ext": ".md",
+      "file_filter": "Markdown Report (*.md)|*.md|All Files (*.*)|*.*",
+      "priority": 60
+    }
+  ],
+  "ui_slots": [
+    {
+      "id": "example.sla-auditor.banner",
+      "slot": "canvas.banner",
+      "title": "SLA 实时进度条",
+      "script": "ui/widget.js",
+      "style": "ui/widget.css",
+      "order": 50
+    }
+  ]
+}

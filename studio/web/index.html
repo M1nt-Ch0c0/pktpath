@@ -24,9 +24,17 @@
       </svg>
       <div class="brand-text">
         <span class="brand-name">PktPath Studio</span>
-        <span class="brand-sub">单包路径跟踪工作台</span>
+        <span class="brand-sub">v2.0 · 全插件微内核工作台</span>
       </div>
     </div>
+
+    <nav class="main-nav" id="mainNav" role="tablist" aria-label="主视图切换">
+      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">📊 分析工作台</button>
+      <button class="main-nav-tab" data-view="plugins" id="btnOpenPlugins" role="tab" aria-selected="false">
+        🧩 插件中心
+        <span class="badge badge-ok" id="navPluginCount">0/0</span>
+      </button>
+    </nav>
 
     <div class="appbar-center">
       <div class="device-pill" id="devicePill" title="当前设备">
@@ -40,10 +48,6 @@
     </div>
 
     <div class="appbar-actions">
-      <button class="btn btn-ghost" id="btnOpenPlugins" title="加载 / 管理自定义 JSON 插件并查看能力清单">
-        🔌 插件管理
-        <span class="badge badge-muted" id="navPluginCount">0</span>
-      </button>
       <button class="btn btn-ghost" id="btnOpenFolder" title="选择本地 pktpath 会话目录 (含 manifest.json / block_*.pktb)">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
         打开历史会话文件夹
@@ -70,15 +74,16 @@
     </div>
   </header>
 
-  <div class="layout">
+  <div class="layout" id="workbenchView">
     <!-- ===================== Left Control Rail ===================== -->
     <aside class="rail" id="rail">
       <!-- ① target device & interface -->
       <section class="card step">
-        <div class="step-head"><span class="step-no">①</span><h2>选择目标设备与网卡</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
+        <div class="step-head"><span class="step-no">①</span><h2>选择目标源与设备</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
         <div class="seg target-tabs" id="segTransport" role="radiogroup">
-          <button data-v="adb" class="active">Android (ADB)</button>
-          <button data-v="ssh">Linux (SSH)</button>
+          <button data-v="adb" class="active">📱 Android</button>
+          <button data-v="ssh">🐧 Linux SSH</button>
+          <button data-v="offline">📂 离线会话</button>
         </div>
         <div id="paneADB">
           <label class="field">
@@ -116,6 +121,13 @@
               <button type="button" class="btn btn-primary btn-sm" id="btnSSHSave">保存并连接</button>
               <button type="button" class="link-btn" id="btnSSHCancel">取消</button>
             </div>
+          </div>
+        </div>
+        <div id="paneOffline" class="offline-pane" hidden>
+          <p class="muted" style="margin:6px 0 8px;font-size:12px">无需连接任何设备，直接载入本地或他人分享的会话目录进行分析、运行后分析插件和导出报告。</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button type="button" class="btn btn-primary btn-sm" id="btnOfflinePick">📂 选择会话目录…</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnOfflineLatest">⏱ 打开最近一次</button>
           </div>
         </div>
         <div class="prep-status" id="prepStatus" hidden></div>
@@ -263,7 +275,8 @@
           </button>
         </div>
       </section>
-      <div class="rail-foot muted">数据全部保存在本机 · 设备端临时文件采集后自动清理</div>
+      <div id="slotSidebarExtra" class="ui-slot-host" data-slot="sidebar.extra"></div>
+      <div class="rail-foot muted">全插件微内核架构 · 数据全部保存在本机</div>
     </aside>
 
     <!-- ===================== Right Diagnostic Canvas ===================== -->
@@ -278,11 +291,14 @@
         </svg>
         <h1>看清每一个包在内核里排了多久队</h1>
         <ol class="steps-guide">
-          <li><b>①</b> 左侧选择目标设备（支持 <b>Android ADB</b> 或 <b>Linux SSH</b> 主机，自动匹配架构并下发采集器）</li>
-          <li><b>②</b> 点击顶栏 <b>「🔌 插件管理」</b> 可随时导入外部 JSON 插件，查看其提供的 BTF 字段与自定义队列能力</li>
-          <li><b>③</b> 点击 <b>「开始一键采集」</b>，复现问题后 <b>「停止并拉回分析」</b></li>
+          <li><b>①</b> <b>一切皆插件</b>：Android ADB、Linux SSH、离线浏览、BTF 内核扩展、异常雷达与导出器均由微内核按需驱动</li>
+          <li><b>②</b> 点击顶栏 <b>「🧩 插件中心」</b> 可热启停任意模块、可视化配置内核字段/自定义队列，或安装外部 <code>.pktplugin/.zip</code> 扩展包</li>
+          <li><b>③</b> 左侧选择任意目标（不限设备类型）一键采集，或直接打开离线会话目录开始分析</li>
         </ol>
-        <p class="muted">也可以通过顶栏 <b>「打开历史会话文件夹」</b> 或 <b>「历史记录」</b> 浏览以前的采集结果。</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="btnEmptyOpenPlugins">🧩 打开插件中心</button>
+          <button class="btn btn-ghost" id="btnEmptyOpenFolder">📂 打开本地离线会话</button>
+        </div>
       </div>
 
       <div class="session" id="sessionView" hidden>
@@ -292,15 +308,11 @@
             <div class="session-meta" id="sessMeta"></div>
           </div>
           <span class="spacer"></span>
-          <button class="btn btn-ghost btn-sm" id="btnRevealSession" title="在资源管理器中打开当前会话目录">📂 打开会话目录</button>
-          <button class="btn btn-ghost btn-sm" id="btnExportPcap" title="另存整个会话的包头为 tcpdump / Wireshark 可读 .pcapng 文件">
-            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
-            导出 tcpdump / Wireshark (.pcapng)
-          </button>
-          <button class="btn btn-ghost btn-sm" id="btnExportRedact" title="IP / 端口 / UID 匿名化后另存会话，可安全外发">
-            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
-            导出脱敏包
-          </button>
+          <div id="slotWorkbenchToolbar" class="ui-slot-inline" data-slot="workbench.toolbar"></div>
+          <button class="btn btn-ghost btn-sm" id="btnRevealSession" title="在资源管理器中打开当前会话目录">📂 目录</button>
+          <div id="dynamicExporters" class="exporter-bar"></div>
+          <button class="btn btn-ghost btn-sm" id="btnExportPcap" hidden>导出 .pcapng</button>
+          <button class="btn btn-ghost btn-sm" id="btnExportRedact" hidden>导出脱敏包</button>
         </div>
 
         <div class="saved-bar" id="savedBar" hidden>
@@ -315,6 +327,10 @@
             <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
         </div>
+
+        <!-- Plugin Insights & Dynamic UI Slot: canvas.banner -->
+        <div id="pluginInsightsBar" class="insights-bar" hidden></div>
+        <div id="slotCanvasBanner" class="ui-slot-host" data-slot="canvas.banner"></div>
 
         <!-- KPI strip -->
         <div class="kpis" id="kpis"></div>
@@ -414,57 +430,71 @@
       </button>
     </div>
     <div class="drawer-body" id="drwBody"></div>
+    <div id="slotSampleExtra" class="ui-slot-host" data-slot="sample.extra" style="padding:0 18px 14px"></div>
   </aside>
 
-  <!-- ===================== Plugin Manager Drawer ===================== -->
-  <div class="drawer-mask plugin-mask" id="pluginMask" hidden></div>
-  <aside class="drawer plugin-drawer" id="pluginDrawer" aria-hidden="true">
-    <div class="drawer-head">
-      <div>
-        <h2>🔌 插件管理与能力中心</h2>
-        <div class="drawer-sub">
-          <span class="muted" id="plugDirHint" style="font-family:var(--mono);font-size:11px">加载中…</span>
+  <!-- ===================== Full-Page Plugin Center (v2.0 DSH Microkernel) ===================== -->
+  <section class="plugin-center" id="pluginCenterView" hidden>
+    <div class="pc-topbar">
+      <div class="pc-top-left">
+        <div class="pc-title-row">
+          <h2>🧩 插件中心 · 一切皆插件</h2>
+          <span class="badge badge-ok" id="pcSummaryBadge">0 / 0 已启用</span>
+          <span class="badge badge-muted" id="pcKernelExtBadge">内核扩展: 0 字段 · 0 队列</span>
+        </div>
+        <div class="pc-cats" id="pcCatBar">
+          <button class="pc-cat active" data-cat="all">全部</button>
+          <button class="pc-cat" data-cat="transport">🔌 连接器</button>
+          <button class="pc-cat" data-cat="collector">⚡ 采集与内核</button>
+          <button class="pc-cat" data-cat="analyzer">📡 后分析</button>
+          <button class="pc-cat" data-cat="exporter">📤 导出器</button>
+          <button class="pc-cat" data-cat="ui">🎨 界面与主题</button>
+          <button class="pc-cat" data-cat="external">🧩 外部扩展</button>
         </div>
       </div>
-      <span class="spacer"></span>
-      <button class="btn btn-ghost btn-sm" id="btnRevealPlugins" title="在资源管理器中打开本地插件目录">📂 打开目录</button>
-      <button class="btn btn-ghost btn-sm" id="btnRefreshPlugins">刷新</button>
-      <button class="icon-btn" id="plugClose" title="关闭 (Esc)" aria-label="关闭">
-        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-    <div class="drawer-body">
-      <div class="plug-toolbar">
-        <button class="btn btn-primary btn-sm" id="btnImportPlugin">＋ 加载 / 导入插件 (.json)</button>
-        <span class="spacer"></span>
-        <div class="plug-slots" id="plugSlots"></div>
+      <div class="pc-top-right">
+        <div class="search pc-search">
+          <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input type="text" id="pcSearch" placeholder="搜索插件名 / 能力 / 标签…">
+        </div>
+        <button class="btn btn-primary btn-sm" id="pcBtnInstallFile">＋ 安装插件包 (.zip / .pktplugin / .json)</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnInstallDir">📁 从目录安装</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnRevealDir" title="在资源管理器中打开插件目录">📂 插件目录</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnRefresh">刷新</button>
       </div>
-
-      <div class="plug-preview" id="plugPreview" hidden></div>
-
-      <div class="section-title">已安装插件与能力清单</div>
-      <div class="plug-list" id="plugList"><div class="empty-mini">尚未加载任何外部插件</div></div>
-
-      <details class="adv plug-schema">
-        <summary>插件 JSON 编写说明（零重编 C / eBPF）</summary>
-        <p class="muted" style="margin:6px 0 0;font-size:12px">
-          核心框架 100% 为纯上游 Linux 实现。只需导入一个声明式 <code>.json</code> 文件，即可在运行时动态解析内核 <code>/sys/kernel/btf/vmlinux</code> 中的自定义 <code>struct sock</code> 字段，或挂钩内核中任意第三方 TC 队列函数：
-        </p>
-        <pre>{
-  "name": "示例：Socket 标签 + 自定义队列",
-  "version": "1.0",
-  "description": "提取 sk_mark 并测量 netem 叶子队列驻留耗时",
-  "sock_fields": [
-    { "struct": "sock", "field": "sk_mark", "size": 4, "role": "tag", "label": "sock_mark" }
-  ],
-  "qdiscs": [
-    { "id": "netem_leaf", "name": "Netem Leaf", "kind": "netem", "mode": "leaf",
-      "enqueue_sym": "netem_enqueue", "dequeue_sym": "netem_dequeue" }
-  ]
-}</pre>
-      </details>
     </div>
-  </aside>
+
+    <div class="pc-body">
+      <aside class="pc-master" id="pcList"></aside>
+      <main class="pc-detail" id="pcDetail">
+        <div class="empty-mini" style="padding:48px">请从左侧选择一个插件查看能力清单并进行图形化配置</div>
+      </main>
+    </div>
+  </section>
+
+  <!-- ===================== External Plugin Capability Preview Modal ===================== -->
+  <div class="modal-mask" id="installModal" hidden>
+    <div class="modal-card card">
+      <div class="modal-head">
+        <h3 id="instTitle">📦 安装外部插件 — 能力预览</h3>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="instClose" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="instBody"></div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="instCancel">取消</button>
+        <button class="btn btn-primary" id="instConfirm">确认安装并立即启用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legacy hidden placeholders kept for zero-breakage compatibility -->
+  <div id="pluginMask" hidden></div>
+  <div id="pluginDrawer" hidden>
+    <span id="plugDirHint"></span><button id="btnRevealPlugins"></button><button id="btnRefreshPlugins"></button>
+    <button id="plugClose"></button><button id="btnImportPlugin"></button><div id="plugSlots"></div>
+    <div id="plugPreview"></div><div id="plugList"></div>
+  </div>
 
   <div class="quit-modal" id="quitModal" hidden>
     <div class="quit-card card">
@@ -478,5 +508,6 @@
   <div class="tooltip" id="tooltip" hidden></div>
 </div>
 <script src="app.js"></script>
+<script src="plugin-center.js"></script>
 </body>
 </html>

@@ -225,8 +225,13 @@ enum pkt_summary_valid_flags {
     PKT_SUM_F_HDR_BYTES   = (1U << 9)
 };
 
-/* Generic runtime socket-field plugin slots */
-#define PKT_MAX_SOCK_PLUGINS 4U
+/* Dynamic runtime socket-field extensions (expanded to 16 concurrent fields) */
+#define PKT_MAX_SOCK_PLUGINS 16U
+
+/* Dynamic runtime BPF probe cloning sentinels (patched per-qdisc at load time) */
+#define PKT_SITE_DYN_ENQ_SENTINEL 0x5A01U
+#define PKT_SITE_DYN_RET_SENTINEL 0x5A02U
+#define PKT_SITE_DYN_BASE         100U
 
 enum pkt_sock_plugin_role {
     PKT_SOCK_PLUG_NONE          = 0,
@@ -347,16 +352,12 @@ enum pkt_site_id {
     PKT_SITE_KR_SFQ_DEQ         = 36,
     PKT_SITE_KP_TCF_CLASSIFY    = 37,
     PKT_SITE_KR_TCF_CLASSIFY    = 38,
-    /* L2 runtime qdisc plugin slots */
-    PKT_SITE_KP_PLUG_CLS0_ENQ   = 39,
-    PKT_SITE_KP_PLUG_CLS1_ENQ   = 40,
-    PKT_SITE_KP_PLUG_LEAF0_ENQ  = 41,
-    PKT_SITE_KR_PLUG_LEAF0_ENQ  = 42,
-    PKT_SITE_KR_PLUG_LEAF0_DEQ  = 43,
-    PKT_SITE_KP_PLUG_LEAF1_ENQ  = 44,
-    PKT_SITE_KR_PLUG_LEAF1_ENQ  = 45,
-    PKT_SITE_KR_PLUG_LEAF1_DEQ  = 46,
-    PKT_SITE_MAX                = 46
+    /* L2 reusable dynamic qdisc probe templates (cloned & patched at runtime) */
+    PKT_SITE_TMPL_PLUG_CLS_ENQ  = 39,
+    PKT_SITE_TMPL_PLUG_LEAF_ENQ = 40,
+    PKT_SITE_TMPL_PLUG_LEAF_RET = 41,
+    PKT_SITE_TMPL_PLUG_LEAF_DEQ = 42,
+    PKT_SITE_MAX                = 42
 };
 
 /* ==================== 5. BPF Map Value Structs ==================== */
@@ -409,6 +410,8 @@ struct bpf_btf_offsets {
     uint32_t tcf_res_classid;       /* struct tcf_result.classid (default: 8) */
 
     /* Runtime-loaded custom struct sock field plugins (offset == 0 means disabled) */
+    uint32_t sock_plugin_count;      /* 0..PKT_MAX_SOCK_PLUGINS */
+    uint32_t sock_plugin_valid_mask; /* bitmask of resolved slots */
     struct bpf_sock_field_spec sock_plugins[PKT_MAX_SOCK_PLUGINS];
 };
 
@@ -700,12 +703,12 @@ _Static_assert(sizeof(struct bpf_ev_common)  == 32,  "bpf_ev_common must be 32 B
 _Static_assert(sizeof(struct bpf_ev_object)  == 56,  "bpf_ev_object must be 56 B");
 _Static_assert(sizeof(struct bpf_ev_step)    == 80,  "bpf_ev_step must be 80 B");
 _Static_assert(sizeof(struct bpf_ev_rel)     == 72,  "bpf_ev_rel must be 72 B");
-_Static_assert(sizeof(struct bpf_ev_summary) == 328, "bpf_ev_summary must be 328 B");
+_Static_assert(sizeof(struct bpf_ev_summary) == 424, "bpf_ev_summary must be 424 B");
 _Static_assert(sizeof(struct bpf_ev_qstate)  == 56,  "bpf_ev_qstate must be 56 B");
 _Static_assert(sizeof(struct bpf_ev_quality) == 72,  "bpf_ev_quality must be 72 B");
 _Static_assert(sizeof(struct bpf_active_val) == 64,  "bpf_active_val must be 64 B");
 _Static_assert(sizeof(struct bpf_call_key)   == 24,  "bpf_call_key must be 24 B");
-_Static_assert(sizeof(struct bpf_sock_owner) == 88,  "bpf_sock_owner must be 88 B");
+_Static_assert(sizeof(struct bpf_sock_owner) == 184, "bpf_sock_owner must be 184 B");
 #endif
 
 /* ==================== 7. Precompiled BPF Program Image Descriptor ==================== */
