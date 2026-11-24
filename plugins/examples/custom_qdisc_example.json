@@ -1,0 +1,22 @@
+{
+  "name": "Custom Qdisc Adapter Example (CAKE / PRIO)",
+  "version": "1.0",
+  "description": "Template for attaching additional or out-of-tree TC qdiscs at runtime without recompiling BPF.",
+  "qdiscs": [
+    {
+      "id": "prio_cls",
+      "name": "PRIO Classful Qdisc Plugin",
+      "kind": "prio",
+      "mode": "classful",
+      "enqueue_sym": "prio_enqueue"
+    },
+    {
+      "id": "cake_leaf",
+      "name": "CAKE Leaf Qdisc Plugin",
+      "kind": "cake",
+      "mode": "leaf",
+      "enqueue_sym": "cake_enqueue",
+      "dequeue_sym": "cake_dequeue"
+    }
+  ]
+}

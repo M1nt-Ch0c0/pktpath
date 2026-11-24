@@ -1,0 +1,14 @@
+{
+  "name": "Standard Linux sock.sk_mark Tag",
+  "version": "1.0",
+  "description": "Reads struct sock.sk_mark dynamically via vmlinux BTF and attaches it as a packet tag.",
+  "sock_fields": [
+    {
+      "struct": "sock",
+      "field": "sk_mark",
+      "size": 4,
+      "role": "tag",
+      "label": "sock_mark"
+    }
+  ]
+}

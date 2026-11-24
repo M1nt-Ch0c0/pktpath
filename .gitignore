@@ -1,0 +1,31 @@
+# Build outputs
+bin/
+*.o
+*.exe
+*.so
+*.a
+
+# Staged build assets (generated during studio build)
+studio/assets_stage/*
+!studio/assets_stage/keep.txt
+
+# Local private plugins (never commit private vendor manifests)
+plugins/local/
+*.local.json
+
+# Capture & analysis artifacts
+*.pktb
+*.pcap
+*.pcapng
+*.tmp
+*.old
+*.old.*
+selftest*.json
+
+# Python & IDE
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
