@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bpf-and-collectors:
+    name: BPF (arm64 + x86_64) & Device Collectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang, llvm & cross-compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Build dual-arch eBPF bytecode headers
+        run: python3 scripts/build_bpf.py --arch all
+
+      - name: Build static Linux x86_64 & arm64 collectors
+        run: |
+          python3 scripts/build_device.py --target linux-x86_64
+          python3 scripts/build_device.py --target linux-arm64
+          file bin/pktpath-linux-x86_64 bin/pktpath-linux-arm64
+
+      - name: Build Android arm64 collector (NDK)
+        if: env.ANDROID_NDK_HOME != '' || env.ANDROID_NDK_ROOT != ''
+        run: |
+          python3 scripts/build_device.py --target android-arm64
+          file bin/pktpath-android-arm64
+
+  python-tests:
+    name: Python Analyzer & Plugin Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run unittest suite
+        run: python -m unittest discover -s tests -v
+
+  go-studio:
+    name: Go Studio Unit Tests & Cross-Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: studio/go.sum
+
+      - name: Go vet & unit tests (race detector)
+        working-directory: studio
+        run: |
+          go vet ./pkg/...
+          go test -race -count=1 -v ./pkg/...
+
+      - name: Cross-compile Windows GUI binary (CGO_ENABLED=0)
+        working-directory: studio
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags="-H=windowsgui -s -w" -o ../bin/pktpath-studio-ci.exe ./cmd/pktpath-studio
+          ls -lh ../bin/pktpath-studio-ci.exe
+
+  web-syntax:
+    name: Frontend JS & Plugin Manifest Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check JS syntax
+        run: |
+          node --check studio/web/app.js
+          node --check studio/web/plugin-center.js
+          node --check plugins/examples/hello-ext-bundle/ui/widget.js
+      - name: Validate SVG & JSON assets
+        run: |
+          python3 -c '
+          import json, pathlib, xml.etree.ElementTree as ET
+          for p in pathlib.Path("assets").glob("*.svg"):
+              ET.parse(p)
+          ET.parse("studio/web/favicon.svg")
+          for p in pathlib.Path("plugins").rglob("*.json"):
+              json.loads(p.read_text(encoding="utf-8"))
+          print("ASSETS_AND_MANIFESTS_OK")
+          '

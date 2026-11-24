@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-collectors:
+    name: Build Native Collectors (Android arm64 + Linux x86_64/arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Compile dual-arch BPF headers & collectors
+        run: |
+          python3 scripts/build_bpf.py --arch all
+          python3 scripts/build_device.py --target android-arm64
+          python3 scripts/build_device.py --target linux-x86_64
+          python3 scripts/build_device.py --target linux-arm64
+          ls -lh bin/
+
+      - name: Upload collector artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: collectors
+          path: |
+            bin/pktpath-android-arm64
+            bin/pktpath-linux-x86_64
+            bin/pktpath-linux-arm64
+
+  build-studio-windows:
+    name: Build PktPath Studio (Windows x64 GUI)
+    needs: build-collectors
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: studio/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: collectors
+          path: bin
+
+      - name: Build single-file pktpath-studio.exe
+        run: python studio/scripts/build_studio.py
+
+      - name: Package example external plugin bundles (.pktplugin)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release_assets | Out-Null
+          Copy-Item bin/pktpath-studio.exe release_assets/
+          Copy-Item bin/pktpath-android-arm64 release_assets/
+          Copy-Item bin/pktpath-linux-x86_64 release_assets/
+          Copy-Item bin/pktpath-linux-arm64 release_assets/
+          Compress-Archive -Path plugins/examples/hello-ext-bundle/* -DestinationPath release_assets/example-sla-auditor.pktplugin -Force
+          Compress-Archive -Path plugins/examples/kernel-ext-bundle/* -DestinationPath release_assets/example-multi-qdisc.pktplugin -Force
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          Get-ChildItem release_assets -File | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Set-Content -Encoding ascii release_assets/SHA256SUMS.txt
+          Get-Content release_assets/SHA256SUMS.txt
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release_assets/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-studio-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --title "PktPath $TAG" \
+            --generate-notes

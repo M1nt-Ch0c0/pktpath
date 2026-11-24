@@ -1,6 +1,19 @@
-# pktpath & PktPath Studio v2.0
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/wordmark-light.svg">
+    <img alt="PktPath" src="assets/wordmark-light.svg" width="460">
+  </picture>
+</p>
 
-`pktpath` is an evidence-centric, zero-intrusion single-packet path tracing framework for **Linux (`x86_64` / `arm64`)** and **Android (`arm64`)** kernels (`>= 5.10`, tested on `6.1`–`6.12`), paired with **PktPath Studio v2.0** — a GUI-first, **"Everything is a Plugin" microkernel workbench**.
+<p align="center">
+  <a href="https://github.com/M1nt-Ch0c0/pktpath/actions/workflows/ci.yml"><img src="https://github.com/M1nt-Ch0c0/pktpath/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0%20%2F%20Dual%20BSD%2FGPL-blue.svg" alt="License"></a>
+  <img src="https://img.shields.io/badge/kernel-Linux%20%E2%89%A5%205.10-10b981.svg" alt="Linux Kernel">
+  <img src="https://img.shields.io/badge/arch-arm64%20%7C%20x86__64-6366f1.svg" alt="Arch">
+</p>
+
+`pktpath` is an evidence-centric, zero-intrusion single-packet path tracing framework for **Linux (`x86_64` / `arm64`)** and **Android (`arm64`)** kernels (`>= 5.10`, tested on `6.1`–`6.12`), paired with **PktPath Studio v2.0** — a GUI-first, modular plugin workbench.
 
 It traces individual packets through the Linux egress/TC/qdisc/driver pipeline (such as `HTB -> fq_codel / pfifo / sfq / netem -> ndo_start_xmit`), reconstructs exact multi-branch SKB object DAGs (`clone`, `copy`, `requeue`, `txq STOP/WAKE`), measures per-queue sojourn latency, surfaces automated bottleneck & anomaly insights, and supports unlimited extensibility without recompiling eBPF or Studio.
 

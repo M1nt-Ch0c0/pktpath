@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" role="img" aria-label="PktPath Wordmark">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="55%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(24, 16)">
+    <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#bg)"/>
+    <rect x="6.75" y="6.75" width="114.5" height="114.5" rx="27.25" fill="none" stroke="#93C5FD" stroke-opacity="0.28" stroke-width="1.5"/>
+    <rect x="52" y="32" width="24" height="14" rx="4" fill="#FFFFFF" fill-opacity="0.14" stroke="#93C5FD" stroke-opacity="0.45" stroke-width="1.5"/>
+    <rect x="52" y="57" width="24" height="14" rx="4" fill="#FFFFFF" fill-opacity="0.24" stroke="#38BDF8" stroke-opacity="0.9" stroke-width="1.5"/>
+    <rect x="52" y="82" width="24" height="14" rx="4" fill="#FFFFFF" fill-opacity="0.14" stroke="#93C5FD" stroke-opacity="0.45" stroke-width="1.5"/>
+    <path d="M 30 64 C 40 64, 42 39, 52 39" fill="none" stroke="#93C5FD" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.7"/>
+    <path d="M 30 64 L 52 64" fill="none" stroke="url(#flow)" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 30 64 C 40 64, 42 89, 52 89" fill="none" stroke="#93C5FD" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.7"/>
+    <path d="M 76 39 C 86 39, 88 64, 98 64" fill="none" stroke="#6EE7B7" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.75"/>
+    <path d="M 76 64 L 98 64" fill="none" stroke="url(#flow)" stroke-width="4.2" stroke-linecap="round"/>
+    <path d="M 76 89 C 86 89, 88 64, 98 64" fill="none" stroke="#6EE7B7" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.75"/>
+    <circle cx="28" cy="64" r="7.5" fill="#FFFFFF"/>
+    <circle cx="28" cy="64" r="3.5" fill="#2563EB"/>
+    <circle cx="100" cy="64" r="7.5" fill="#34D399"/>
+    <path d="M 96.8 64 L 99.1 66.4 L 103.6 61.5" fill="none" stroke="#064E3B" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="172" y="84" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="54" font-weight="800" letter-spacing="-1.2" fill="#F8FAFC">
+    Pkt<tspan fill="#60A5FA">Path</tspan>
+  </text>
+  <text x="174" y="116" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="500" letter-spacing="0.4" fill="#94A3B8">
+    Evidence-Centric Single-Packet Path Tracing · Linux &amp; Android eBPF
+  </text>
+</svg>

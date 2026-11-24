@@ -105,6 +105,7 @@ def build_linux_x86_64(root_dir: Path, c_sources: list[Path], bin_dir: Path, opt
             "-Wall",
             "-Werror",
             "-Wno-format-truncation",
+            "-static",
             f"-I{root_dir / 'include'}",
             f"-I{root_dir / 'device'}",
             f"-I{root_dir / 'bpf'}",
@@ -113,7 +114,10 @@ def build_linux_x86_64(root_dir: Path, c_sources: list[Path], bin_dir: Path, opt
             str(out_bin),
         ]
         print("Compiling [linux-x86_64]:", " ".join(cmd))
-        subprocess.run(cmd, check=True)
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            cmd_dyn = [c for c in cmd if c != "-static"]
+            subprocess.run(cmd_dyn, check=True)
         print(f"BUILD_OK: {out_bin} ({out_bin.stat().st_size} bytes)")
         return out_bin
 
@@ -178,6 +182,7 @@ def build_linux_arm64(root_dir: Path, c_sources: list[Path], bin_dir: Path, opti
             "-Wall",
             "-Werror",
             "-Wno-format-truncation",
+            "-static",
             f"-I{root_dir / 'include'}",
             f"-I{root_dir / 'device'}",
             f"-I{root_dir / 'bpf'}",
@@ -185,7 +190,11 @@ def build_linux_arm64(root_dir: Path, c_sources: list[Path], bin_dir: Path, opti
             "-o",
             str(out_bin),
         ]
-        subprocess.run(cmd, check=True)
+        print("Compiling [linux-arm64]:", " ".join(cmd))
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            cmd_dyn = [c for c in cmd if c != "-static"]
+            subprocess.run(cmd_dyn, check=True)
         print(f"BUILD_OK: {out_bin} ({out_bin.stat().st_size} bytes)")
         return out_bin
 
