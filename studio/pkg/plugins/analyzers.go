@@ -8,40 +8,37 @@ import (
 	"pktpath/studio/pkg/kernel"
 )
 
-// ---- 6. DAG Multi-Branch Reconstructor Plugin ----
+// ---- 8. DAG Reconstructor ----
 
 type dagReconstructAnalyzer struct{}
 
 func (p *dagReconstructAnalyzer) Meta() kernel.PluginMeta {
 	return kernel.PluginMeta{
 		ID:          "builtin.analyzer.dag-reconstruct",
-		Name:        "多分支 SKB 血缘 DAG 重建引擎",
+		Name:        "路径 DAG 重建",
 		Version:     "2.0.0",
-		Author:      "PktPath Core",
-		Description: "基于严格契约证据与 (object_id, queue_gen, visit_id) 配对，重建每个数据包的完整内核流转 DAG、Clone/Expand 派生关系与队列驻留分位数。",
+		Author:      "PktPath",
+		Description: "配对队列入出队事件，重建多分支路径与血缘。",
 		Category:    kernel.CatAnalyzer,
 		Icon:        "🕸️",
 		Builtin:     true,
 		Capabilities: []string{
-			"精确配对队列入队/出队事件并计算 P50 / P95 / P99 排队驻留耗时",
-			"追踪 SKB CLONE / COPY / EXPAND 对象血缘派生并构建多分支路径图",
-			"自动评估每条分支的数据完备性（完整 / 缺失 / 未知）与质量窗口交集",
+			"计算队列 P50 / P95 / P99 驻留耗时",
+			"识别 SKB Clone / Copy / Expand 多分支流转",
 		},
 		Provides: []string{"analyzer.dag"},
-		Tags:     []string{"dag", "reconstruct", "sojourn", "clone"},
+		Tags:     []string{"dag", "sojourn", "clone"},
 	}
 }
 
 func (p *dagReconstructAnalyzer) Schema() *kernel.ConfigSchema {
 	return &kernel.ConfigSchema{
-		Title:       "DAG 重建展示配置",
-		Description: "控制多分支血缘与队列统计摘要行为。",
 		Fields: []kernel.FieldSchema{
 			{
-				Key:         "highlight_multi_branch",
-				Label:       "在诊断栏汇总多分支派生（SKB Clone/Expand）统计",
-				Type:        kernel.FieldBoolean,
-				Default:     true,
+				Key:     "highlight_multi_branch",
+				Label:   "在会话顶部汇总多分支派生样本",
+				Type:    kernel.FieldBoolean,
+				Default: true,
 			},
 		},
 	}
@@ -74,9 +71,9 @@ func (p *dagReconstructAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string
 				out.Insights = append(out.Insights, kernel.Insight{
 					ID:        "dag.multi_branch",
 					Severity:  "info",
-					Title:     "检测到 SKB 派生/多分支流转",
-					Summary:   fmt.Sprintf("本次会话共有 %d 个样本发生了 SKB Clone/Copy/Expand 多分支派生，可点击样本在右侧查看父子血缘关系。", len(multiIDs)),
-					Metric:    fmt.Sprintf("%d 个多分支样本", len(multiIDs)),
+					Title:     "存在 SKB 多分支派生",
+					Summary:   fmt.Sprintf("共 %d 个样本发生 Clone / Copy / Expand 派生。", len(multiIDs)),
+					Metric:    fmt.Sprintf("%d 样本", len(multiIDs)),
 					SampleIDs: multiIDs,
 				})
 			}
@@ -86,77 +83,71 @@ func (p *dagReconstructAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string
 	return nil
 }
 
-// ---- 7. Automated Bottleneck & Anomaly Radar Plugin ----
+// ---- 9. Anomaly Radar ----
 
 type anomalyRadarAnalyzer struct{}
 
 func (p *anomalyRadarAnalyzer) Meta() kernel.PluginMeta {
 	return kernel.PluginMeta{
 		ID:          "builtin.analyzer.anomaly-radar",
-		Name:        "瓶颈与异常雷达诊断插件",
+		Name:        "异常雷达",
 		Version:     "2.0.0",
-		Author:      "PktPath Core",
-		Description: "自动扫描每条样本与队列，识别高排队驻留瓶颈、丢包、驱动 BUSY 重排（Requeue）、乱序以及采集质量缺口，并在工作台画布顶部生成可一键定位样本的诊断卡片。",
+		Author:      "PktPath",
+		Description: "标出高排队时延、丢包和驱动重排样本。",
 		Category:    kernel.CatAnalyzer,
 		Icon:        "📡",
 		Builtin:     true,
 		Capabilities: []string{
-			"自动识别超过阈值的队列排队抖动（可自定义警告/严重毫秒阈值）",
-			"自动聚合丢包（DROP）、重排（Requeue）与乱序异常并关联对应样本 ID",
-			"向工作台画布顶部插槽输出实时诊断卡片与健康评分 KPI",
-			"关闭本插件后，工作台将自动移除异常雷达卡片",
+			"按阈值检测慢队列与长尾样本",
+			"汇总丢包（DROP）与驱动 BUSY 重排（Requeue）",
 		},
 		Provides: []string{"analyzer.anomaly-radar"},
-		Tags:     []string{"diagnostics", "anomaly", "bottleneck", "radar"},
+		Tags:     []string{"diagnostics", "anomaly", "radar"},
 	}
 }
 
 func (p *anomalyRadarAnalyzer) Schema() *kernel.ConfigSchema {
 	return &kernel.ConfigSchema{
-		Title:       "异常雷达阈值配置",
-		Description: "调整触发告警的排队驻留与异常计数阈值，保存后立即生效。",
 		Fields: []kernel.FieldSchema{
 			{
-				Key:         "sojourn_warn_ms",
-				Label:       "队列驻留警告阈值",
-				Description: "单包在队列内驻留超过该时间将触发黄色警告。",
-				Type:        kernel.FieldNumber,
-				Default:     float64(5),
-				Min:         kernel.FloatPtr(0.1),
-				Max:         kernel.FloatPtr(5000),
-				Step:        kernel.FloatPtr(0.5),
-				Unit:        "ms",
+				Key:     "sojourn_warn_ms",
+				Label:   "驻留警告阈值",
+				Type:    kernel.FieldNumber,
+				Default: float64(5),
+				Min:     kernel.FloatPtr(0.1),
+				Max:     kernel.FloatPtr(5000),
+				Step:    kernel.FloatPtr(0.5),
+				Unit:    "ms",
 			},
 			{
-				Key:         "sojourn_crit_ms",
-				Label:       "队列驻留严重告警阈值",
-				Description: "单包在队列内驻留超过该时间将触发红色严重告警。",
-				Type:        kernel.FieldNumber,
-				Default:     float64(25),
-				Min:         kernel.FloatPtr(0.5),
-				Max:         kernel.FloatPtr(10000),
-				Step:        kernel.FloatPtr(1),
-				Unit:        "ms",
+				Key:     "sojourn_crit_ms",
+				Label:   "驻留严重阈值",
+				Type:    kernel.FieldNumber,
+				Default: float64(25),
+				Min:     kernel.FloatPtr(0.5),
+				Max:     kernel.FloatPtr(10000),
+				Step:    kernel.FloatPtr(1),
+				Unit:    "ms",
 			},
 			{
-				Key:         "drop_warn_count",
-				Label:       "丢包触发告警条数",
-				Type:        kernel.FieldNumber,
-				Default:     float64(1),
-				Min:         kernel.FloatPtr(1),
-				Max:         kernel.FloatPtr(10000),
-				Step:        kernel.FloatPtr(1),
-				Unit:        "包",
+				Key:     "drop_warn_count",
+				Label:   "丢包告警条数",
+				Type:    kernel.FieldNumber,
+				Default: float64(1),
+				Min:     kernel.FloatPtr(1),
+				Max:     kernel.FloatPtr(10000),
+				Step:    kernel.FloatPtr(1),
+				Unit:    "包",
 			},
 			{
-				Key:         "requeue_warn_count",
-				Label:       "驱动 BUSY 重排触发告警条数",
-				Type:        kernel.FieldNumber,
-				Default:     float64(1),
-				Min:         kernel.FloatPtr(1),
-				Max:         kernel.FloatPtr(10000),
-				Step:        kernel.FloatPtr(1),
-				Unit:        "次",
+				Key:     "requeue_warn_count",
+				Label:   "重排告警次数",
+				Type:    kernel.FieldNumber,
+				Default: float64(1),
+				Min:     kernel.FloatPtr(1),
+				Max:     kernel.FloatPtr(10000),
+				Step:    kernel.FloatPtr(1),
+				Unit:    "次",
 			},
 		},
 	}
@@ -186,7 +177,6 @@ func (p *anomalyRadarAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string]a
 			st := in.Overview.Stats
 			samples := in.Overview.Samples
 
-			// 1. High sojourn detection
 			type slowSamp struct {
 				id uint64
 				ms float64
@@ -204,7 +194,6 @@ func (p *anomalyRadarAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string]a
 			}
 			sort.Slice(slow, func(i, j int) bool { return slow[i].ms > slow[j].ms })
 
-			// Find hottest queue
 			hotQueue := ""
 			hotP95Ms := 0.0
 			for _, q := range st.Queues {
@@ -225,19 +214,18 @@ func (p *anomalyRadarAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string]a
 				}
 				qHint := ""
 				if hotQueue != "" {
-					qHint = fmt.Sprintf("；最慢队列为 %s (P95=%.2f ms)", hotQueue, hotP95Ms)
+					qHint = fmt.Sprintf("，最慢队列 %s (P95=%.2f ms)", hotQueue, hotP95Ms)
 				}
 				out.Insights = append(out.Insights, kernel.Insight{
 					ID:        "radar.high_sojourn",
 					Severity:  sev,
-					Title:     "检测到队列排队高时延瓶颈",
-					Summary:   fmt.Sprintf("共 %d 个样本单队列驻留 ≥ %.1f ms，峰值 %.2f ms%s。", len(slow), warnMs, maxMs, qHint),
+					Title:     "队列排队时延偏高",
+					Summary:   fmt.Sprintf("%d 个样本驻留 ≥ %.1f ms（峰值 %.2f ms%s）。", len(slow), warnMs, maxMs, qHint),
 					Metric:    fmt.Sprintf("峰值 %.2f ms", maxMs),
 					SampleIDs: topIDs,
 				})
 			}
 
-			// 2. Drops
 			drops := st.Endpoints["DROP"]
 			if drops >= dropThresh {
 				dropIDs := []uint64{}
@@ -250,13 +238,12 @@ func (p *anomalyRadarAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string]a
 					ID:        "radar.drops",
 					Severity:  "critical",
 					Title:     "发现内核丢包 (DROP)",
-					Summary:   fmt.Sprintf("共观测到 %d 条分支在协议栈或队列中丢弃，点击下方样本可查看精确丢包点与 drop_reason。", drops),
+					Summary:   fmt.Sprintf("共 %d 条分支在协议栈或队列中丢弃。", drops),
 					Metric:    fmt.Sprintf("%d 丢包", drops),
 					SampleIDs: dropIDs,
 				})
 			}
 
-			// 3. Requeues / driver backpressure
 			if st.RequeueCount >= reqThresh {
 				reqIDs := []uint64{}
 				for _, s := range samples {
@@ -267,33 +254,31 @@ func (p *anomalyRadarAnalyzer) Apply(ctx *kernel.PluginContext, cfg map[string]a
 				out.Insights = append(out.Insights, kernel.Insight{
 					ID:        "radar.requeue",
 					Severity:  "warn",
-					Title:     "驱动发包背压与重排 (Requeue)",
-					Summary:   fmt.Sprintf("发生 %d 次驱动返回 NETDEV_TX_BUSY 重排（GSO=%d / BadTXQ=%d），表明网卡发送队列或驱动环短暂饱和。", st.RequeueCount, st.RequeueGSOCount, st.RequeueBadTxqCount),
-					Metric:    fmt.Sprintf("%d 次重排", st.RequeueCount),
+					Title:     "驱动发包重排 (Requeue)",
+					Summary:   fmt.Sprintf("共 %d 次 NETDEV_TX_BUSY 重排（GSO=%d / BadTXQ=%d）。", st.RequeueCount, st.RequeueGSOCount, st.RequeueBadTxqCount),
+					Metric:    fmt.Sprintf("%d 次", st.RequeueCount),
 					SampleIDs: reqIDs,
 				})
 			}
 
-			// 4. Healthy summary when clean
 			if len(out.Insights) == 0 && len(samples) > 0 {
 				out.Insights = append(out.Insights, kernel.Insight{
 					ID:       "radar.healthy",
 					Severity: "ok",
-					Title:    "队列路径通畅，未触发异常阈值",
-					Summary:  fmt.Sprintf("已扫描 %d 个样本，最大队列驻留 %.2f ms（告警阈值 %.1f ms），无丢包与驱动重排。", len(samples), maxMs, warnMs),
+					Title:    "未触发异常阈值",
+					Summary:  fmt.Sprintf("共 %d 个样本，最大驻留 %.2f ms（阈值 %.1f ms），无丢包与重排。", len(samples), maxMs, warnMs),
 					Metric:   fmt.Sprintf("峰值 %.2f ms", maxMs),
 				})
 			}
 
-			// Health KPI card
 			tone := "ok"
-			statusLabel := "健康"
+			statusLabel := "正常"
 			if drops >= dropThresh || maxMs >= critMs {
 				tone = "bad"
 				statusLabel = "存在瓶颈/丢包"
 			} else if len(slow) > 0 || st.RequeueCount >= reqThresh {
 				tone = "warn"
-				statusLabel = "轻度波动"
+				statusLabel = "时延波动"
 			}
 			out.KPIs = append(out.KPIs, kernel.ExtraKPI{
 				Label: "异常雷达评估",

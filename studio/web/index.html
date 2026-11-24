@@ -24,19 +24,19 @@
       </svg>
       <div class="brand-text">
         <span class="brand-name">PktPath Studio</span>
-        <span class="brand-sub">v2.0 · 全插件微内核工作台</span>
+        <span class="brand-sub">单包路径跟踪</span>
       </div>
     </div>
 
     <nav class="main-nav" id="mainNav" role="tablist" aria-label="主视图切换">
-      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">📊 分析工作台</button>
+      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">📊 工作台</button>
       <button class="main-nav-tab" data-view="plugins" id="btnOpenPlugins" role="tab" aria-selected="false">
         🧩 插件中心
         <span class="badge badge-ok" id="navPluginCount">0/0</span>
       </button>
     </nav>
 
-    <div class="appbar-center">
+    <div class="appbar-center" id="appbarDeviceWrap">
       <div class="device-pill" id="devicePill" title="当前设备">
         <span class="dot" id="devicePillDot"></span>
         <span class="device-pill-text" id="devicePillText">未连接设备</span>
@@ -77,13 +77,20 @@
   <div class="layout" id="workbenchView">
     <!-- ===================== Left Control Rail ===================== -->
     <aside class="rail" id="rail">
-      <!-- ① target device & interface -->
-      <section class="card step">
-        <div class="step-head"><span class="step-no">①</span><h2>选择目标源与设备</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
+      <section class="card step" id="railEmptyNotice" hidden>
+        <div class="empty-mini" style="padding:16px 8px">
+          <div style="margin-bottom:8px;color:var(--text-2);font-weight:500">未启用数据源插件</div>
+          <button type="button" class="btn btn-primary btn-sm" id="btnRailOpenPlugins">前往插件中心启用</button>
+        </div>
+      </section>
+
+      <!-- ① target source & interface -->
+      <section class="card step" id="stepTarget">
+        <div class="step-head"><span class="step-no">①</span><h2>数据源与设备</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
         <div class="seg target-tabs" id="segTransport" role="radiogroup">
           <button data-v="adb" class="active">📱 Android</button>
           <button data-v="ssh">🐧 Linux SSH</button>
-          <button data-v="offline">📂 离线会话</button>
+          <button data-v="offline">📂 离线</button>
         </div>
         <div id="paneADB">
           <label class="field">
@@ -124,32 +131,35 @@
           </div>
         </div>
         <div id="paneOffline" class="offline-pane" hidden>
-          <p class="muted" style="margin:6px 0 8px;font-size:12px">无需连接任何设备，直接载入本地或他人分享的会话目录进行分析、运行后分析插件和导出报告。</p>
+          <p class="muted" style="margin:6px 0 8px;font-size:12px">打开本机历史或他人分享的会话目录。</p>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <button type="button" class="btn btn-primary btn-sm" id="btnOfflinePick">📂 选择会话目录…</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="btnOfflineLatest">⏱ 打开最近一次</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btnOfflinePick">📂 选择目录…</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnOfflineLatest">⏱ 最近一次</button>
           </div>
         </div>
-        <div class="prep-status" id="prepStatus" hidden></div>
-        <label class="field">
-          <span class="field-label">网卡 (出口)</span>
-          <select id="selIface" disabled><option value="">请先选择目标设备</option></select>
-        </label>
-        <details class="topo" id="topoDetails" open>
-          <summary>
-            <span>当前网卡 TC 队列拓扑</span>
-            <span class="spacer"></span>
-            <span class="badge badge-muted" id="capBadge">未检测</span>
-          </summary>
-          <div class="topo-body">
-            <div class="topo-tree" id="topoTree"><div class="empty-mini">选择设备后自动检测</div></div>
-            <div class="cap-list" id="capList"></div>
-          </div>
-        </details>
+        <div id="collectorOffHint" class="muted" style="margin-top:8px;font-size:12px" hidden>未启用「eBPF 队列采集」插件，网卡探测与在线采集已停用。</div>
+        <div id="liveIfaceBlock">
+          <div class="prep-status" id="prepStatus" hidden></div>
+          <label class="field">
+            <span class="field-label">网卡 (出口)</span>
+            <select id="selIface" disabled><option value="">请先选择目标设备</option></select>
+          </label>
+          <details class="topo" id="topoDetails" open>
+            <summary>
+              <span>当前网卡 TC 队列拓扑</span>
+              <span class="spacer"></span>
+              <span class="badge badge-muted" id="capBadge">未检测</span>
+            </summary>
+            <div class="topo-body">
+              <div class="topo-tree" id="topoTree"><div class="empty-mini">选择设备后自动检测</div></div>
+              <div class="cap-list" id="capList"></div>
+            </div>
+          </details>
+        </div>
       </section>
 
       <!-- ② traffic filter -->
-      <section class="card step">
+      <section class="card step" id="stepFilter">
         <div class="step-head"><span class="step-no">②</span><h2>筛选谁的流量</h2><span class="hint">零手查 UID</span></div>
         <div class="field">
           <span class="field-label">应用 / 进程 / UID</span>
@@ -203,8 +213,8 @@
       </section>
 
       <!-- ③ capture mode -->
-      <section class="card step">
-        <div class="step-head"><span class="step-no">③</span><h2>选择采集模式</h2></div>
+      <section class="card step" id="stepCaptureMode">
+        <div class="step-head"><span class="step-no">③</span><h2>采集模式</h2></div>
         <div class="tabs" id="modeTabs" role="tablist">
           <button class="tab active" data-mode="oneshot" role="tab">复现抓包（短时）</button>
           <button class="tab" data-mode="daemon" role="tab">后台蹲守（偶发卡顿）</button>
@@ -276,13 +286,13 @@
         </div>
       </section>
       <div id="slotSidebarExtra" class="ui-slot-host" data-slot="sidebar.extra"></div>
-      <div class="rail-foot muted">全插件微内核架构 · 数据全部保存在本机</div>
+      <div class="rail-foot muted">数据保存在本机 · 采集结束自动清理设备临时文件</div>
     </aside>
 
     <!-- ===================== Right Diagnostic Canvas ===================== -->
     <main class="canvas" id="canvas">
       <div class="empty-state" id="emptyState">
-        <svg viewBox="0 0 120 80" width="160" height="106" aria-hidden="true">
+        <svg viewBox="0 0 120 80" width="144" height="96" aria-hidden="true">
           <rect x="4" y="30" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
           <rect x="49" y="12" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
           <rect x="49" y="48" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
@@ -290,14 +300,10 @@
           <path d="M26 40 C38 40 38 22 49 22 M26 40 C38 40 38 58 49 58 M71 22 C82 22 82 40 94 40 M71 58 C82 58 82 40 94 40" stroke="var(--accent)" stroke-width="2" fill="none"/>
         </svg>
         <h1>看清每一个包在内核里排了多久队</h1>
-        <ol class="steps-guide">
-          <li><b>①</b> <b>一切皆插件</b>：Android ADB、Linux SSH、离线浏览、BTF 内核扩展、异常雷达与导出器均由微内核按需驱动</li>
-          <li><b>②</b> 点击顶栏 <b>「🧩 插件中心」</b> 可热启停任意模块、可视化配置内核字段/自定义队列，或安装外部 <code>.pktplugin/.zip</code> 扩展包</li>
-          <li><b>③</b> 左侧选择任意目标（不限设备类型）一键采集，或直接打开离线会话目录开始分析</li>
-        </ol>
+        <p class="muted" id="emptyDesc" style="max-width:440px;margin:0">在左侧选择设备开始采集，或打开本地历史会话。</p>
         <div style="display:flex;gap:10px;justify-content:center;margin-top:8px;flex-wrap:wrap">
-          <button class="btn btn-primary" id="btnEmptyOpenPlugins">🧩 打开插件中心</button>
-          <button class="btn btn-ghost" id="btnEmptyOpenFolder">📂 打开本地离线会话</button>
+          <button class="btn btn-primary" id="btnEmptyOpenFolder">📂 打开本地会话</button>
+          <button class="btn btn-ghost" id="btnEmptyOpenPlugins">🧩 插件中心</button>
         </div>
       </div>
 
@@ -433,33 +439,33 @@
     <div id="slotSampleExtra" class="ui-slot-host" data-slot="sample.extra" style="padding:0 18px 14px"></div>
   </aside>
 
-  <!-- ===================== Full-Page Plugin Center (v2.0 DSH Microkernel) ===================== -->
+  <!-- ===================== Full-Page Plugin Center ===================== -->
   <section class="plugin-center" id="pluginCenterView" hidden>
     <div class="pc-topbar">
       <div class="pc-top-left">
         <div class="pc-title-row">
-          <h2>🧩 插件中心 · 一切皆插件</h2>
-          <span class="badge badge-ok" id="pcSummaryBadge">0 / 0 已启用</span>
+          <h2>🧩 插件中心</h2>
+          <span class="badge badge-ok" id="pcSummaryBadge">0 / 0</span>
           <span class="badge badge-muted" id="pcKernelExtBadge">内核扩展: 0 字段 · 0 队列</span>
         </div>
         <div class="pc-cats" id="pcCatBar">
           <button class="pc-cat active" data-cat="all">全部</button>
-          <button class="pc-cat" data-cat="transport">🔌 连接器</button>
-          <button class="pc-cat" data-cat="collector">⚡ 采集与内核</button>
-          <button class="pc-cat" data-cat="analyzer">📡 后分析</button>
-          <button class="pc-cat" data-cat="exporter">📤 导出器</button>
-          <button class="pc-cat" data-cat="ui">🎨 界面与主题</button>
-          <button class="pc-cat" data-cat="external">🧩 外部扩展</button>
+          <button class="pc-cat" data-cat="transport">连接器</button>
+          <button class="pc-cat" data-cat="collector">采集与模式</button>
+          <button class="pc-cat" data-cat="analyzer">后分析</button>
+          <button class="pc-cat" data-cat="exporter">导出器</button>
+          <button class="pc-cat" data-cat="ui">外观</button>
+          <button class="pc-cat" data-cat="external">外部</button>
         </div>
       </div>
       <div class="pc-top-right">
         <div class="search pc-search">
           <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <input type="text" id="pcSearch" placeholder="搜索插件名 / 能力 / 标签…">
+          <input type="text" id="pcSearch" placeholder="搜索插件…">
         </div>
-        <button class="btn btn-primary btn-sm" id="pcBtnInstallFile">＋ 安装插件包 (.zip / .pktplugin / .json)</button>
-        <button class="btn btn-ghost btn-sm" id="pcBtnInstallDir">📁 从目录安装</button>
-        <button class="btn btn-ghost btn-sm" id="pcBtnRevealDir" title="在资源管理器中打开插件目录">📂 插件目录</button>
+        <button class="btn btn-primary btn-sm" id="pcBtnInstallFile">＋ 安装插件</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnInstallDir">从目录安装</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnRevealDir">打开目录</button>
         <button class="btn btn-ghost btn-sm" id="pcBtnRefresh">刷新</button>
       </div>
     </div>

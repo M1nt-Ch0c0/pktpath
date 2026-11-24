@@ -8,13 +8,14 @@ import (
 
 // Open-ended standard extension points (plugins may also register custom points).
 const (
-	ExtTransport = "transport"
-	ExtCollector = "collector"
-	ExtKernelExt = "kernel.ext"
-	ExtAnalyzer  = "analyzer"
-	ExtExporter  = "exporter"
-	ExtUISlot    = "ui.slot"
-	ExtTheme     = "theme"
+	ExtTransport   = "transport"
+	ExtCollector   = "collector"
+	ExtCaptureMode = "capture.mode"
+	ExtKernelExt   = "kernel.ext"
+	ExtAnalyzer    = "analyzer"
+	ExtExporter    = "exporter"
+	ExtUISlot      = "ui.slot"
+	ExtTheme       = "theme"
 )
 
 // PluginCategory groups plugins in the Plugin Center UI.
@@ -83,6 +84,16 @@ type CollectorSpec struct {
 	ProfileSendmsg   bool   `json:"profile_sendmsg"`
 	AllowPartial     bool   `json:"allow_partial"`
 	EnableKernelExts bool   `json:"enable_kernel_exts"`
+}
+
+// CaptureModeSpec registers a capture mode tab (e.g. oneshot, daemon) in the Workbench.
+type CaptureModeSpec struct {
+	ID          string `json:"id"`
+	PluginID    string `json:"plugin_id"`
+	Mode        string `json:"mode"` // oneshot | daemon | custom
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Priority    int    `json:"priority"`
 }
 
 // KernelSockField declares one dynamic BTF-resolved struct sock field.

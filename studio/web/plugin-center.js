@@ -20,13 +20,14 @@
   };
 
   const EXT_POINT_ZH = {
-    transport: '目标连接器 (transport)',
-    collector: '采集引擎 (collector)',
-    'kernel.ext': '内核 BTF/队列扩展 (kernel.ext)',
-    analyzer: '后分析引擎 (analyzer)',
-    exporter: '导出动作 (exporter)',
-    'ui.slot': '界面插槽 (ui.slot)',
-    theme: '全局主题 (theme)',
+    transport: '连接器',
+    collector: '采集器',
+    'capture.mode': '采集模式',
+    'kernel.ext': '内核扩展',
+    analyzer: '后分析',
+    exporter: '导出器',
+    'ui.slot': 'UI 插槽',
+    theme: '主题',
   };
 
   const ACCENTS = {
@@ -127,14 +128,21 @@
     // 2. Apply Theme Plugin dynamically
     applyThemeSpec(st.theme);
 
-    // 3. Apply Collector Plugin defaults (only when not actively capturing)
+    // 3. Apply Collector & Capture Mode Plugin defaults (when not capturing)
     const appState = B().getState ? B().getState() : {};
     if (st.collector && !appState.capturing && B().applyCollectorDefaults) {
       B().applyCollectorDefaults(st.collector);
     }
+    if (!appState.capturing && B().applyModeDefaults) {
+      const oneshotP = (st.plugins || []).find((p) => p.meta.id === 'builtin.mode.oneshot');
+      const daemonP = (st.plugins || []).find((p) => p.meta.id === 'builtin.mode.daemon');
+      B().applyModeDefaults(oneshotP && oneshotP.config, daemonP && daemonP.config);
+    }
 
-    // 4. Rebuild Dynamic Transport Tabs from active transport plugins
+    // 4. Rebuild Dynamic Transport Tabs, Capture Mode Tabs & True Plugin-Driven Visibility
     renderDynamicTransports(st.transports || []);
+    renderDynamicCaptureModes(st.capture_modes || []);
+    syncWorkbenchVisibility(st);
 
     // 5. Rebuild Dynamic Exporter Buttons from active exporter plugins
     renderDynamicExporters(st.exporters || []);
@@ -162,7 +170,7 @@
     const seg = $('#segTransport');
     if (!seg) return;
     if (!transports.length) {
-      seg.innerHTML = '<span class="muted" style="font-size:12px;padding:4px 8px">所有连接器插件均已关闭（可在插件中心重新开启）</span>';
+      seg.innerHTML = '';
       if ($('#paneADB')) $('#paneADB').hidden = true;
       if ($('#paneSSH')) $('#paneSSH').hidden = true;
       if ($('#paneOffline')) $('#paneOffline').hidden = true;
@@ -180,10 +188,92 @@
     if (B().switchTransport && cur !== appState.transport) {
       B().switchTransport(cur);
     } else {
-      // Ensure panes match active tab even if transport unchanged
       if ($('#paneADB')) $('#paneADB').hidden = cur !== 'adb';
       if ($('#paneSSH')) $('#paneSSH').hidden = cur !== 'ssh';
       if ($('#paneOffline')) $('#paneOffline').hidden = cur !== 'offline';
+    }
+  }
+
+  function renderDynamicCaptureModes(modes) {
+    const tabs = $('#modeTabs');
+    if (!tabs) return;
+    if (!modes.length) {
+      tabs.innerHTML = '';
+      return;
+    }
+    const appState = B().getState ? B().getState() : { mode: 'oneshot' };
+    let cur = appState.mode;
+    if (!modes.some((m) => m.mode === cur)) {
+      cur = modes[0].mode;
+    }
+    tabs.innerHTML = modes.map((m) =>
+      `<button class="tab ${m.mode === cur ? 'active' : ''}" data-mode="${esc(m.mode)}" role="tab">${esc(m.name)}</button>`
+    ).join('');
+    if (B().setCaptureMode) {
+      B().setCaptureMode(cur);
+    }
+  }
+
+  // Genuine plugin-driven Workbench visibility: disabled plugins remove their controls completely.
+  function syncWorkbenchVisibility(st) {
+    if (!st) return;
+    const transports = st.transports || [];
+    const hasAnyTransport = transports.length > 0;
+    const hasLiveTransport = transports.some((t) => t.supports_live_capture);
+    const hasOffline = transports.some((t) => t.kind === 'offline');
+    const hasCollector = !!st.collector;
+    const modes = st.capture_modes || [];
+
+    const appState = B().getState ? B().getState() : { transport: 'adb' };
+    const activeTransport = transports.find((t) => t.kind === appState.transport) || transports[0] || null;
+    const inLiveSource = !!(activeTransport && activeTransport.supports_live_capture);
+
+    // Top bar device pill only when at least one live transport is active
+    const devWrap = $('#appbarDeviceWrap');
+    if (devWrap) devWrap.hidden = !hasLiveTransport;
+
+    // Top bar offline buttons only when offline session plugin is active
+    const btnFolder = $('#btnOpenFolder');
+    if (btnFolder) btnFolder.hidden = !hasOffline;
+    const histDrop = $('#historyDropdown');
+    if (histDrop) histDrop.hidden = !hasOffline;
+
+    // Left rail: empty notice vs target step
+    const railEmpty = $('#railEmptyNotice');
+    const stepTarget = $('#stepTarget');
+    if (railEmpty) railEmpty.hidden = hasAnyTransport;
+    if (stepTarget) stepTarget.hidden = !hasAnyTransport;
+
+    // Interface & TC topology block: only when in a live transport AND eBPF collector is active
+    const liveIface = $('#liveIfaceBlock');
+    const colHint = $('#collectorOffHint');
+    if (liveIface) liveIface.hidden = !(inLiveSource && hasCollector);
+    if (colHint) colHint.hidden = !(inLiveSource && !hasCollector);
+
+    // Step ② traffic filter: only when in live transport AND collector is active
+    const stepFilter = $('#stepFilter');
+    if (stepFilter) stepFilter.hidden = !(inLiveSource && hasCollector);
+
+    // Step ③ capture modes: only when in live transport AND collector is active AND >=1 mode plugin active
+    const stepMode = $('#stepCaptureMode');
+    if (stepMode) stepMode.hidden = !(inLiveSource && hasCollector && modes.length > 0);
+
+    // Empty state center copy & action buttons adapt honestly to active plugins
+    const emptyDesc = $('#emptyDesc');
+    const btnEmptyFolder = $('#btnEmptyOpenFolder');
+    if (btnEmptyFolder) btnEmptyFolder.hidden = !hasOffline;
+    if (emptyDesc) {
+      if (!hasAnyTransport) {
+        emptyDesc.textContent = '当前未启用任何数据源插件，请在插件中心按需开启。';
+      } else if (hasLiveTransport && hasCollector && modes.length > 0) {
+        emptyDesc.textContent = hasOffline
+          ? '在左侧选择设备开始采集，或打开本地历史会话。'
+          : '在左侧选择设备并开始采集。';
+      } else if (hasOffline) {
+        emptyDesc.textContent = '打开本地历史会话目录即可开始路径分析。';
+      } else {
+        emptyDesc.textContent = '采集器或采集模式插件已关闭，可在插件中心开启。';
+      }
     }
   }
 
@@ -420,17 +510,17 @@
     if (!el || !p) return;
     const m = p.meta;
     const statusBadge = p.status === 'active'
-      ? '<span class="badge badge-ok">● 运行中</span>'
+      ? '<span class="badge badge-ok">运行中</span>'
       : p.status === 'error'
-        ? '<span class="badge badge-bad">● 启动失败</span>'
-        : '<span class="badge badge-muted">○ 已停用</span>';
+        ? '<span class="badge badge-bad">失败</span>'
+        : '<span class="badge badge-muted">已停用</span>';
 
-    const capsHtml = (m.capabilities || []).map((c) => `<li>${esc(c)}</li>`).join('') || '<li class="muted">无声明能力</li>';
-    const ptsHtml = (p.extension_points || []).map((pt) => `<span class="chip chip-accent">${esc(EXT_POINT_ZH[pt] || pt)}</span>`).join('') || '<span class="muted">当前未挂载扩展点（停用或无配置项）</span>';
-    const svcsHtml = (p.provided_services || []).map((s) => `<span class="chip">service:${esc(s)}</span>`).join('');
-    const reqsHtml = (m.requires || []).map((r) => `<span class="chip">依赖: ${esc(r)}</span>`).join('');
+    const capsHtml = (m.capabilities || []).map((c) => `<li>${esc(c)}</li>`).join('') || '<li class="muted">无</li>';
+    const ptsHtml = (p.extension_points || []).map((pt) => `<span class="chip chip-accent">${esc(EXT_POINT_ZH[pt] || pt)}</span>`).join('');
+    const reqsHtml = (m.requires || []).map((r) => `<span class="chip">依赖 ${esc(r)}</span>`).join('');
 
     const schemaHtml = renderSchemaForm(p.schema, PC.draftCfg);
+    const hasFields = !!(p.schema && p.schema.fields && p.schema.fields.length);
 
     el.innerHTML = `
       <div class="pc-det-head">
@@ -439,43 +529,38 @@
           <div class="pc-det-name-row">
             <h2>${esc(m.name)}</h2>
             ${statusBadge}
-            <span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置一等插件' : '外部扩展包'}</span>
+            <span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置' : '外部'}</span>
           </div>
           <div class="pc-det-sub">
-            <code>${esc(m.id)}</code> · v${esc(m.version || '1.0')}${m.author ? ' · ' + esc(m.author) : ''}
+            <code>${esc(m.id)}</code> · v${esc(m.version || '1.0')}
           </div>
           <p class="pc-det-desc">${esc(m.description)}</p>
         </div>
         <div class="pc-det-actions">
-          <label class="switch switch-lg" title="${p.enabled ? '停用插件' : '启用插件'}">
+          <label class="switch switch-lg" title="${p.enabled ? '停用' : '启用'}">
             <input type="checkbox" id="pcDetToggle" data-pid="${esc(m.id)}" ${p.enabled ? 'checked' : ''}>
             <span class="switch-slider"></span>
           </label>
-          <button class="btn btn-ghost btn-sm" id="pcDetReload" data-pid="${esc(m.id)}" title="热重载该插件的微内核作用域">🔄 热重载</button>
-          ${p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">🗑 卸载</button>` : ''}
+          <button class="btn btn-ghost btn-sm" id="pcDetReload" data-pid="${esc(m.id)}">重载</button>
+          ${p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">卸载</button>` : ''}
         </div>
       </div>
 
-      ${p.error ? `<div class="pc-alert-bad">❌ ${esc(p.error)}</div>` : ''}
+      ${p.error ? `<div class="pc-alert-bad">${esc(p.error)}</div>` : ''}
 
       <section class="pc-section card">
-        <h3>① 提供的能力与微内核扩展点</h3>
+        <h3>能力</h3>
         <ul class="pc-cap-list">${capsHtml}</ul>
-        <div class="pc-meta-chips">
-          ${ptsHtml} ${svcsHtml} ${reqsHtml}
-        </div>
+        ${(ptsHtml || reqsHtml) ? `<div class="pc-meta-chips">${ptsHtml} ${reqsHtml}</div>` : ''}
       </section>
 
       <section class="pc-section card">
         <div class="pc-sec-head">
-          <div>
-            <h3>② 可视化配置表单${p.schema && p.schema.title ? ' · ' + esc(p.schema.title) : ''}</h3>
-            ${p.schema && p.schema.description ? `<p class="muted" style="margin:3px 0 0;font-size:12px">${esc(p.schema.description)}</p>` : ''}
-          </div>
+          <h3>配置</h3>
           <span class="spacer"></span>
-          ${p.schema && p.schema.fields && p.schema.fields.length ? `
-            <button class="btn btn-ghost btn-sm" id="pcBtnResetCfg" data-pid="${esc(m.id)}">↺ 恢复默认</button>
-            <button class="btn btn-primary btn-sm" id="pcBtnSaveCfg" data-pid="${esc(m.id)}">💾 保存并热生效</button>
+          ${hasFields ? `
+            <button class="btn btn-ghost btn-sm" id="pcBtnResetCfg" data-pid="${esc(m.id)}">恢复默认</button>
+            <button class="btn btn-primary btn-sm" id="pcBtnSaveCfg" data-pid="${esc(m.id)}">保存</button>
           ` : ''}
         </div>
         <div class="schema-form" id="pcSchemaForm">${schemaHtml}</div>
@@ -837,6 +922,8 @@
     }
     const emptyOpenP = $('#btnEmptyOpenPlugins');
     if (emptyOpenP) emptyOpenP.addEventListener('click', () => setMainView('plugins'));
+    const railOpenP = $('#btnRailOpenPlugins');
+    if (railOpenP) railOpenP.addEventListener('click', () => setMainView('plugins'));
     const emptyOpenF = $('#btnEmptyOpenFolder');
     if (emptyOpenF) emptyOpenF.addEventListener('click', () => { if (B().openFolder) B().openFolder(); });
 
@@ -996,6 +1083,7 @@
       window.PktPathStudio.openPluginCenter = () => setMainView('plugins');
       window.PktPathStudio.openWorkbench = () => setMainView('workbench');
       window.PktPathStudio._onSessionRendered = (ov) => renderSessionPluginOutputs(ov);
+      window.PktPathStudio._onTransportChanged = () => syncWorkbenchVisibility(PC.state);
     }
   }
 

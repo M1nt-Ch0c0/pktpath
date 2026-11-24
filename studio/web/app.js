@@ -282,6 +282,9 @@
     }
     renderSSHSelect();
     updateStartBtn();
+    if (window.PktPathStudio && typeof window.PktPathStudio._onTransportChanged === 'function') {
+      window.PktPathStudio._onTransportChanged(S.transport);
+    }
   }
   async function refreshDevices(manual) {
     if (devLoading) return;
@@ -2773,17 +2776,36 @@
     applyCollectorDefaults: (col) => {
       if (!col) return;
       if (col.default_scope && $('#selScope')) $('#selScope').value = col.default_scope;
-      if (col.default_sample && $('#segSample')) { setSeg($('#segSample'), col.default_sample); S.sample = col.default_sample; }
-      if (col.default_duration_sec && $('#segDuration')) {
-        S.duration = Number(col.default_duration_sec) || 10;
-        setSeg($('#segDuration'), String(S.duration));
-      }
       if ($('#chkCapHdr')) $('#chkCapHdr').checked = Number(col.capture_hdr_bytes || 0) > 0;
       if ($('#chkSendmsg')) $('#chkSendmsg').checked = !!col.profile_sendmsg;
       if ($('#chkPartial')) $('#chkPartial').checked = !!col.allow_partial;
       if ($('#chkPlugins')) $('#chkPlugins').checked = col.enable_kernel_exts !== false;
     },
+    setCaptureMode: (mode) => {
+      S.mode = mode;
+      $$('#modeTabs .tab').forEach((x) => x.classList.toggle('active', x.dataset.mode === mode));
+      $$('.tab-pane').forEach((p) => { p.hidden = p.dataset.pane !== mode; });
+      updateStartBtn();
+    },
+    applyModeDefaults: (oneshotCfg, daemonCfg) => {
+      if (oneshotCfg) {
+        if (oneshotCfg.default_sample && $('#segSample')) { setSeg($('#segSample'), oneshotCfg.default_sample); S.sample = oneshotCfg.default_sample; }
+        if (oneshotCfg.default_duration_sec && $('#segDuration')) {
+          S.duration = Number(oneshotCfg.default_duration_sec) || 10;
+          setSeg($('#segDuration'), String(S.duration));
+        }
+      }
+      if (daemonCfg) {
+        if (daemonCfg.default_threshold_ms && $('#inpThreshold')) {
+          $('#inpThreshold').value = daemonCfg.default_threshold_ms;
+          if ($('#thrLabel')) $('#thrLabel').textContent = daemonCfg.default_threshold_ms;
+        }
+        if (daemonCfg.default_pre_sec !== undefined && $('#inpPre')) $('#inpPre').value = daemonCfg.default_pre_sec;
+        if (daemonCfg.default_post_sec !== undefined && $('#inpPost')) $('#inpPost').value = daemonCfg.default_post_sec;
+      }
+    },
     _onSessionRendered: null,
+    _onTransportChanged: null,
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

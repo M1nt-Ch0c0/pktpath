@@ -204,6 +204,7 @@ type KernelSnapshot struct {
 	Plugins         []PluginStatusView `json:"plugins"`
 	Transports      []TransportSpec    `json:"transports"`
 	Collector       *CollectorSpec     `json:"collector,omitempty"`
+	CaptureModes    []CaptureModeSpec  `json:"capture_modes"`
 	Exporters       []ExporterSpec     `json:"exporters"`
 	Analyzers       []AnalyzerSpec     `json:"analyzers"`
 	UISlots         []UISlotSpec       `json:"ui_slots"`
@@ -442,7 +443,8 @@ func (k *Kernel) deactivatePlugin(id string) {
 	}
 }
 
-// SetEnabled toggles a plugin on/off at runtime with full effect-scope rollback.
+// SetEnabled toggles a plugin on/off at runtime with full effect-scope rollback
+// and automatic dependent cascade (Cordis-style dependency lifecycle).
 func (k *Kernel) SetEnabled(id string, enabled bool) error {
 	k.mu.Lock()
 	rec, ok := k.records[id]
@@ -456,12 +458,56 @@ func (k *Kernel) SetEnabled(id string, enabled bool) error {
 	var err error
 	if enabled {
 		err = k.activatePlugin(id)
+		k.reconcileDependents()
 	} else {
 		k.deactivatePlugin(id)
+		k.reconcileDependents()
 	}
 	_ = k.savePersistedConfig()
 	k.notifyChange()
 	return err
+}
+
+func (k *Kernel) reconcileDependents() {
+	k.mu.RLock()
+	ids := k.sortedIDsLocked()
+	k.mu.RUnlock()
+
+	for _, id := range ids {
+		k.mu.RLock()
+		rec := k.records[id]
+		if !rec.enabled {
+			k.mu.RUnlock()
+			continue
+		}
+		reqs := rec.plugin.Meta().Requires
+		wasActive := rec.active
+		k.mu.RUnlock()
+		if len(reqs) == 0 {
+			continue
+		}
+		missing := ""
+		for _, req := range reqs {
+			if _, ok := k.Service(req); ok {
+				continue
+			}
+			if k.IsPluginActive(req) {
+				continue
+			}
+			missing = req
+			break
+		}
+		if missing != "" && wasActive {
+			k.deactivatePlugin(id)
+			k.mu.Lock()
+			if r := k.records[id]; r != nil {
+				r.lastError = fmt.Sprintf("依赖未启用: %s", missing)
+			}
+			k.mu.Unlock()
+		} else if missing == "" && !wasActive {
+			_ = k.activatePlugin(id)
+		}
+	}
 }
 
 // SetConfig validates, persists, and hot-reloads a plugin's configuration.
@@ -597,6 +643,19 @@ func (k *Kernel) Collector() *CollectorSpec {
 		}
 	}
 	return nil
+}
+
+// CaptureModes returns all active capture mode plugins ordered by Priority.
+func (k *Kernel) CaptureModes() []CaptureModeSpec {
+	exts := k.Extensions(ExtCaptureMode)
+	out := make([]CaptureModeSpec, 0, len(exts))
+	for _, e := range exts {
+		if sp, ok := e.Value.(CaptureModeSpec); ok {
+			out = append(out, sp)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
+	return out
 }
 
 // Exporters returns all active exporter extensions ordered by Priority.
@@ -832,6 +891,7 @@ func (k *Kernel) Snapshot(version string) KernelSnapshot {
 		Plugins:         plugins,
 		Transports:      k.Transports(),
 		Collector:       k.Collector(),
+		CaptureModes:    k.CaptureModes(),
 		Exporters:       k.Exporters(),
 		Analyzers:       k.Analyzers(),
 		UISlots:         k.UISlots(),
