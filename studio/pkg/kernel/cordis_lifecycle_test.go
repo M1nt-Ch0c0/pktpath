@@ -237,8 +237,26 @@ func TestCordisF02ExplicitAsyncCleanupQuarantineAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitSignal(t, started)
-	if err := k.SetEnabled("async", true); err == nil {
-		t.Fatal("unproven cleanup reused resource")
+	// Exercise a NEW enable only after the old drain already timed out, not just
+	// the easier race in which the pending old timeout later updates new state.
+	deadline, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		h.mu.Lock()
+		state := h.states["async"].State
+		changed := h.changed
+		h.mu.Unlock()
+		if state == "cleanup-blocked" {
+			break
+		}
+		select {
+		case <-changed:
+		case <-deadline.Done():
+			t.Fatal("cleanup deadline not surfaced")
+		}
+	}
+	if err := k.SetEnabled("async", true); err == nil || !strings.Contains(err.Error(), "cleanup-blocked") {
+		t.Fatalf("known quarantine disguised as pending: %v", err)
 	}
 	if n.Load() != 1 {
 		t.Fatal("new Apply ran while old cleanup blocked")
@@ -573,5 +591,33 @@ func TestCordisF02CompletedScopeLedgerPrunedAndReplayRejected(t *testing.T) {
 	_, err := h.prepare(cordisNodeRequest{Plugin: "churn", Revision: revision, Attempt: "churn/" + revision + "/1", Deps: map[string]string{}})
 	if err == nil || calls.Load() != 17 {
 		t.Fatalf("replayed pruned request: calls=%d err=%v", calls.Load(), err)
+	}
+}
+
+func TestCordisF02ServiceConflictIsTerminalNotPending(t *testing.T) {
+	p := func(id string) *stubPlugin {
+		return &stubPlugin{meta: PluginMeta{ID: id}, apply: func(c *PluginContext, _ map[string]any) error { c.Provide("conflict", id); return nil }}
+	}
+	_, h := lifecycleFixture(t, p("left"), p("right"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		h.mu.Lock()
+		failed := false
+		for _, s := range h.states {
+			if s.State == "failed" && strings.Contains(s.Error, "service conflict") {
+				failed = true
+			}
+		}
+		changed := h.changed
+		h.mu.Unlock()
+		if failed {
+			return
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatalf("known commit conflict not terminal: %+v", h.Snapshot())
+		}
 	}
 }

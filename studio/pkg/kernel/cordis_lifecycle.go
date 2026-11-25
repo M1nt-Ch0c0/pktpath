@@ -293,7 +293,11 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 			}
 		default:
 		}
-		return reject(errors.New("cleanup-blocked: previous activation still owns resource slot"))
+		err := errors.New("cleanup-blocked: previous activation still owns resource slot")
+		s.State = "cleanup-blocked"
+		s.Error = err.Error()
+		h.eventLocked(req.Plugin, "cleanup-blocked", old.generation, err.Error())
+		return reject(err)
 	}
 	meta := rec.plugin.Meta()
 	if len(req.Deps) != len(meta.Requires) {
@@ -344,6 +348,7 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 		for name := range provided {
 			if current, ok := k.services[name]; ok && current.owner != c {
 				err = fmt.Errorf("service conflict: %s", name)
+				applyFailed = true // a known commit rejection, not a stale dependency epoch
 				break
 			}
 		}
