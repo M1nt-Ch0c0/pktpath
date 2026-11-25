@@ -23,7 +23,7 @@ It traces individual packets through the Linux egress/TC/qdisc/driver pipeline (
 
 Inspired by DSH / Cordis microkernel + Schemastery design principles, **every core capability in PktPath Studio v2.0 is a hot-reloadable plugin** with effect-scoped lifecycle management and an auto-generated **Visual Schema-Form configuration UI** (zero raw JSON or CLI required for end users):
 
-### 11 First-Class Built-in Plugins
+### 13 First-Class Built-in Plugins
 
 | Category | Plugin ID | Capability |
 |---|---|---|
@@ -32,6 +32,8 @@ Inspired by DSH / Cordis microkernel + Schemastery design principles, **every co
 | **Transports** | `builtin.transport.offline` | Offline local session folder & history store (zero device dependency) |
 | **Collectors** | `builtin.collector.ebpf-tc` | Pure upstream Linux eBPF TC/Qdisc collector defaults & runtime tuning |
 | **Collectors** | `builtin.collector.kernel-ext` | **Visual Dynamic Kernel Extension Builder** — add arbitrary `struct sock` BTF fields (up to 16) and arbitrary TC qdisc probes (up to 32 concurrent via dynamic BPF template cloning) using visual cards, **zero JSON** |
+| **Capture Modes** | `builtin.mode.oneshot` | Bounded one-shot capture mode |
+| **Capture Modes** | `builtin.mode.daemon` | Rolling daemon capture mode |
 | **Analyzers** | `builtin.analyzer.dag-reconstruct` | Evidence-centric multi-branch SKB DAG & clone lineage reconstructor |
 | **Analyzers** | `builtin.analyzer.anomaly-radar` | Automated bottleneck, drop, requeue & sojourn radar with clickable sample jump cards & configurable ms thresholds |
 | **Exporters** | `builtin.exporter.pcapng` | Wireshark `.pcapng` exporter with embedded per-packet sojourn metadata |
@@ -74,6 +76,14 @@ See [plugins/README.md](plugins/README.md) and the runnable bundles in [plugins/
 
 ---
 
+## 中文开发文档与 Agent Skill
+
+中文开发指南以 [`skill/references/`](skill/references/index.md) 为单一维护来源，覆盖架构与证据边界、构建测试、Linux/Android arm64、Studio、两层插件契约及贡献验证。
+
+Agent 从 [`skill/SKILL.md`](skill/SKILL.md) 开始，按任务选择源码入口与检查步骤。文档明确区分本地检查、CI 和真实设备验证，不将未运行项视为通过。
+
+---
+
 ## Repository Layout
 
 ```
@@ -92,7 +102,7 @@ pktpath/
 ├── analyzer/                  # Python offline analyzer (reconstruct, stats, show, export_pcapng, redact)
 ├── studio/
 │   ├── pkg/kernel/            # Cordis-style Go microkernel, Schemastery schema engine & external bundle loader
-│   ├── pkg/plugins/           # All 11 first-class built-in plugins
+│   ├── pkg/plugins/           # All 13 first-class built-in plugins
 │   ├── pkg/server/            # HTTP API (/api/kernel/*, devices, capture, sessions, exports)
 │   ├── pkg/adb/, pkg/sshclient/, pkg/wire/, pkg/reconstruct/, pkg/export/
 │   └── web/                   # Offline GUI Workbench + Full-Page Plugin Center (plugin-center.js)
@@ -118,7 +128,7 @@ pktpath/
 
 ```powershell
 # 1. Compile dual-arch eBPF bytecode headers (arm64 + x86_64)
-python scripts/build_bpf.py --arch all
+python scripts/build_bpf.py
 
 # 2. Build Android arm64 + static Linux x86_64 device collectors
 python scripts/build_device.py --target all
