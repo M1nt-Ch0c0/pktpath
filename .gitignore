@@ -29,3 +29,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Optional Cordis3 analyzer candidate dependencies
+studio/cordis-analyzer-host/node_modules/

@@ -1,0 +1,12 @@
+{
+  "name": "pktpath-cordis3-analyzer-candidate",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@cordisjs/core": "3.18.1"
+  }
+}

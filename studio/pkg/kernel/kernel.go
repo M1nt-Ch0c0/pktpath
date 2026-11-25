@@ -17,6 +17,7 @@ type HostServices struct {
 	AppDir       string
 	PluginsDir   string
 	SessionsRoot string
+	AnalyzerHost *CordisAnalyzerHost // nil preserves the original Go-only path
 	Extra        map[string]any
 }
 
@@ -34,11 +35,11 @@ type PluginContext struct {
 	kernel   *Kernel
 	pluginID string
 
-	mu          sync.Mutex
-	disposers   []func()
-	extPoints   []string
-	services    []string
-	disposed    bool
+	mu        sync.Mutex
+	disposers []func()
+	extPoints []string
+	services  []string
+	disposed  bool
 }
 
 // PluginID returns the owning plugin ID.
@@ -156,15 +157,16 @@ type serviceEntry struct {
 }
 
 type pluginRecord struct {
-	plugin         Plugin
-	defaultEnabled bool
-	enabled        bool
-	active         bool
-	config         map[string]any
-	scope          *PluginContext
-	lastError      string
-	activatedAt    time.Time
-	order          int
+	plugin             Plugin
+	defaultEnabled     bool
+	enabled            bool
+	active             bool
+	config             map[string]any
+	scope              *PluginContext
+	lastError          string
+	activatedAt        time.Time
+	order              int
+	activationRevision uint64 // candidate-only publication fence
 }
 
 type persistedPluginEntry struct {
@@ -194,21 +196,22 @@ type PluginStatusView struct {
 
 // KernelSnapshot is the complete live state of the microkernel for the GUI.
 type KernelSnapshot struct {
-	Version         string             `json:"version"`
-	PluginsDir      string             `json:"plugins_dir"`
-	ConfigPath      string             `json:"config_path"`
-	TotalPlugins    int                `json:"total_plugins"`
-	ActivePlugins   int                `json:"active_plugins"`
-	BuiltinCount    int                `json:"builtin_count"`
-	ExternalCount   int                `json:"external_count"`
-	Plugins         []PluginStatusView `json:"plugins"`
-	Transports      []TransportSpec    `json:"transports"`
-	Collector       *CollectorSpec     `json:"collector,omitempty"`
-	CaptureModes    []CaptureModeSpec  `json:"capture_modes"`
-	Exporters       []ExporterSpec     `json:"exporters"`
-	Analyzers       []AnalyzerSpec     `json:"analyzers"`
-	UISlots         []UISlotSpec       `json:"ui_slots"`
-	Theme           *ThemeSpec         `json:"theme,omitempty"`
+	AnalyzerHost     *AnalyzerHostSnapshot `json:"analyzer_host,omitempty"`
+	Version          string                `json:"version"`
+	PluginsDir       string                `json:"plugins_dir"`
+	ConfigPath       string                `json:"config_path"`
+	TotalPlugins     int                   `json:"total_plugins"`
+	ActivePlugins    int                   `json:"active_plugins"`
+	BuiltinCount     int                   `json:"builtin_count"`
+	ExternalCount    int                   `json:"external_count"`
+	Plugins          []PluginStatusView    `json:"plugins"`
+	Transports       []TransportSpec       `json:"transports"`
+	Collector        *CollectorSpec        `json:"collector,omitempty"`
+	CaptureModes     []CaptureModeSpec     `json:"capture_modes"`
+	Exporters        []ExporterSpec        `json:"exporters"`
+	Analyzers        []AnalyzerSpec        `json:"analyzers"`
+	UISlots          []UISlotSpec          `json:"ui_slots"`
+	Theme            *ThemeSpec            `json:"theme,omitempty"`
 	KernelExtSummary struct {
 		SockFields int `json:"sock_fields"`
 		SockMax    int `json:"sock_max"`
@@ -378,6 +381,8 @@ func (k *Kernel) activatePlugin(id string) error {
 		k.mu.Unlock()
 		return fmt.Errorf("plugin not found: %s", id)
 	}
+	rec.activationRevision++
+	revision := rec.activationRevision
 	oldScope := rec.scope
 	rec.scope = nil
 	rec.active = false
@@ -417,6 +422,11 @@ func (k *Kernel) activatePlugin(id string) error {
 	}
 
 	k.mu.Lock()
+	if k.host.AnalyzerHost != nil && (k.records[id] != rec || !rec.enabled || rec.activationRevision != revision) {
+		k.mu.Unlock()
+		scope.dispose()
+		return ErrAnalyzerStale
+	}
 	rec.scope = scope
 	rec.active = true
 	rec.lastError = ""
@@ -432,6 +442,7 @@ func (k *Kernel) deactivatePlugin(id string) {
 		k.mu.Unlock()
 		return
 	}
+	rec.activationRevision++
 	scope := rec.scope
 	rec.scope = nil
 	rec.active = false
@@ -898,6 +909,9 @@ func (k *Kernel) Snapshot(version string) KernelSnapshot {
 		Theme:           k.Theme(),
 		ExtensionCounts: extCounts,
 	}
+	if k.host.AnalyzerHost != nil {
+		snap.AnalyzerHost = k.host.AnalyzerHost.Snapshot()
+	}
 	snap.KernelExtSummary.SockMax = 16
 	snap.KernelExtSummary.QdiscsMax = 32
 	for _, ke := range k.CollectKernelExtensions() {
@@ -971,4 +985,13 @@ func sanitizeID(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), ".-_")
+}
+
+// currentAnalyzerScope prevents a captured callback from acquiring new work or
+// publishing old results after disable/reload of the same plugin ID.
+func (c *PluginContext) currentAnalyzerScope() bool {
+	c.kernel.mu.RLock()
+	defer c.kernel.mu.RUnlock()
+	rec := c.kernel.records[c.pluginID]
+	return rec != nil && rec.enabled && rec.active && rec.scope == c
 }

@@ -52,14 +52,14 @@ type PluginDetail struct {
 
 // PluginSlots reports current BPF runtime slot consumption across enabled plugins.
 type PluginSlots struct {
-	SockUsed         int `json:"sock_used"`
-	SockMax          int `json:"sock_max"`
-	ClassfulUsed     int `json:"classful_used"`
-	ClassfulMax      int `json:"classful_max"`
-	LeafUsed         int `json:"leaf_used"`
-	LeafMax          int `json:"leaf_max"`
-	EnabledCount     int `json:"enabled_count"`
-	TotalCount       int `json:"total_count"`
+	SockUsed     int `json:"sock_used"`
+	SockMax      int `json:"sock_max"`
+	ClassfulUsed int `json:"classful_used"`
+	ClassfulMax  int `json:"classful_max"`
+	LeafUsed     int `json:"leaf_used"`
+	LeafMax      int `json:"leaf_max"`
+	EnabledCount int `json:"enabled_count"`
+	TotalCount   int `json:"total_count"`
 }
 
 type pluginState struct {
@@ -376,6 +376,16 @@ func (s *Server) handlePluginsPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginsImport(w http.ResponseWriter, r *http.Request) {
+	// Legacy APIs must not bypass a candidate task's package lease.
+	if s.kernel != nil && s.kernel.Host().AnalyzerHost != nil {
+		release, err := s.kernel.Host().AnalyzerHost.ProtectPackageMutation()
+		if err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer release()
+	}
+
 	b, err := readBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -479,6 +489,16 @@ func (s *Server) handlePluginsToggle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginsDelete(w http.ResponseWriter, r *http.Request) {
+	// Legacy APIs must not bypass a candidate task's package lease.
+	if s.kernel != nil && s.kernel.Host().AnalyzerHost != nil {
+		release, err := s.kernel.Host().AnalyzerHost.ProtectPackageMutation()
+		if err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer release()
+	}
+
 	b, err := readBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

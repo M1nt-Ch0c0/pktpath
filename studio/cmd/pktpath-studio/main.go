@@ -50,6 +50,8 @@ func main() {
 		flagAppDir      = flag.String("app-dir", "", "Override %LOCALAPPDATA%\\PktPathStudio directory")
 		flagAdb         = flag.String("adb", "", "Override path to system adb executable")
 		flagPluginDir   = flag.String("plugin-dir", "", "Override runtime plugin JSON directory (default <app-dir>\\plugins)")
+		flagCordisHost  = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL: absolute Cordis3 offline analyzer host.mjs path; empty keeps Go default")
+		flagCordisNode  = flag.String("cordis-analyzer-node", "node", "EXPERIMENTAL: external Node executable for optional analyzer host")
 		flagDebug       = flag.Bool("debug", true, "Enable WebView2 context menu & DevTools")
 	)
 
@@ -102,12 +104,14 @@ func main() {
 		studioVersion, rt.ExtractMs, rt.AdbPath, rt.AdbEmbedded, adb.ShortSHA(rt.AgentSHA256, 12))
 
 	srv := server.New(server.Options{
-		Runtime:    rt,
-		Web:        webFS,
-		AppDir:     appDir,
-		PluginsDir: strings.TrimSpace(*flagPluginDir),
-		Logger:     logger,
-		Version:    studioVersion,
+		Runtime:            rt,
+		Web:                webFS,
+		AppDir:             appDir,
+		PluginsDir:         strings.TrimSpace(*flagPluginDir),
+		Logger:             logger,
+		Version:            studioVersion,
+		CordisAnalyzerHost: strings.TrimSpace(*flagCordisHost),
+		CordisAnalyzerNode: *flagCordisNode,
 	})
 
 	if *flagSelftest {

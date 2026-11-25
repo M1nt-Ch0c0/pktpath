@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,11 +18,15 @@ import (
 )
 
 func (s *Server) initKernel() {
-	s.kernel = kernel.New(kernel.HostServices{
+	host := kernel.HostServices{
 		AppDir:       s.opts.AppDir,
 		PluginsDir:   s.pluginsDir,
 		SessionsRoot: s.sessionsRoot,
-	})
+	}
+	if s.opts.CordisAnalyzerHost != "" {
+		host.AnalyzerHost = kernel.NewCordisAnalyzerHost(kernel.CordisAnalyzerOptions{NodePath: s.opts.CordisAnalyzerNode, HostPath: s.opts.CordisAnalyzerHost})
+	}
+	s.kernel = kernel.New(host)
 	plugins.RegisterAllBuiltins(s.kernel)
 	s.kernel.OnChange(func() {
 		s.applyKernelSideEffects()
@@ -259,7 +264,11 @@ func (s *Server) handleKernelPluginInstall(w http.ResponseWriter, r *http.Reques
 	meta, err := s.kernel.InstallExternal(rawPath, []byte(content), fileName)
 	snap := s.kernel.Snapshot(s.opts.Version)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
+		status := http.StatusBadRequest
+		if errors.Is(err, kernel.ErrAnalyzerBundleBusy) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]any{
 			"ok":    false,
 			"error": err.Error(),
 			"state": snap,
@@ -285,7 +294,11 @@ func (s *Server) handleKernelPluginUninstall(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.kernel.UninstallExternal(id); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, kernel.ErrAnalyzerBundleBusy) {
+			status = http.StatusConflict
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

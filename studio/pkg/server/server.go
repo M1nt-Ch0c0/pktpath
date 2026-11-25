@@ -34,6 +34,9 @@ type Options struct {
 	PluginsDir string // %LOCALAPPDATA%\PktPathStudio\plugins
 	Logger     *log.Logger
 	Version    string
+	// F01 development candidate; empty Host keeps the original Go path.
+	CordisAnalyzerHost string
+	CordisAnalyzerNode string
 }
 
 // Server is the Studio HTTP backend.
@@ -162,6 +165,11 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.StopActiveCapture(ctx)
 	if s.kernel != nil {
 		s.kernel.Shutdown()
+		if host := s.kernel.Host().AnalyzerHost; host != nil {
+			if err := host.Close(ctx); err != nil {
+				s.log.Printf("Cordis analyzer drain: %v", err)
+			}
+		}
 	}
 	if s.http != nil {
 		sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -270,17 +278,17 @@ func (s *Server) guard(next http.Handler) http.Handler {
 }
 
 var contentTypes = map[string]string{
-	".html": "text/html; charset=utf-8",
-	".htm":  "text/html; charset=utf-8",
-	".js":   "text/javascript; charset=utf-8",
-	".mjs":  "text/javascript; charset=utf-8",
-	".css":  "text/css; charset=utf-8",
-	".json": "application/json; charset=utf-8",
-	".svg":  "image/svg+xml",
-	".png":  "image/png",
-	".ico":  "image/x-icon",
+	".html":  "text/html; charset=utf-8",
+	".htm":   "text/html; charset=utf-8",
+	".js":    "text/javascript; charset=utf-8",
+	".mjs":   "text/javascript; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".json":  "application/json; charset=utf-8",
+	".svg":   "image/svg+xml",
+	".png":   "image/png",
+	".ico":   "image/x-icon",
 	".woff2": "font/woff2",
-	".txt":  "text/plain; charset=utf-8",
+	".txt":   "text/plain; charset=utf-8",
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -164,6 +165,25 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 		cmdSpec := append([]string(nil), ep.manifest.Entrypoint.Command...)
 		cfgCopy, _ := DeepCloneValue(cfg).(map[string]any)
 
+		var candidate *cordisActivation
+		if ctx.kernel.host.AnalyzerHost != nil && len(ep.manifest.Analyzers) > 0 {
+			ids := make([]string, 0, len(ep.manifest.Analyzers))
+			for _, an := range ep.manifest.Analyzers {
+				id := strings.TrimSpace(an.ID)
+				if id == "" {
+					id = ep.meta.ID + ".analyzer"
+				}
+				ids = append(ids, id)
+			}
+			identity := ep.bundleDir + ":manifest-sha256:" + digestJSON(ep.manifest)
+			var err error
+			candidate, err = ctx.kernel.host.AnalyzerHost.activate(ep.meta.ID, identity, cfgCopy, ids)
+			if err != nil {
+				return err
+			}
+			ctx.OnDispose(candidate.revoke)
+		}
+
 		for _, an := range ep.manifest.Analyzers {
 			anID := strings.TrimSpace(an.ID)
 			if anID == "" {
@@ -185,7 +205,19 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 				Description: an.Description,
 				Priority:    prio,
 				Run: func(rctx context.Context, in *AnalyzeInput) (*AnalyzeOutput, error) {
-					return ep.invokeExternalAnalyzer(rctx, cmdSpec, cfgCopy, localID, in)
+					if candidate == nil {
+						return ep.invokeExternalAnalyzer(rctx, cmdSpec, cfgCopy, localID, in)
+					}
+					return candidate.run(rctx, localID, in.SessionID, ctx.currentAnalyzerScope, func() (*AnalyzeOutput, error) {
+						// Preserve the original diagnostic while exposing the timeout category.
+						deadlineCtx, cancel := context.WithTimeout(rctx, 15*time.Second)
+						defer cancel()
+						out, err := ep.invokeExternalAnalyzer(deadlineCtx, cmdSpec, cfgCopy, localID, in)
+						if deadlineCtx.Err() != nil {
+							err = errors.Join(err, deadlineCtx.Err())
+						}
+						return out, err
+					})
 				},
 			})
 		}
@@ -576,6 +608,13 @@ func (k *Kernel) PreviewExternal(srcPath string, rawContent []byte, fileName str
 // InstallExternal installs a .zip/.pktplugin bundle, folder bundle, or single .json into
 // PluginsDir, registers it in the live microkernel, and activates it immediately.
 func (k *Kernel) InstallExternal(srcPath string, rawContent []byte, fileName string) (PluginMeta, error) {
+	if k.host.AnalyzerHost != nil {
+		release, err := k.host.AnalyzerHost.ProtectPackageMutation()
+		if err != nil {
+			return PluginMeta{}, err
+		}
+		defer release()
+	}
 	prev := k.PreviewExternal(srcPath, rawContent, fileName)
 	if !prev.OK {
 		return PluginMeta{}, fmt.Errorf("%s", prev.Error)
@@ -643,6 +682,13 @@ func (k *Kernel) InstallExternal(srcPath string, rawContent []byte, fileName str
 
 // UninstallExternal disposes and permanently removes an external plugin.
 func (k *Kernel) UninstallExternal(id string) error {
+	if k.host.AnalyzerHost != nil {
+		release, err := k.host.AnalyzerHost.ProtectPackageMutation()
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	k.mu.Lock()
 	rec, ok := k.records[id]
 	if !ok {
