@@ -33,64 +33,87 @@ static int parse_scope(const char *s, enum dev_scope *out) {
     return -1;
 }
 
-static int parse_seconds(const char *s, uint32_t *out) {
-    if (!s || !s[0]) return -1;
+/* CLI numerics are unsigned ASCII, with complete suffix consumption by the
+ * caller. strtoull alone accepts signs, whitespace and saturated overflow. */
+static int parse_unsigned_prefix(const char *s, int base, uint64_t *out, const char **tail) {
+    if (!s || s[0] < '0' || s[0] > '9') return -1;
     char *end = NULL;
-    unsigned long v = strtoul(s, &end, 10);
-    if (end == s) return -1;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, base);
+    if (errno != 0 || end == s || v > UINT64_MAX) return -1;
+    *out = (uint64_t)v;
+    *tail = end;
+    return 0;
+}
+
+static int parse_unsigned(const char *s, int base, uint64_t limit, uint64_t *out) {
+    const char *end;
+    uint64_t v;
+    if (parse_unsigned_prefix(s, base, &v, &end) != 0 || *end != '\0' || v > limit) return -1;
+    *out = v;
+    return 0;
+}
+
+static int parse_u32(const char *s, int base, uint32_t *out) {
+    uint64_t v;
+    if (parse_unsigned(s, base, UINT32_MAX, &v) != 0) return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static int parse_seconds(const char *s, uint32_t *out) {
+    const char *end;
+    uint64_t v, seconds;
+    if (parse_unsigned_prefix(s, 10, &v, &end) != 0) return -1;
     if (*end == '\0' || strcmp(end, "s") == 0 || strcmp(end, "sec") == 0) {
-        *out = (uint32_t)v;
-        return 0;
+        seconds = v;
+    } else if (strcmp(end, "m") == 0) {
+        if (v > UINT32_MAX / 60U) return -1;
+        seconds = v * 60U;
+    } else if (strcmp(end, "ms") == 0) {
+        /* Preserve ceil-to-seconds without the overflowing v + 999. */
+        seconds = v / 1000U + (v % 1000U != 0);
+    } else {
+        return -1;
     }
-    if (strcmp(end, "m") == 0) {
-        *out = (uint32_t)(v * 60UL);
-        return 0;
-    }
-    if (strcmp(end, "ms") == 0) {
-        *out = (uint32_t)((v + 999UL) / 1000UL);
-        if (*out == 0 && v > 0) *out = 1;
-        return 0;
-    }
-    return -1;
+    if (seconds > UINT32_MAX) return -1;
+    *out = (uint32_t)seconds; /* explicit 0 retains its existing meaning */
+    return 0;
 }
 
 static int parse_budget_bytes(const char *s, uint64_t *out) {
-    if (!s || !s[0]) return -1;
-    char *end = NULL;
-    unsigned long long v = strtoull(s, &end, 10);
-    if (end == s) return -1;
-    while (*end == ' ') end++;
+    const char *end;
+    uint64_t v, scale;
+    if (parse_unsigned_prefix(s, 10, &v, &end) != 0) return -1;
+    while (*end == ' ') end++; /* keep existing spaces before budget units */
     if (*end == '\0' || strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0 ||
         strcasecmp(end, "mib") == 0) {
-        *out = (uint64_t)v * 1024ULL * 1024ULL;
-        return 0;
+        scale = 1024ULL * 1024ULL;
+    } else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0 || strcasecmp(end, "kib") == 0) {
+        scale = 1024ULL;
+    } else if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0 || strcasecmp(end, "gib") == 0) {
+        scale = 1024ULL * 1024ULL * 1024ULL;
+    } else if (strcasecmp(end, "b") == 0) {
+        scale = 1;
+    } else {
+        return -1;
     }
-    if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0 || strcasecmp(end, "kib") == 0) {
-        *out = (uint64_t)v * 1024ULL;
-        return 0;
-    }
-    if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0 || strcasecmp(end, "gib") == 0) {
-        *out = (uint64_t)v * 1024ULL * 1024ULL * 1024ULL;
-        return 0;
-    }
-    if (strcasecmp(end, "b") == 0) {
-        *out = (uint64_t)v;
-        return 0;
-    }
-    return -1;
+    if (v > UINT64_MAX / scale) return -1;
+    *out = v * scale;
+    return 0;
 }
 
 static int parse_cidr(const char *s, uint8_t *ip_ver_io, uint32_t *ip4_out,
                       uint32_t *mask4_out, uint8_t ip6_out[16], uint8_t *pfx6_out) {
     char copy[128];
+    if (!s || strlen(s) >= sizeof(copy)) return -1;
     snprintf(copy, sizeof(copy), "%s", s);
     char *slash = strchr(copy, '/');
     int prefix = -1;
     if (slash) {
         *slash = '\0';
-        char *end = NULL;
-        long p = strtol(slash + 1, &end, 10);
-        if (end == slash + 1 || *end != '\0' || p < 0) return -1;
+        uint64_t p;
+        if (parse_unsigned(slash + 1, 10, 128, &p) != 0) return -1;
         prefix = (int)p;
     }
 
@@ -120,25 +143,19 @@ static int parse_cidr(const char *s, uint8_t *ip_ver_io, uint32_t *ip4_out,
 }
 
 static int parse_sample(const char *s, uint32_t *stride_out, char *norm_out, size_t norm_cap) {
-    if (strncmp(s, "1/", 2) == 0) {
-        char *end = NULL;
-        unsigned long n = strtoul(s + 2, &end, 10);
-        if (end == s + 2 || *end != '\0' || n == 0 || n > 1000000UL) return -1;
-        *stride_out = (uint32_t)n;
-        snprintf(norm_out, norm_cap, "1/%lu", n);
-        return 0;
-    }
-    char *end = NULL;
-    unsigned long n = strtoul(s, &end, 10);
-    if (end == s || *end != '\0') return -1;
+    uint64_t n;
+    bool fraction = strncmp(s, "1/", 2) == 0;
+    if (parse_unsigned(fraction ? s + 2 : s, 10,
+                       fraction ? 1000000U : UINT32_MAX, &n) != 0 || (fraction && n == 0)) return -1;
     *stride_out = (uint32_t)n;
     if (n == 0) snprintf(norm_out, norm_cap, "0");
-    else snprintf(norm_out, norm_cap, "1/%lu", n);
+    else snprintf(norm_out, norm_cap, "1/%llu", (unsigned long long)n);
     return 0;
 }
 
 static int parse_trigger(const char *s, struct dev_cli_opts *opts) {
     char copy[256];
+    if (!s || strlen(s) >= sizeof(copy)) return -1;
     snprintf(copy, sizeof(copy), "%s", s);
     char *saveptr = NULL;
     for (char *tok = strtok_r(copy, ",", &saveptr);
@@ -146,9 +163,9 @@ static int parse_trigger(const char *s, struct dev_cli_opts *opts) {
          tok = strtok_r(NULL, ",", &saveptr)) {
         while (*tok == ' ') tok++;
         if (strncmp(tok, "sojourn_us>", 11) == 0) {
-            opts->trigger_sojourn_us = (uint64_t)strtoull(tok + 11, NULL, 10);
+            if (parse_unsigned(tok + 11, 10, UINT64_MAX, &opts->trigger_sojourn_us) != 0) return -1;
         } else if (strncmp(tok, "drop_burst>", 11) == 0) {
-            opts->trigger_drop_burst = (uint32_t)strtoul(tok + 11, NULL, 10);
+            if (parse_u32(tok + 11, 10, &opts->trigger_drop_burst) != 0) return -1;
         } else if (*tok != '\0') {
             return -1;
         }
@@ -241,15 +258,15 @@ int main(int argc, char **argv) {
             }
             opts.has_dst_ip = true;
         } else if (strcmp(arg, "--src-port") == 0 && i + 1 < argc) {
-            unsigned long p = strtoul(argv[++i], NULL, 10);
-            if (p == 0 || p > 65535UL) {
+            uint64_t p;
+            if (parse_unsigned(argv[++i], 10, 65535U, &p) != 0 || p == 0) {
                 fprintf(stderr, "error: invalid --src-port '%s'\n", argv[i]);
                 return 2;
             }
             opts.src_port = (uint16_t)p;
         } else if (strcmp(arg, "--dst-port") == 0 && i + 1 < argc) {
-            unsigned long p = strtoul(argv[++i], NULL, 10);
-            if (p == 0 || p > 65535UL) {
+            uint64_t p;
+            if (parse_unsigned(argv[++i], 10, 65535U, &p) != 0 || p == 0) {
                 fprintf(stderr, "error: invalid --dst-port '%s'\n", argv[i]);
                 return 2;
             }
@@ -257,22 +274,31 @@ int main(int argc, char **argv) {
         } else if (strcmp(arg, "--mark") == 0 && i + 1 < argc) {
             const char *ms = argv[++i];
             char copy[64];
+            if (strlen(ms) >= sizeof(copy)) {
+                fprintf(stderr, "error: invalid --mark '%s'\n", ms);
+                return 2;
+            }
             snprintf(copy, sizeof(copy), "%s", ms);
             char *sl = strchr(copy, '/');
-            opts.has_mark = true;
-            if (sl) {
-                *sl = '\0';
-                opts.mark_val = (uint32_t)strtoul(copy, NULL, 0);
-                opts.mark_mask = (uint32_t)strtoul(sl + 1, NULL, 0);
-            } else {
-                opts.mark_val = (uint32_t)strtoul(copy, NULL, 0);
-                opts.mark_mask = 0xFFFFFFFFU;
+            if (sl) *sl++ = '\0';
+            if (parse_u32(copy, 0, &opts.mark_val) != 0 ||
+                (sl && parse_u32(sl, 0, &opts.mark_mask) != 0)) {
+                fprintf(stderr, "error: invalid --mark '%s'\n", ms);
+                return 2;
             }
+            if (!sl) opts.mark_mask = UINT32_MAX;
+            opts.has_mark = true;
         } else if (strcmp(arg, "--uid") == 0 && i + 1 < argc) {
-            opts.uid = (uint32_t)strtoul(argv[++i], NULL, 10);
+            if (parse_u32(argv[++i], 10, &opts.uid) != 0) {
+                fprintf(stderr, "error: invalid --uid '%s'\n", argv[i]);
+                return 2;
+            }
             opts.has_uid = true;
         } else if (strcmp(arg, "--tgid") == 0 && i + 1 < argc) {
-            opts.tgid = (uint32_t)strtoul(argv[++i], NULL, 10);
+            if (parse_u32(argv[++i], 10, &opts.tgid) != 0) {
+                fprintf(stderr, "error: invalid --tgid '%s'\n", argv[i]);
+                return 2;
+            }
         } else if (strcmp(arg, "--sample") == 0 && i + 1 < argc) {
             if (parse_sample(argv[++i], &opts.sample_stride,
                              opts.sample_rate_str, sizeof(opts.sample_rate_str)) != 0) {
@@ -336,8 +362,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(arg, "--plugin-dir") == 0 && i + 1 < argc) {
             snprintf(opts.plugin_dir, sizeof(opts.plugin_dir), "%s", argv[++i]);
         } else if (strcmp(arg, "--capture-hdr") == 0 && i + 1 < argc) {
-            unsigned long cl = strtoul(argv[++i], NULL, 10);
-            if (cl > 128UL) cl = 128UL;
+            uint64_t cl;
+            if (parse_unsigned(argv[++i], 10, UINT64_MAX, &cl) != 0) {
+                fprintf(stderr, "error: invalid --capture-hdr '%s'\n", argv[i]);
+                return 2;
+            }
+            if (cl > 128U) cl = 128U; /* preserve existing saturation */
             opts.capture_hdr_len = (uint32_t)cl;
         } else if (strcmp(arg, "--out") == 0 && i + 1 < argc) {
             snprintf(opts.out_dir, sizeof(opts.out_dir), "%s", argv[++i]);
