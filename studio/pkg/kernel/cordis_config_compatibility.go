@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,6 +109,9 @@ func (k *Kernel) validateKnownConfigImage(image cordisDiskImage, v *CordisConfig
 		}
 		v.FileVersion = "2"
 	}
+	if err := k.rejectManagedPluginsMerge(image.bytes); err != nil {
+		return err
+	}
 	plugins := map[string]json.RawMessage{}
 	if raw, ok := doc["plugins"]; ok {
 		if json.Unmarshal(raw, &plugins) != nil || plugins == nil {
@@ -127,6 +131,9 @@ func (k *Kernel) validateKnownConfigImage(image cordisDiskImage, v *CordisConfig
 		entry := map[string]json.RawMessage{}
 		if json.Unmarshal(raw, &entry) != nil || entry == nil {
 			return fmt.Errorf("%s: plugin entry must be an object", id)
+		}
+		if err := rejectManagedConfigMerge(raw); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
 		}
 		if err := rejectReservedConfigAliases(entry, []string{"config", "enabled", "schemaVersion"}); err != nil {
 			return fmt.Errorf("%s: %w", id, err)
@@ -192,4 +199,94 @@ func (k *Kernel) readCandidateStartupConfig() (persistedConfigFile, error) {
 		out.Plugins = map[string]persistedPluginEntry{}
 	}
 	return out, nil
+}
+
+// Preserve member occurrences, unlike map[string]RawMessage. The image has
+// already passed json.Unmarshal and nested values are decoder-owned RawMessage;
+// no reinterpretation of numbers or opaque descendants is needed here.
+type cordisConfigMember struct {
+	key   string
+	value json.RawMessage
+}
+
+func cordisConfigObjectMembers(raw []byte) ([]cordisConfigMember, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, err := d.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token != json.Delim('{') {
+		return nil, errors.New("config container must be object")
+	}
+	var members []cordisConfigMember
+	for d.More() {
+		token, err = d.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, errors.New("config member key must be string")
+		}
+		var rawValue json.RawMessage
+		if err := d.Decode(&rawValue); err != nil {
+			return nil, err
+		}
+		members = append(members, cordisConfigMember{key, rawValue})
+	}
+	_, err = d.Token()
+	return members, err
+}
+
+// The legacy struct consumer merges the map across repeated plugins members,
+// while the RawMessage validator sees only the last object. Reject this reserved
+// representation if ANY occurrence carries a managed ID, even if a later empty
+// object hides it. Do not recurse into opaque data or reject foreign-only maps.
+func (k *Kernel) rejectManagedPluginsMerge(raw []byte) error {
+	members, err := cordisConfigObjectMembers(raw)
+	if err != nil {
+		return err
+	}
+	count, managed := 0, false
+	for _, member := range members {
+		if member.key != "plugins" {
+			continue
+		}
+		count++
+		entries, err := cordisConfigObjectMembers(member.value)
+		if err != nil {
+			continue
+		} // existing effective-value shape validation follows
+		for _, entry := range entries {
+			if k.host.LifecycleHost.manages(entry.key) {
+				managed = true
+			}
+		}
+	}
+	if count > 1 && managed {
+		return errors.New("repeated plugins member with managed entries unsupported: struct-map merge is ambiguous")
+	}
+	return nil
+}
+
+// Only this typed entry field has the same struct-map merge differential. Keys
+// within Config's interface map, list items, and duplicate plugin map IDs retain
+// legacy last-value/replacement semantics; enabled/version scalars do too.
+// Even equal or null repeated config values are explicitly unsupported here,
+// rather than inventing a different consumer interpretation for managed data.
+func rejectManagedConfigMerge(raw []byte) error {
+	members, err := cordisConfigObjectMembers(raw)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, member := range members {
+		if member.key == "config" {
+			count++
+		}
+	}
+	if count > 1 {
+		return errors.New("repeated managed config member unsupported: struct-map merge is ambiguous")
+	}
+	return nil
 }

@@ -146,3 +146,23 @@ transaction recovery, cross-process file locking or arbitrary plugin rollback.
 A startup format check does NOT restore a lost F03.0 operation after restart or
 persist `recovery-required`. F04 package mutations/legacy plugin APIs are outside
 this admission slice. Default Go and F02 without F03 switch retain prior behavior.
+
+### F03.1a v2: managed object-merge representations
+
+The v1 candidate was rejected: Go's struct/map decoder can merge repeated
+`plugins`/managed `config` objects while the RawMessage checker kept only the
+last object. The shared image guard now preserves decoded member occurrences:
+multiple root `plugins` members are unsupported if any contains a managed ID;
+multiple `config` members in an effective managed entry are unsupported, even
+if equal/null. This is explicit rejection before effects, not a new last-wins
+consumer or a file migration. JSON-escaped keys count after decoding; case-fold
+alias rejection remains in place.
+
+This is not a blanket duplicate-key ban: opaque root/entry/deep values, foreign-
+only repeated `plugins`, duplicate plugin IDs (map-value replacement), and
+ordinary scalar/list config keys (legacy last-value) retain their scoped prior
+semantics and have positive tests. The guard is shared by startup, ordinary
+controls/writer and the exact transaction capture; an early public check alone
+is insufficient. Valid opaque preservation by all later writers, migrations,
+backup/downgrade, journal/restart recovery and Windows execution remain outside
+this slice.
