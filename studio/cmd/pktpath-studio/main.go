@@ -50,6 +50,7 @@ func main() {
 		flagAppDir      = flag.String("app-dir", "", "Override %LOCALAPPDATA%\\PktPathStudio directory")
 		flagAdb         = flag.String("adb", "", "Override path to system adb executable")
 		flagPluginDir   = flag.String("plugin-dir", "", "Override runtime plugin JSON directory (default <app-dir>\\plugins)")
+		flagConfigTxn   = flag.Bool("cordis-config-transactions", false, "EXPERIMENTAL F03.0 metadata config compensation; requires cordis-plugin-host")
 		flagPluginHost  = flag.String("cordis-plugin-host", "", "EXPERIMENTAL F02: Cordis3 host.mjs metadata scheduler; empty keeps Go default")
 		flagPluginNode  = flag.String("cordis-plugin-node", "node", "EXPERIMENTAL F02: explicit candidate Node runtime; no auto install")
 		flagCordisHost  = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL: absolute Cordis3 offline analyzer host.mjs path; empty keeps Go default")
@@ -106,16 +107,17 @@ func main() {
 		studioVersion, rt.ExtractMs, rt.AdbPath, rt.AdbEmbedded, adb.ShortSHA(rt.AgentSHA256, 12))
 
 	srv := server.New(server.Options{
-		Runtime:            rt,
-		Web:                webFS,
-		AppDir:             appDir,
-		PluginsDir:         strings.TrimSpace(*flagPluginDir),
-		Logger:             logger,
-		Version:            studioVersion,
-		CordisAnalyzerHost: strings.TrimSpace(*flagCordisHost),
-		CordisAnalyzerNode: *flagCordisNode,
-		CordisPluginHost:   strings.TrimSpace(*flagPluginHost),
-		CordisPluginNode:   *flagPluginNode,
+		Runtime:                  rt,
+		Web:                      webFS,
+		AppDir:                   appDir,
+		PluginsDir:               strings.TrimSpace(*flagPluginDir),
+		Logger:                   logger,
+		Version:                  studioVersion,
+		CordisAnalyzerHost:       strings.TrimSpace(*flagCordisHost),
+		CordisAnalyzerNode:       *flagCordisNode,
+		CordisPluginHost:         strings.TrimSpace(*flagPluginHost),
+		CordisPluginNode:         *flagPluginNode,
+		CordisConfigTransactions: *flagConfigTxn,
 	})
 
 	if *flagSelftest {

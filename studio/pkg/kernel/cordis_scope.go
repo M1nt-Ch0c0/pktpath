@@ -12,7 +12,9 @@ import (
 // F02 staging is type-agnostic: opaque Go values/functions never cross the wire.
 // Only enrolled activations use it. Other plugin types are NOT thereby migrated.
 type cordisScope struct {
-	cleanupPhase, disposeCause                                                      string // owner.mu; observations never count as actual completion
+	configOperationID                                                               string         // immutable application operation fence, never config hash
+	config                                                                          map[string]any // immutable actual Apply input, not rec desired label
+	cleanupPhase, disposeCause                                                      string         // owner.mu; observations never count as actual completion
 	applyExitObserved, applyWaitTimedOut, cleanupHooksStarted, cleanupHooksReturned bool
 	cleanupExecutionTimedOut, cleanupCompletionObserved, closeObservationTimedOut   bool
 	cleanupWaitStarted, cleanupStarted, cleanupDeadline                             time.Time

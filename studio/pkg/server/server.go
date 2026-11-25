@@ -35,10 +35,11 @@ type Options struct {
 	Logger     *log.Logger
 	Version    string
 	// F01 development candidate; empty Host keeps the original Go path.
-	CordisAnalyzerHost string
-	CordisAnalyzerNode string
-	CordisPluginHost   string // experimental shared F02 metadata scheduler
-	CordisPluginNode   string
+	CordisAnalyzerHost       string
+	CordisAnalyzerNode       string
+	CordisPluginHost         string // experimental shared F02 metadata scheduler
+	CordisConfigTransactions bool   // explicit F03.0 candidate, Go default unaffected
+	CordisPluginNode         string
 }
 
 // Server is the Studio HTTP backend.

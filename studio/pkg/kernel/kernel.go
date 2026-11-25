@@ -256,15 +256,16 @@ type KernelSnapshot struct {
 
 // Kernel is the central Cordis-style microkernel for PktPath Studio.
 type Kernel struct {
-	persistMu  sync.Mutex // F02 single FS writer only; NOT activation/config rollback transaction
-	mu         sync.RWMutex
-	host       HostServices
-	configPath string
-	records    map[string]*pluginRecord
-	orderSeq   int
-	services   map[string]serviceEntry
-	extensions map[string][]RegisteredExtension
-	onChange   []func()
+	configDiskRevision uint64     // persistMu: detects other whole-file writers
+	persistMu          sync.Mutex // F02 single FS writer only; NOT activation/config rollback transaction
+	mu                 sync.RWMutex
+	host               HostServices
+	configPath         string
+	records            map[string]*pluginRecord
+	orderSeq           int
+	services           map[string]serviceEntry
+	extensions         map[string][]RegisteredExtension
+	onChange           []func()
 }
 
 // New creates a new microkernel instance.
@@ -592,6 +593,9 @@ func (k *Kernel) reconcileDependents() {
 
 // SetConfig validates, persists, and hot-reloads a plugin's configuration.
 func (k *Kernel) SetConfig(id string, raw map[string]any) (map[string]any, error) {
+	return k.SetConfigContext(context.Background(), id, raw)
+}
+func (k *Kernel) SetConfigContext(ctx context.Context, id string, raw map[string]any) (map[string]any, error) {
 	k.mu.RLock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -602,12 +606,20 @@ func (k *Kernel) SetConfig(id string, raw map[string]any) (map[string]any, error
 	wasEnabled := rec.enabled
 	k.mu.RUnlock()
 
+	if h := k.host.LifecycleHost; h.manages(id) && h.opts.ConfigTransactions {
+		if err := rejectCordisUnknownFields(schema, raw); err != nil {
+			return nil, err
+		}
+	}
 	norm, err := NormalizeAndValidate(schema, raw)
 	if err != nil {
 		return nil, err
 	}
 
 	if h := k.host.LifecycleHost; h.manages(id) {
+		if h.opts.ConfigTransactions {
+			return norm, h.configure(ctx, id, norm)
+		}
 		return norm, h.update(id, nil, norm, true)
 	}
 
@@ -631,6 +643,9 @@ func (k *Kernel) SetConfig(id string, raw map[string]any) (map[string]any, error
 
 // ResetConfig resets a plugin to its schema defaults and hot-reloads it.
 func (k *Kernel) ResetConfig(id string) (map[string]any, error) {
+	return k.ResetConfigContext(context.Background(), id)
+}
+func (k *Kernel) ResetConfigContext(ctx context.Context, id string) (map[string]any, error) {
 	k.mu.RLock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -639,7 +654,7 @@ func (k *Kernel) ResetConfig(id string) (map[string]any, error) {
 	}
 	defs := DefaultConfig(rec.plugin.Schema())
 	k.mu.RUnlock()
-	return k.SetConfig(id, defs)
+	return k.SetConfigContext(ctx, id, defs)
 }
 
 // Reload disposes and re-applies a plugin's current configuration.
@@ -1024,6 +1039,15 @@ func (k *Kernel) savePersistedConfig() error {
 	if k.configPath == "" {
 		return nil
 	}
+	var stable map[string]map[string]any
+	if h := k.host.LifecycleHost; h != nil && h.opts.ConfigTransactions {
+		h.mu.Lock()
+		stable = map[string]map[string]any{}
+		for id, cfg := range h.configAnchors {
+			stable[id] = cloneCordisConfig(cfg)
+		}
+		h.mu.Unlock()
+	}
 	k.mu.RLock()
 	doc := persistedConfigFile{
 		Version: 2,
@@ -1032,6 +1056,9 @@ func (k *Kernel) savePersistedConfig() error {
 	for id, rec := range k.records {
 		en := rec.enabled
 		cfgClone, _ := DeepCloneValue(rec.config).(map[string]any)
+		if cfg, ok := stable[id]; ok {
+			cfgClone = cfg
+		}
 		doc.Plugins[id] = persistedPluginEntry{
 			Enabled: &en,
 			Config:  cfgClone,
@@ -1054,6 +1081,7 @@ func (k *Kernel) savePersistedConfig() error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	k.configDiskRevision++
 	return nil
 }
 

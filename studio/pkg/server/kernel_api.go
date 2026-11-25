@@ -27,7 +27,7 @@ func (s *Server) initKernel() {
 		host.AnalyzerHost = kernel.NewCordisAnalyzerHost(kernel.CordisAnalyzerOptions{NodePath: s.opts.CordisAnalyzerNode, HostPath: s.opts.CordisAnalyzerHost})
 	}
 	if s.opts.CordisPluginHost != "" {
-		host.LifecycleHost = kernel.NewCordisLifecycleHost(kernel.CordisLifecycleOptions{NodePath: s.opts.CordisPluginNode, HostPath: s.opts.CordisPluginHost})
+		host.LifecycleHost = kernel.NewCordisLifecycleHost(kernel.CordisLifecycleOptions{NodePath: s.opts.CordisPluginNode, HostPath: s.opts.CordisPluginHost, ConfigTransactions: s.opts.CordisConfigTransactions})
 	}
 	s.kernel = kernel.New(host)
 	plugins.RegisterAllBuiltins(s.kernel)
@@ -166,7 +166,7 @@ func (s *Server) handleKernelPluginConfig(w http.ResponseWriter, r *http.Request
 	if rawCfg == nil {
 		rawCfg = map[string]any{}
 	}
-	norm, err := s.kernel.SetConfig(id, rawCfg)
+	norm, err := s.kernel.SetConfigContext(r.Context(), id, rawCfg)
 	snap := s.kernel.Snapshot(s.opts.Version)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -196,10 +196,10 @@ func (s *Server) handleKernelPluginReset(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "missing plugin id")
 		return
 	}
-	norm, err := s.kernel.ResetConfig(id)
+	norm, err := s.kernel.ResetConfigContext(r.Context(), id)
 	snap := s.kernel.Snapshot(s.opts.Version)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error(), "config": norm, "state": snap})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

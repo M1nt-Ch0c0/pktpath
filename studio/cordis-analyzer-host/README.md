@@ -78,3 +78,43 @@ in v2. Ship/review the exact candidate Go binary + `host.mjs` + `lifecycle.mjs` 
 lockfile from the same fixed source index, never mix by protocol-string equality.
 v4 changes the Go cleanup policy/diagnostics; no new capability negotiation or
 full mixed-version distribution acceptance is claimed. F01 analyzer/1 is unchanged.
+
+## F03.0 opt-in metadata configuration compensation
+
+Only with `--cordis-plugin-host=... --cordis-config-transactions` (and explicit
+external Node). No plugin host means the original Go path, no Node probe, no
+transaction claim. Core3/lock/runtime are unchanged. F02 without the new switch
+retains its earlier nontransactional configuration semantics.
+
+This is an activate-then-save protocol, not an atomic transaction over arbitrary
+plugin side effects. It requires an enabled, proven-live metadata baseline A.
+A successful request means a fresh B generation and its file bytes were both
+confirmed. Failure attempts exactly one *new-generation* A activation plus exact
+original file bytes/absence restoration, and still returns an error. Failed or
+uncertain compensation is `recovery-required`, not a relabelled old revision;
+ordinary config/Reset/reload cannot wash it away. Reset means schema defaults,
+not restore-previous. Unknown old/request config keys and unsupported envelopes
+are rejected rather than silently calling them migrated; F03.1 is incomplete.
+
+`config_operations` identifies every admitted operation and reports requested /
+rollback / current desired / real live scope configuration and generation,
+last-successful configuration/generation/revision, observed disk hash, separate
+activation/disk/compensation errors, and terminal outcome. Effective revision is
+still historical, never proof that A is alive. New intent can supersede a waiting
+operation; stale activation, compensation, and disk restore cannot overwrite C.
+A dedicated file fence serializes narrow write/restore phases against intent
+admission; lifecycle mutex is not held for filesystem work, Apply or cleanup.
+Other whole-file writers advance a disk epoch; old whole-file rollback is then
+refused. External byte changes also fail closed. Pending file compensation or
+recovery-required refuses ordinary config admission.
+
+Caller cancellation before admission has no activation/file effects; cancellation
+after admission ends caller observation only, with operation ID to query. A caller
+queued behind filesystem admission cannot forcibly interrupt the OS file operation.
+An unknown Node ACK never causes a second B or an automatic Go fallback.
+Temporary writes check short writes, Sync/Close/Rename, then directory Sync; raw
+A bytes and permissions are retained in memory. **No durable journal, restart
+reconciliation, arbitrary filesystem timeout, power-loss atomicity, general plugin
+rollback, cross-process writer protection, or Windows execution acceptance.**
+Only controlled four metadata plugins/synthetic faults are covered. Actual
+capture ownership, C/rebuild/transport and Go default remain unchanged.

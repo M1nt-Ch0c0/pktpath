@@ -22,6 +22,7 @@ const cordisLifecycleProtocol = "pktpath.cordis3.lifecycle/2"
 var cordisCollectorPlugins = []string{"builtin.collector.ebpf-tc", "builtin.collector.kernel-ext", "builtin.mode.oneshot", "builtin.mode.daemon"}
 
 type CordisLifecycleOptions struct {
+	ConfigTransactions      bool // F03.0 explicit trusted-metadata candidate, not generic plugin rollback
 	NodePath, HostPath      string
 	PluginIDs               []string      // explicit trusted test/development enrollment, NOT a package loader
 	CleanupTimeout          time.Duration // observation only: Apply wait and revoke acknowledgement, default 2s
@@ -45,37 +46,45 @@ type CordisLifecycleEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 type CordisLifecycleSnapshot struct {
-	CleanupScopes   []CordisCleanupView    `json:"cleanup_scopes,omitempty"`
-	HostIncarnation string                 `json:"host_incarnation,omitempty"`
-	HostEpoch       string                 `json:"host_epoch"`
-	HostAlive       bool                   `json:"host_alive"`
-	Protocol        string                 `json:"protocol"`
-	Core            string                 `json:"core"`
-	Node            string                 `json:"node,omitempty"`
-	Plugins         []CordisPluginState    `json:"plugins"`
-	Events          []CordisLifecycleEvent `json:"events"`
+	ConfigOperations []CordisConfigOperationView `json:"config_operations,omitempty"`
+	CleanupScopes    []CordisCleanupView         `json:"cleanup_scopes,omitempty"`
+	HostIncarnation  string                      `json:"host_incarnation,omitempty"`
+	HostEpoch        string                      `json:"host_epoch"`
+	HostAlive        bool                        `json:"host_alive"`
+	Protocol         string                      `json:"protocol"`
+	Core             string                      `json:"core"`
+	Node             string                      `json:"node,omitempty"`
+	Plugins          []CordisPluginState         `json:"plugins"`
+	Events           []CordisLifecycleEvent      `json:"events"`
 }
 type CordisLifecycleHost struct {
-	recoveries                   map[string]*cordisRecovery
-	nextRecovery                 uint64
-	hostEpoch                    uint64
-	highestAttempt               map[string]uint64
-	closeOnce                    sync.Once
-	closeDone                    chan struct{}
-	closeErr                     error
-	incarnation                  string
-	opts                         CordisLifecycleOptions
-	mu                           sync.Mutex // only intent/state/CAS; never held across Apply/cleanup/RPC/FS
-	kernel                       *Kernel
-	worker                       *cordisWorker
-	selected                     map[string]bool
-	states                       map[string]*CordisPluginState
-	attempts                     map[string]*cordisScope
-	events                       []CordisLifecycleEvent
-	changed                      chan struct{}
-	nextRevision, nextGeneration uint64
-	closed                       bool
-	startupError                 error
+	configLastGeneration, configLastRevision map[string]string
+	configFence                              sync.RWMutex // intent admission vs one file commit; never owner.mu across FS
+	configSequence                           uint64
+	configOperations                         map[string]*cordisConfigOperation
+	configCurrent                            map[string]*cordisConfigOperation
+	configAnchors                            map[string]map[string]any
+	configIO                                 *cordisConfigIO
+	recoveries                               map[string]*cordisRecovery
+	nextRecovery                             uint64
+	hostEpoch                                uint64
+	highestAttempt                           map[string]uint64
+	closeOnce                                sync.Once
+	closeDone                                chan struct{}
+	closeErr                                 error
+	incarnation                              string
+	opts                                     CordisLifecycleOptions
+	mu                                       sync.Mutex // only intent/state/CAS; never held across Apply/cleanup/RPC/FS
+	kernel                                   *Kernel
+	worker                                   *cordisWorker
+	selected                                 map[string]bool
+	states                                   map[string]*CordisPluginState
+	attempts                                 map[string]*cordisScope
+	events                                   []CordisLifecycleEvent
+	changed                                  chan struct{}
+	nextRevision, nextGeneration             uint64
+	closed                                   bool
+	startupError                             error
 }
 type cordisPlan struct {
 	Plugin   string   `json:"plugin"`
@@ -112,6 +121,11 @@ func NewCordisLifecycleHost(opts CordisLifecycleOptions) *CordisLifecycleHost {
 	for _, id := range opts.PluginIDs {
 		h.selected[id] = true
 	}
+	h.configLastGeneration = map[string]string{}
+	h.configLastRevision = map[string]string{}
+	h.configOperations = map[string]*cordisConfigOperation{}
+	h.configCurrent = map[string]*cordisConfigOperation{}
+	h.configAnchors = map[string]map[string]any{}
 	return h
 }
 func (h *CordisLifecycleHost) manages(id string) bool { return h != nil && h.selected[id] }
@@ -133,6 +147,10 @@ func (h *CordisLifecycleHost) Snapshot() *CordisLifecycleSnapshot {
 		s.HostAlive = h.sourceValidLocked(h.worker, h.worker.incarnation)
 	}
 	s.HostEpoch = strconv.FormatUint(h.hostEpoch, 10)
+	for _, op := range h.configOperations {
+		s.ConfigOperations = append(s.ConfigOperations, h.configViewLocked(op))
+	}
+	sort.Slice(s.ConfigOperations, func(i, j int) bool { return s.ConfigOperations[i].OperationID < s.ConfigOperations[j].OperationID })
 	for _, b := range h.attempts {
 		if b.revoked {
 			s.CleanupScopes = append(s.CleanupScopes, h.cleanupViewLocked(b))
@@ -318,6 +336,14 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 		return nil, parseErr
 	}
 	h.mu.Lock()
+	if h.opts.ConfigTransactions {
+		if op := h.configCurrent[req.Plugin]; op != nil {
+			if op.phase == "recovery-required" || (!op.terminal && op.revision == "") {
+				h.mu.Unlock()
+				return nil, errors.New("config recovery-required or operation not yet planned")
+			}
+		}
+	}
 	k := h.kernel
 	k.mu.Lock()
 	s := h.states[req.Plugin]
@@ -405,6 +431,9 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 	generation := h.incarnation + "/" + strconv.FormatUint(h.nextGeneration, 10)
 	c := &PluginContext{kernel: k, pluginID: req.Plugin}
 	b := &cordisScope{host: w, hostIncarnation: w.incarnation, admissionEpoch: h.hostEpoch, owner: h, scope: c, plugin: req.Plugin, revision: req.Revision, attempt: req.Attempt, generation: generation, deps: req.Deps, depOwners: owners, provided: map[string]any{}, injected: injected, applyDone: make(chan struct{}), cleanupDone: make(chan struct{}), cleanupHooksDone: make(chan struct{})}
+	if op := h.configCurrent[req.Plugin]; h.opts.ConfigTransactions && op != nil && !op.terminal && op.revision == req.Revision {
+		b.configOperationID = op.id
+	}
 	c.staging = b
 	h.attempts[req.Attempt] = b
 	s.State = "preparing"
@@ -413,6 +442,7 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 	s.Error = ""
 	rec.activationRevision++
 	cfg, _ := DeepCloneValue(rec.config).(map[string]any)
+	b.config = cloneCordisConfig(cfg)
 	p := rec.plugin
 	k.mu.Unlock()
 	h.eventLocked(req.Plugin, "prepare", generation, "")
@@ -428,6 +458,12 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 	h.mu.Lock()
 	k.mu.Lock()
 	s = h.states[req.Plugin]
+	if err == nil && b.configOperationID != "" {
+		op := h.configCurrent[b.plugin]
+		if op == nil || op.id != b.configOperationID || op.revision != b.revision || op.phase == "superseded" || op.phase == "recovery-required" {
+			err = errors.New("stale config-operation Apply fenced")
+		}
+	}
 	if err == nil && (!h.sourceValidLocked(b.host, b.hostIncarnation) || b.admissionEpoch != h.hostEpoch || b.revoked || s.Desired != b.revision || !rec.enabled || !h.depsMatchLocked(b)) {
 		err = errors.New("stale Apply completion fenced")
 	}
@@ -594,7 +630,16 @@ func (h *CordisLifecycleHost) revokeFrom(w *cordisWorker, req cordisNodeRequest)
 // update is the sole desired-revision writer. RPC ACK means plan admission, NOT
 // Apply success. Unknown ACK never activates a legacy Go fallback.
 func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string]any, persist bool) error {
+	return h.updateConfigGuarded(id, enabled, config, persist, nil, false)
+}
+func (h *CordisLifecycleHost) updateConfigGuarded(id string, enabled *bool, config map[string]any, persist bool, op *cordisConfigOperation, drain bool) error {
+	h.configFence.RLock()
 	h.mu.Lock()
+	if op != nil && !h.configOperationCurrentLocked(op) {
+		h.mu.Unlock()
+		h.configFence.RUnlock()
+		return errors.New("config operation superseded")
+	}
 	k := h.kernel
 	if !h.sourceValidLocked(h.worker, func() string {
 		if h.worker != nil {
@@ -607,6 +652,7 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 			err = errors.New("lifecycle host unavailable/closed")
 		}
 		h.mu.Unlock()
+		h.configFence.RUnlock()
 		return err
 	}
 	k.mu.Lock()
@@ -614,7 +660,22 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	if rec == nil {
 		k.mu.Unlock()
 		h.mu.Unlock()
+		h.configFence.RUnlock()
 		return errors.New("plugin not found")
+	}
+	if op == nil && h.opts.ConfigTransactions {
+		if cur := h.configCurrent[id]; cur != nil && cur.phase == "recovery-required" && (enabled == nil || *enabled) {
+			k.mu.Unlock()
+			h.mu.Unlock()
+			h.configFence.RUnlock()
+			return errors.New("config recovery-required: ordinary reload/enable refused")
+		}
+	}
+	if op == nil && h.opts.ConfigTransactions && config == nil {
+		if pending := h.configCurrent[id]; pending != nil && !pending.terminal {
+			config = cloneCordisConfig(h.configAnchors[id])
+			h.configFinishLocked(pending, "superseded")
+		}
 	}
 	if enabled != nil {
 		rec.enabled = *enabled
@@ -625,6 +686,9 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	delete(h.recoveries, id)
 	h.nextRevision++
 	revision := strconv.FormatUint(h.nextRevision, 10)
+	if op != nil {
+		op.revision = revision
+	}
 	s := h.states[id]
 	s.Desired = revision
 	s.Recovery = ""
@@ -648,6 +712,12 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	h.signalLocked()
 	w := h.worker
 	h.mu.Unlock()
+	h.configFence.RUnlock()
+	if drain {
+		if err := h.drainConfigScopes(op); err != nil {
+			return err
+		}
+	}
 	err := w.control("plan", map[string]any{"entries": []cordisPlan{plan}}, nil)
 	if err != nil {
 		h.failWorker(w, err)
@@ -666,7 +736,7 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	if savedErr != nil {
 		return fmt.Errorf("配置保存失败（不是已保存）: %w", errors.Join(err, savedErr))
 	}
-	if config != nil && err != nil {
+	if config != nil && persist && err != nil {
 		return fmt.Errorf("已保存/激活失败 (F03无自动回退): %w", errors.Join(err, savedErr))
 	}
 	return errors.Join(err, savedErr)
