@@ -37,6 +37,8 @@ type Options struct {
 	// F01 development candidate; empty Host keeps the original Go path.
 	CordisAnalyzerHost string
 	CordisAnalyzerNode string
+	CordisPluginHost   string // experimental shared F02 metadata scheduler
+	CordisPluginNode   string
 }
 
 // Server is the Studio HTTP backend.

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -376,19 +377,23 @@ func (a *cordisActivation) run(ctx context.Context, analyzer, session string, cu
 
 // Control messages contain only strings/booleans/metadata, never evidence JSON.
 type cordisReply struct {
-	ID          string `json:"id"`
-	Protocol    string `json:"protocol"`
-	OK          bool   `json:"ok"`
-	Error       string `json:"error"`
-	Core        string `json:"core"`
-	Node        string `json:"node"`
-	Generation  string `json:"generation"`
-	Accepted    bool   `json:"accepted"`
-	Drained     bool   `json:"drained"`
-	CleanupDone bool   `json:"cleanupDone"`
+	Kind        string          `json:"kind,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+	ID          string          `json:"id"`
+	Protocol    string          `json:"protocol"`
+	OK          bool            `json:"ok"`
+	Error       string          `json:"error"`
+	Core        string          `json:"core"`
+	Node        string          `json:"node"`
+	Generation  string          `json:"generation"`
+	Accepted    bool            `json:"accepted"`
+	Drained     bool            `json:"drained"`
+	CleanupDone bool            `json:"cleanupDone"`
 }
 
 type cordisWorker struct {
+	protocol    string
+	onRequest   func(*cordisWorker, []byte)
 	nodeVersion string
 	stderr      cordisStderr
 	cmd         *exec.Cmd
@@ -405,6 +410,10 @@ type cordisWorker struct {
 }
 
 func startCordisWorker(opts CordisAnalyzerOptions) (*cordisWorker, error) {
+	return startCordisWorkerMode(opts, cordisProtocol, nil)
+}
+
+func startCordisWorkerMode(opts CordisAnalyzerOptions, protocol string, handler func(*cordisWorker, []byte)) (*cordisWorker, error) {
 	if opts.HostPath == "" {
 		return nil, errors.New("missing Cordis host module path")
 	}
@@ -412,7 +421,11 @@ func startCordisWorker(opts CordisAnalyzerOptions) (*cordisWorker, error) {
 	if node == "" {
 		node = "node"
 	}
-	cmd := exec.Command(node, opts.HostPath)
+	args := []string{opts.HostPath}
+	if protocol == cordisLifecycleProtocol {
+		args = append(args, "--lifecycle")
+	}
+	cmd := exec.Command(node, args...)
 	// No shell; no dynamic npm install; script and runtime are explicit trusted code.
 	input, err := cmd.StdinPipe()
 	if err != nil {
@@ -425,7 +438,7 @@ func startCordisWorker(opts CordisAnalyzerOptions) (*cordisWorker, error) {
 	}
 	// Keep stderr out of the protocol. Errors are returned through framed replies.
 
-	w := &cordisWorker{cmd: cmd, input: input, pending: map[string]chan cordisReply{}, failed: make(chan struct{}), exited: make(chan struct{})}
+	w := &cordisWorker{protocol: protocol, onRequest: handler, cmd: cmd, input: input, pending: map[string]chan cordisReply{}, failed: make(chan struct{}), exited: make(chan struct{})}
 	cmd.Stderr = &w.stderr
 	if err = cmd.Start(); err != nil {
 		input.Close()
@@ -460,10 +473,22 @@ func (w *cordisWorker) read(reader io.Reader) {
 	scanner.Buffer(make([]byte, 4096), 65536)
 	for scanner.Scan() {
 		var reply cordisReply
-		if err := json.Unmarshal(scanner.Bytes(), &reply); err != nil || reply.Protocol != cordisProtocol || reply.ID == "" {
+		if err := json.Unmarshal(scanner.Bytes(), &reply); err != nil || reply.Protocol != w.protocol || reply.ID == "" {
 			w.fail(errors.New("invalid Cordis control response"))
 			w.abort()
 			return
+		}
+		if w.protocol == cordisLifecycleProtocol {
+			if reply.Kind == "request" && strings.HasPrefix(reply.ID, "node/") && w.onRequest != nil {
+				data := append([]byte(nil), scanner.Bytes()...)
+				go w.onRequest(w, data) // never block read loop on Apply/dispose/RPC
+				continue
+			}
+			if reply.Kind != "response" || !strings.HasPrefix(reply.ID, "go/") {
+				w.fail(errors.New("invalid duplex ID namespace/kind"))
+				w.abort()
+				return
+			}
 		}
 		w.mu.Lock()
 		ch := w.pending[reply.ID]
@@ -487,11 +512,17 @@ func (w *cordisWorker) control(op string, fields map[string]any, out *cordisRepl
 	w.mu.Lock()
 	w.next++
 	id := strconv.FormatUint(w.next, 10)
+	if w.protocol == cordisLifecycleProtocol {
+		id = "go/" + id
+	}
 	ch := make(chan cordisReply, 1)
 	w.pending[id] = ch
 	w.mu.Unlock()
 	defer func() { w.mu.Lock(); delete(w.pending, id); w.mu.Unlock() }()
-	req := map[string]any{"id": id, "op": op, "protocol": cordisProtocol}
+	req := map[string]any{"id": id, "op": op, "protocol": w.protocol}
+	if w.protocol == cordisLifecycleProtocol {
+		req["kind"] = "request"
+	}
 	for k, v := range fields {
 		req[k] = v
 	}

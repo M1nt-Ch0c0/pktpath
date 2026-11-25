@@ -50,6 +50,8 @@ func main() {
 		flagAppDir      = flag.String("app-dir", "", "Override %LOCALAPPDATA%\\PktPathStudio directory")
 		flagAdb         = flag.String("adb", "", "Override path to system adb executable")
 		flagPluginDir   = flag.String("plugin-dir", "", "Override runtime plugin JSON directory (default <app-dir>\\plugins)")
+		flagPluginHost  = flag.String("cordis-plugin-host", "", "EXPERIMENTAL F02: Cordis3 host.mjs metadata scheduler; empty keeps Go default")
+		flagPluginNode  = flag.String("cordis-plugin-node", "node", "EXPERIMENTAL F02: explicit candidate Node runtime; no auto install")
 		flagCordisHost  = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL: absolute Cordis3 offline analyzer host.mjs path; empty keeps Go default")
 		flagCordisNode  = flag.String("cordis-analyzer-node", "node", "EXPERIMENTAL: external Node executable for optional analyzer host")
 		flagDebug       = flag.Bool("debug", true, "Enable WebView2 context menu & DevTools")
@@ -112,6 +114,8 @@ func main() {
 		Version:            studioVersion,
 		CordisAnalyzerHost: strings.TrimSpace(*flagCordisHost),
 		CordisAnalyzerNode: *flagCordisNode,
+		CordisPluginHost:   strings.TrimSpace(*flagPluginHost),
+		CordisPluginNode:   *flagPluginNode,
 	})
 
 	if *flagSelftest {

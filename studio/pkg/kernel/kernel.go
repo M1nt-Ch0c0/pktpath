@@ -14,11 +14,12 @@ import (
 
 // HostServices exposes safe host primitives that built-in plugins can inject.
 type HostServices struct {
-	AppDir       string
-	PluginsDir   string
-	SessionsRoot string
-	AnalyzerHost *CordisAnalyzerHost // nil preserves the original Go-only path
-	Extra        map[string]any
+	AppDir        string
+	PluginsDir    string
+	SessionsRoot  string
+	AnalyzerHost  *CordisAnalyzerHost  // nil preserves the original Go-only path
+	LifecycleHost *CordisLifecycleHost // F02 optional shared metadata graph; nil = no Node
+	Extra         map[string]any
 }
 
 // RegisteredExtension binds an extension payload to the plugin that registered it.
@@ -26,6 +27,7 @@ type RegisteredExtension struct {
 	PluginID string
 	Point    string
 	Value    any
+	owner    *PluginContext // candidate generation-owned handle, never JSON
 }
 
 // PluginContext is a Cordis-inspired effect scope for a single plugin activation.
@@ -34,6 +36,7 @@ type RegisteredExtension struct {
 type PluginContext struct {
 	kernel   *Kernel
 	pluginID string
+	staging  *cordisScope
 
 	mu        sync.Mutex
 	disposers []func()
@@ -50,6 +53,10 @@ func (c *PluginContext) Host() HostServices { return c.kernel.host }
 
 // Provide registers a named service in the microkernel and auto-removes it on dispose.
 func (c *PluginContext) Provide(name string, impl any) {
+	if c.staging != nil {
+		c.staging.provide(name, impl)
+		return
+	}
 	c.kernel.mu.Lock()
 	c.kernel.services[name] = serviceEntry{pluginID: c.pluginID, impl: impl}
 	c.kernel.mu.Unlock()
@@ -68,12 +75,19 @@ func (c *PluginContext) Provide(name string, impl any) {
 
 // Inject resolves a service provided by another plugin or host.
 func (c *PluginContext) Inject(name string) (any, bool) {
+	if c.staging != nil {
+		return c.staging.inject(name)
+	}
 	return c.kernel.Service(name)
 }
 
 // RegisterExtension contributes an extension to any open-ended extension point.
 // Automatically rolled back when the plugin scope is disposed.
 func (c *PluginContext) RegisterExtension(point string, value any) {
+	if c.staging != nil {
+		c.staging.extension(point, value)
+		return
+	}
 	c.kernel.mu.Lock()
 	c.kernel.extensions[point] = append(c.kernel.extensions[point], RegisteredExtension{
 		PluginID: c.pluginID,
@@ -105,6 +119,12 @@ func (c *PluginContext) RegisterExtension(point string, value any) {
 
 // OnDispose registers a custom cleanup callback invoked in LIFO order on dispose.
 func (c *PluginContext) OnDispose(fn func()) {
+	if c.staging != nil {
+		if fn != nil {
+			_ = c.staging.cleanup(func(context.Context) error { fn(); return nil })
+		}
+		return
+	}
 	if fn == nil {
 		return
 	}
@@ -114,6 +134,14 @@ func (c *PluginContext) OnDispose(fn func()) {
 }
 
 func (c *PluginContext) dispose() {
+	if c.staging != nil {
+		b := c.staging
+		h := b.owner
+		h.mu.Lock()
+		h.revokeLocked(b, "Go scope disposed")
+		h.mu.Unlock()
+		return
+	}
 	c.mu.Lock()
 	if c.disposed {
 		c.mu.Unlock()
@@ -136,6 +164,9 @@ func (c *PluginContext) dispose() {
 }
 
 func (c *PluginContext) summary() (points []string, services []string) {
+	if c.staging != nil {
+		return c.staging.summary()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	seenP := map[string]bool{}
@@ -152,6 +183,7 @@ func (c *PluginContext) summary() (points []string, services []string) {
 }
 
 type serviceEntry struct {
+	owner    *PluginContext
 	pluginID string
 	impl     any
 }
@@ -196,22 +228,23 @@ type PluginStatusView struct {
 
 // KernelSnapshot is the complete live state of the microkernel for the GUI.
 type KernelSnapshot struct {
-	AnalyzerHost     *AnalyzerHostSnapshot `json:"analyzer_host,omitempty"`
-	Version          string                `json:"version"`
-	PluginsDir       string                `json:"plugins_dir"`
-	ConfigPath       string                `json:"config_path"`
-	TotalPlugins     int                   `json:"total_plugins"`
-	ActivePlugins    int                   `json:"active_plugins"`
-	BuiltinCount     int                   `json:"builtin_count"`
-	ExternalCount    int                   `json:"external_count"`
-	Plugins          []PluginStatusView    `json:"plugins"`
-	Transports       []TransportSpec       `json:"transports"`
-	Collector        *CollectorSpec        `json:"collector,omitempty"`
-	CaptureModes     []CaptureModeSpec     `json:"capture_modes"`
-	Exporters        []ExporterSpec        `json:"exporters"`
-	Analyzers        []AnalyzerSpec        `json:"analyzers"`
-	UISlots          []UISlotSpec          `json:"ui_slots"`
-	Theme            *ThemeSpec            `json:"theme,omitempty"`
+	LifecycleHost    *CordisLifecycleSnapshot `json:"lifecycle_host,omitempty"`
+	AnalyzerHost     *AnalyzerHostSnapshot    `json:"analyzer_host,omitempty"`
+	Version          string                   `json:"version"`
+	PluginsDir       string                   `json:"plugins_dir"`
+	ConfigPath       string                   `json:"config_path"`
+	TotalPlugins     int                      `json:"total_plugins"`
+	ActivePlugins    int                      `json:"active_plugins"`
+	BuiltinCount     int                      `json:"builtin_count"`
+	ExternalCount    int                      `json:"external_count"`
+	Plugins          []PluginStatusView       `json:"plugins"`
+	Transports       []TransportSpec          `json:"transports"`
+	Collector        *CollectorSpec           `json:"collector,omitempty"`
+	CaptureModes     []CaptureModeSpec        `json:"capture_modes"`
+	Exporters        []ExporterSpec           `json:"exporters"`
+	Analyzers        []AnalyzerSpec           `json:"analyzers"`
+	UISlots          []UISlotSpec             `json:"ui_slots"`
+	Theme            *ThemeSpec               `json:"theme,omitempty"`
 	KernelExtSummary struct {
 		SockFields int `json:"sock_fields"`
 		SockMax    int `json:"sock_max"`
@@ -223,6 +256,7 @@ type KernelSnapshot struct {
 
 // Kernel is the central Cordis-style microkernel for PktPath Studio.
 type Kernel struct {
+	persistMu  sync.Mutex // F02 single FS writer only; NOT activation/config rollback transaction
 	mu         sync.RWMutex
 	host       HostServices
 	configPath string
@@ -331,7 +365,21 @@ func (k *Kernel) Start() error {
 	ordered := k.sortedIDsLocked()
 	k.mu.Unlock()
 
+	if h := k.host.LifecycleHost; h != nil {
+		if err := h.start(k); err != nil {
+			k.mu.Lock()
+			for id, rec := range k.records {
+				if h.manages(id) {
+					rec.lastError = err.Error()
+				}
+			}
+			k.mu.Unlock()
+		}
+	}
 	for _, id := range ordered {
+		if k.host.LifecycleHost.manages(id) {
+			continue
+		}
 		k.mu.RLock()
 		en := k.records[id].enabled
 		k.mu.RUnlock()
@@ -344,11 +392,18 @@ func (k *Kernel) Start() error {
 
 // Shutdown cleanly disposes every active plugin scope.
 func (k *Kernel) Shutdown() {
+	if h := k.host.LifecycleHost; h != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = h.Close(ctx)
+		cancel()
+	}
 	k.mu.RLock()
 	ids := k.sortedIDsLocked()
 	k.mu.RUnlock()
 	for i := len(ids) - 1; i >= 0; i-- {
-		k.deactivatePlugin(ids[i])
+		if !k.host.LifecycleHost.manages(ids[i]) {
+			k.deactivatePlugin(ids[i])
+		}
 	}
 }
 
@@ -375,6 +430,9 @@ func (k *Kernel) sortedIDsLocked() []string {
 }
 
 func (k *Kernel) activatePlugin(id string) error {
+	if h := k.host.LifecycleHost; h.manages(id) {
+		return h.update(id, nil, nil, false)
+	}
 	k.mu.Lock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -436,6 +494,11 @@ func (k *Kernel) activatePlugin(id string) error {
 }
 
 func (k *Kernel) deactivatePlugin(id string) {
+	if h := k.host.LifecycleHost; h.manages(id) {
+		enabled := false
+		_ = h.update(id, &enabled, nil, false)
+		return
+	}
 	k.mu.Lock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -457,6 +520,9 @@ func (k *Kernel) deactivatePlugin(id string) {
 // SetEnabled toggles a plugin on/off at runtime with full effect-scope rollback
 // and automatic dependent cascade (Cordis-style dependency lifecycle).
 func (k *Kernel) SetEnabled(id string, enabled bool) error {
+	if h := k.host.LifecycleHost; h.manages(id) {
+		return h.update(id, &enabled, nil, true)
+	}
 	k.mu.Lock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -485,6 +551,9 @@ func (k *Kernel) reconcileDependents() {
 	k.mu.RUnlock()
 
 	for _, id := range ids {
+		if k.host.LifecycleHost.manages(id) {
+			continue
+		}
 		k.mu.RLock()
 		rec := k.records[id]
 		if !rec.enabled {
@@ -538,6 +607,10 @@ func (k *Kernel) SetConfig(id string, raw map[string]any) (map[string]any, error
 		return nil, err
 	}
 
+	if h := k.host.LifecycleHost; h.manages(id) {
+		return norm, h.update(id, nil, norm, true)
+	}
+
 	k.mu.Lock()
 	rec.config = norm
 	k.mu.Unlock()
@@ -571,6 +644,9 @@ func (k *Kernel) ResetConfig(id string) (map[string]any, error) {
 
 // Reload disposes and re-applies a plugin's current configuration.
 func (k *Kernel) Reload(id string) error {
+	if h := k.host.LifecycleHost; h.manages(id) {
+		return h.update(id, nil, nil, false)
+	}
 	k.mu.RLock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -909,6 +985,9 @@ func (k *Kernel) Snapshot(version string) KernelSnapshot {
 		Theme:           k.Theme(),
 		ExtensionCounts: extCounts,
 	}
+	if k.host.LifecycleHost != nil {
+		snap.LifecycleHost = k.host.LifecycleHost.Snapshot()
+	}
 	if k.host.AnalyzerHost != nil {
 		snap.AnalyzerHost = k.host.AnalyzerHost.Snapshot()
 	}
@@ -938,6 +1017,10 @@ func (k *Kernel) readPersistedConfig() persistedConfigFile {
 }
 
 func (k *Kernel) savePersistedConfig() error {
+	if k.host.LifecycleHost != nil {
+		k.persistMu.Lock()
+		defer k.persistMu.Unlock()
+	}
 	if k.configPath == "" {
 		return nil
 	}

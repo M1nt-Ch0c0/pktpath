@@ -2,6 +2,9 @@
 import { Context } from '@cordisjs/core';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
+if (process.argv.includes('--lifecycle')) {
+  await import('./lifecycle.mjs');
+} else {
 const require = createRequire(import.meta.url);
 const coreVersion = require('@cordisjs/core/package.json').version;
 const protocol = 'pktpath.cordis3.analyzer/1';
@@ -103,3 +106,5 @@ lines.on('line', line => {
     }
   }).catch(error => { console.error(error); process.exitCode = 1; lines.close(); process.stdin.destroy(); });
 });
+
+}

@@ -26,6 +26,9 @@ func (s *Server) initKernel() {
 	if s.opts.CordisAnalyzerHost != "" {
 		host.AnalyzerHost = kernel.NewCordisAnalyzerHost(kernel.CordisAnalyzerOptions{NodePath: s.opts.CordisAnalyzerNode, HostPath: s.opts.CordisAnalyzerHost})
 	}
+	if s.opts.CordisPluginHost != "" {
+		host.LifecycleHost = kernel.NewCordisLifecycleHost(kernel.CordisLifecycleOptions{NodePath: s.opts.CordisPluginNode, HostPath: s.opts.CordisPluginHost})
+	}
 	s.kernel = kernel.New(host)
 	plugins.RegisterAllBuiltins(s.kernel)
 	s.kernel.OnChange(func() {
