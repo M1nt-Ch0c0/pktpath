@@ -348,7 +348,7 @@ func (s *Server) prepareSSH(ctx context.Context, serial, targetID string) Prepar
 	}
 	agent, key := s.pickLinuxAgent(probe.Arch)
 	if agent.Path == "" {
-		res.Error = fmt.Sprintf("no embedded Linux collector for remote arch %q (build with `python scripts/build_device.py --target linux-%s`)", probe.Arch, probe.Arch)
+		res.Error = fmt.Sprintf("no configured Linux collector for remote arch %q (package must include a matching target)", probe.Arch)
 		return res
 	}
 	pushed, sha, err := s.ssh.EnsureAgent(ctx, t, agent.Path, agent.SHA256)

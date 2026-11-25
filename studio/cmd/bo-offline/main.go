@@ -1,5 +1,5 @@
 // bo-offline is a sprint integration entry over the unchanged Studio server.
-// No collector binaries are embedded and no capture is started by this command.
+// Optional explicit collector manifest supplies deploy assets; no capture is started.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"pktpath/studio"
+	"pktpath/studio/pkg/adb"
 	"pktpath/studio/pkg/server"
 	"syscall"
 	"time"
@@ -32,12 +33,21 @@ func run() error {
 	pluginNode := flag.String("cordis-plugin-node", "node", "Node executable for explicit lifecycle host")
 	analyzerNode := flag.String("cordis-analyzer-node", "node", "Node executable for explicit external-analyzer host")
 	analyzer := flag.String("cordis-analyzer-host", "", "explicit experimental external-analyzer host")
+	collectorManifest := flag.String("collector-manifest", "", "explicit absolute collector manifest; no disk/PATH fallback")
 	flag.Parse()
 	if !filepath.IsAbs(*app) {
 		return fmt.Errorf("--app-dir must be absolute")
 	}
 	if *port < 0 || *port > 65535 {
 		return fmt.Errorf("invalid port")
+	}
+	var rt *adb.Runtime
+	if *collectorManifest != "" {
+		var err error
+		rt, err = adb.LoadCollectorRuntime(*collectorManifest)
+		if err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(*app, 0700); err != nil {
 		return err
@@ -53,7 +63,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Options{AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: *analyzerNode})
+	srv := server.New(server.Options{Runtime: rt, AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: *analyzerNode})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -65,7 +75,7 @@ func run() error {
 	}
 	defer ln.Close()
 	url := "http://" + ln.Addr().String()
-	if err = json.NewEncoder(f).Encode(map[string]any{"pid": os.Getpid(), "port": srv.Port(), "url": url, "purpose": "offline integration only; no collector runtime embedded"}); err != nil {
+	if err = json.NewEncoder(f).Encode(map[string]any{"pid": os.Getpid(), "port": srv.Port(), "url": url, "purpose": "explicit optional collector assets; deployment and capture not performed"}); err != nil {
 		return err
 	}
 	if err = f.Sync(); err != nil {
