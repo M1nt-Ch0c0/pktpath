@@ -7,6 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="workbench-layout.css">
+  <link rel="stylesheet" href="studio-presentation.css">
 </head>
 <body>
 <div id="app" class="app">
@@ -25,9 +26,9 @@
     </div>
 
     <nav class="main-nav" id="mainNav" role="tablist" aria-label="主视图切换">
-      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">📊 工作台</button>
+      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">分析工作台</button>
       <button class="main-nav-tab" data-view="plugins" id="btnOpenPlugins" role="tab" aria-selected="false">
-        🧩 插件中心
+        扩展插件
         <span class="badge badge-ok" id="navPluginCount">0/0</span>
       </button>
     </nav>
@@ -69,6 +70,24 @@
       <button class="btn btn-ghost btn-quit" id="btnQuitApp" title="安全停止采集并退出本地后台服务">⏻ 退出服务</button>
     </div>
   </header>
+
+  <section class="studio-context" aria-label="工作空间与数据模式">
+    <div class="studio-context-title"><span class="studio-eyebrow">PACKET OBSERVABILITY</span><strong>从路径到证据，一处看清</strong></div>
+    <div class="studio-source-controls">
+      <label for="studioDataSource">数据模式</label>
+      <select id="studioDataSource" aria-describedby="studioSourceStatus">
+        <option value="api">真实本地 Go 服务</option>
+        <option value="demo">离线示例 · 不连接设备</option>
+      </select>
+      <button type="button" class="btn btn-ghost btn-sm" id="studioCheckBackend">检查连接</button>
+    </div>
+    <div class="studio-source-feedback" id="studioSourceStatus" role="status" aria-live="polite">正在确认当前数据模式…</div>
+    <details class="studio-capabilities"><summary>当前能力与限制</summary><div>
+      <p>真实模式使用当前地址的 Go API，只有明确选择示例才使用内置数据；连接失败不会自动换成示例。</p>
+      <p>界面可调控制栏宽度、图表宽高、表格高度，可单面板最大化与还原。换位和自由浮动窗口尚未提供。</p>
+      <p>Cordis 是否启用由启动参数与内核状态决定，本页面不切默认。扩展插件、配置迁移、平台/设备支持以对应交付清单为准。</p>
+    </div></details>
+  </section>
 
   <div class="layout wb-layout" id="workbenchView">
     <!-- ===================== Left Control Rail ===================== -->
@@ -290,9 +309,9 @@
     <!-- ===================== Right Diagnostic Canvas ===================== -->
     <main class="canvas" id="canvas">
       <div class="wb-toolbar" aria-label="工作台布局">
-        <strong>可调工作台</strong>
+        <strong>分析画布</strong>
         <span class="badge badge-muted" id="layoutDemoBadge" hidden>离线示例数据 · 不连接设备</span>
-        <span class="muted">拖拽分隔线或面板底边调整尺寸 · 聚焦分隔线可用方向键</span>
+        <span class="muted">拖拽分隔线调整布局 · 图表支持专注查看</span>
         <button type="button" class="btn btn-ghost btn-sm" id="btnResetLayout">重置布局</button>
         <span class="wb-layout-status muted" id="layoutStatus" role="status" aria-live="polite"></span>
       </div>
@@ -351,6 +370,7 @@
           <section class="card panel wb-panel" id="panelFlow">
             <div class="panel-head">
               <h3>队列路径流向图</h3>
+              <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelFlow" aria-pressed="false" aria-label="最大化队列路径图">最大化</button>
               <span class="hint">线宽 = 包数 · 徽标 = p95 驻留 · 点击节点筛选下表</span>
               <span class="spacer"></span>
               <button class="link-btn" id="btnClearPath" hidden>清除路径筛选</button>
@@ -362,6 +382,7 @@
           <section class="card panel wb-panel" id="panelLatency">
             <div class="panel-head">
               <h3>各队列驻留耗时对比</h3>
+              <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelLatency" aria-pressed="false" aria-label="最大化驻留耗时图">最大化</button>
               <span class="legend">
                 <i class="lg lg-p50"></i>p50 <i class="lg lg-p95"></i>p95 <i class="lg lg-p99"></i>p99
               </span>
@@ -375,6 +396,7 @@
         <section class="card panel table-panel wb-panel" id="panelSamples">
           <div class="panel-head table-tools">
             <h3>样本明细</h3>
+            <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelSamples" aria-pressed="false" aria-label="最大化样本明细">最大化</button>
             <span class="count-pill num" id="tableCount">0</span>
             <span class="chip chip-accent chip-x" id="pathChip" hidden></span>
             <span class="spacer"></span>
@@ -525,5 +547,6 @@
 <script src="app.js"></script>
 <script src="plugin-center.js"></script>
 <script src="workbench-layout.js"></script>
+<script src="studio-presentation.js"></script>
 </body>
 </html>

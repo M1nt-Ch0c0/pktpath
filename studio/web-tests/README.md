@@ -39,3 +39,22 @@ checks. M1 acceptance requires independent real-browser dragging + chart
 repaint, restored layout and reset checks. Touch/pen event handling has model
 coverage only; no touch hardware or Windows/WebView runtime was tested here.
 No reorder, maximize, arbitrary floating windows, plugin/API/default changes.
+
+## 10-hour sprint visual slice
+
+`studio-presentation.css/js` adds a visual hierarchy, explicit real-Go vs sample
+mode selector, strict read-only same-origin health check and transient focus
+(maximize/restore) of each of the three panels. Escape restores focus; geometry
+preferences are not rewritten. No panel reorder or native fullscreen. An
+unavailable or malformed API response never becomes sample data automatically.
+Switching into sample mode asks for confirmation and is blocked during capture
+or quit; it does not stop a backend task. `file://` cannot select a real API.
+
+Run all dependency-free event-model tests with
+`node --test studio/web-tests/*.test.cjs`. `TestStudioSprintPresentationWithRealGoHandler`
+uses actual embedded WebFS, Server.Handler and health response through httptest,
+not a TCP/browser/CLI execution. A real Go service launch + real-browser check
+is still an integration acceptance gate; a static demo cannot satisfy it.
+
+The base command is Windows-only at this slice. A separate Linux headless entry
+is the next authorized slice, not implemented or implied by UI tests.
