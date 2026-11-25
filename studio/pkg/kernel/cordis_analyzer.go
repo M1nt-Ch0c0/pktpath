@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -377,6 +378,7 @@ func (a *cordisActivation) run(ctx context.Context, analyzer, session string, cu
 
 // Control messages contain only strings/booleans/metadata, never evidence JSON.
 type cordisReply struct {
+	Incarnation string          `json:"incarnation,omitempty"`
 	Kind        string          `json:"kind,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
 	ID          string          `json:"id"`
@@ -392,6 +394,9 @@ type cordisReply struct {
 }
 
 type cordisWorker struct {
+	incarnation string
+	dead        atomic.Bool
+	onFailure   func(*cordisWorker, error)
 	protocol    string
 	onRequest   func(*cordisWorker, []byte)
 	nodeVersion string
@@ -413,7 +418,7 @@ func startCordisWorker(opts CordisAnalyzerOptions) (*cordisWorker, error) {
 	return startCordisWorkerMode(opts, cordisProtocol, nil)
 }
 
-func startCordisWorkerMode(opts CordisAnalyzerOptions, protocol string, handler func(*cordisWorker, []byte)) (*cordisWorker, error) {
+func startCordisWorkerMode(opts CordisAnalyzerOptions, protocol string, handler func(*cordisWorker, []byte), observers ...func(*cordisWorker, error)) (*cordisWorker, error) {
 	if opts.HostPath == "" {
 		return nil, errors.New("missing Cordis host module path")
 	}
@@ -439,6 +444,18 @@ func startCordisWorkerMode(opts CordisAnalyzerOptions, protocol string, handler 
 	// Keep stderr out of the protocol. Errors are returned through framed replies.
 
 	w := &cordisWorker{protocol: protocol, onRequest: handler, cmd: cmd, input: input, pending: map[string]chan cordisReply{}, failed: make(chan struct{}), exited: make(chan struct{})}
+	if protocol == cordisLifecycleProtocol {
+		var nonce [16]byte
+		if _, err = rand.Read(nonce[:]); err != nil {
+			input.Close()
+			output.Close()
+			return nil, err
+		}
+		w.incarnation = hex.EncodeToString(nonce[:])
+	}
+	if len(observers) > 0 {
+		w.onFailure = observers[0]
+	}
 	cmd.Stderr = &w.stderr
 	if err = cmd.Start(); err != nil {
 		input.Close()
@@ -446,13 +463,17 @@ func startCordisWorkerMode(opts CordisAnalyzerOptions, protocol string, handler 
 		return nil, err
 	}
 	go w.read(output)
-	go func() { w.waitErr = cmd.Wait(); close(w.exited); w.fail(errors.New("Cordis host exited")) }()
+	go func() { w.waitErr = cmd.Wait(); w.fail(errors.New("Cordis host exited")); close(w.exited) }()
 	var hello cordisReply
-	if err = w.control("hello", nil, &hello); err != nil || hello.Core != "3.18.1" {
+	helloFields := map[string]any{}
+	if protocol == cordisLifecycleProtocol {
+		helloFields["incarnation"] = w.incarnation
+	}
+	if err = w.control("hello", helloFields, &hello); err != nil || hello.Core != "3.18.1" || (protocol == cordisLifecycleProtocol && hello.Incarnation != w.incarnation) {
 		w.abort()
 		<-w.exited
 		if err == nil {
-			err = fmt.Errorf("unexpected Cordis core version: %q", hello.Core)
+			err = fmt.Errorf("unexpected Cordis core/session handshake: %q", hello.Core)
 		}
 		return nil, err
 	}
@@ -466,7 +487,18 @@ func (w *cordisWorker) abort() {
 	}
 }
 func (w *cordisWorker) fail(err error) {
-	w.failOnce.Do(func() { w.mu.Lock(); w.failure = err; w.mu.Unlock(); close(w.failed) })
+	w.dead.Store(true) // fast rejection even before the owner admission lock is acquired
+	w.failOnce.Do(func() {
+		// No worker mutex is held here. Lifecycle revocation uses the same owner
+		// mutex as scope admission/commit, before failure becomes externally settled.
+		if w.onFailure != nil {
+			w.onFailure(w, err)
+		}
+		w.mu.Lock()
+		w.failure = err
+		w.mu.Unlock()
+		close(w.failed)
+	})
 }
 func (w *cordisWorker) read(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
@@ -474,11 +506,16 @@ func (w *cordisWorker) read(reader io.Reader) {
 	for scanner.Scan() {
 		var reply cordisReply
 		if err := json.Unmarshal(scanner.Bytes(), &reply); err != nil || reply.Protocol != w.protocol || reply.ID == "" {
-			w.fail(errors.New("invalid Cordis control response"))
+			w.fail(fmt.Errorf("invalid Cordis control response: json=%v protocol=%q id=%q", err, reply.Protocol, reply.ID))
 			w.abort()
 			return
 		}
 		if w.protocol == cordisLifecycleProtocol {
+			if reply.Incarnation != w.incarnation {
+				w.fail(errors.New("invalid host incarnation"))
+				w.abort()
+				return
+			}
 			if reply.Kind == "request" && strings.HasPrefix(reply.ID, "node/") && w.onRequest != nil {
 				data := append([]byte(nil), scanner.Bytes()...)
 				go w.onRequest(w, data) // never block read loop on Apply/dispose/RPC
@@ -522,6 +559,7 @@ func (w *cordisWorker) control(op string, fields map[string]any, out *cordisRepl
 	req := map[string]any{"id": id, "op": op, "protocol": w.protocol}
 	if w.protocol == cordisLifecycleProtocol {
 		req["kind"] = "request"
+		req["incarnation"] = w.incarnation
 	}
 	for k, v := range fields {
 		req[k] = v

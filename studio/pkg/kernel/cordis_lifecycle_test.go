@@ -246,7 +246,7 @@ func TestCordisF02ExplicitAsyncCleanupQuarantineAndRecovery(t *testing.T) {
 		state := h.states["async"].State
 		changed := h.changed
 		h.mu.Unlock()
-		if state == "cleanup-blocked" {
+		if state == "cleanup-timeout-pending" {
 			break
 		}
 		select {
@@ -255,7 +255,7 @@ func TestCordisF02ExplicitAsyncCleanupQuarantineAndRecovery(t *testing.T) {
 			t.Fatal("cleanup deadline not surfaced")
 		}
 	}
-	if err := k.SetEnabled("async", true); err == nil || !strings.Contains(err.Error(), "cleanup-blocked") {
+	if err := k.SetEnabled("async", true); err == nil || !strings.Contains(err.Error(), "cleanup-timeout-pending") {
 		t.Fatalf("known quarantine disguised as pending: %v", err)
 	}
 	if n.Load() != 1 {
@@ -422,7 +422,7 @@ func TestCordisF02LostPlanAckAfterOneApplyDoesNotReplay(t *testing.T) {
 	_ = path
 	script := filepath.Join(t.TempDir(), "lost-ack.mjs")
 	// Protocol fault fixture only, NOT presented as a real Cordis graph test.
-	os.WriteFile(script, []byte(`import{createInterface}from'node:readline';const protocol='pktpath.cordis3.lifecycle/2';const emit=x=>process.stdout.write(JSON.stringify({protocol,...x})+'\n');const r=createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);if(q.op==='hello')emit({id:q.id,kind:'response',ok:true,core:'3.18.1',node:process.version});else if(q.op==='plan'){const e=q.entries[0];emit({id:'node/1',kind:'request',op:'prepare',plugin:e.plugin,revision:e.revision,attempt:e.plugin+'/'+e.revision+'/1',deps:{}})}else if(q.id==='node/1')process.exit(0)});`), 0600)
+	os.WriteFile(script, []byte(`import{createInterface}from'node:readline';const protocol='pktpath.cordis3.lifecycle/2';let incarnation;const emit=x=>process.stdout.write(JSON.stringify({protocol,incarnation,...x})+'\n');const r=createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);if(q.op==='hello'){incarnation=q.incarnation;emit({id:q.id,kind:'response',ok:true,core:'3.18.1',node:process.version})}else if(q.op==='plan'){const e=q.entries[0];emit({id:'node/1',kind:'request',op:'prepare',plugin:e.plugin,revision:e.revision,attempt:e.plugin+'/'+e.revision+'/1',deps:{}})}else if(q.id==='node/1')process.exit(0)});`), 0600)
 	var apply, cleanup atomic.Int32
 	h := NewCordisLifecycleHost(CordisLifecycleOptions{HostPath: script, PluginIDs: []string{"one"}})
 	k := New(HostServices{AppDir: t.TempDir(), LifecycleHost: h})
@@ -588,7 +588,7 @@ func TestCordisF02CompletedScopeLedgerPrunedAndReplayRejected(t *testing.T) {
 		t.Fatalf("unbounded completed scope retention: %d", retained)
 	}
 	// Current-revision replay with old counter is not allowed after pruning.
-	_, err := h.prepare(cordisNodeRequest{Plugin: "churn", Revision: revision, Attempt: "churn/" + revision + "/1", Deps: map[string]string{}})
+	_, err := h.prepare(cordisNodeRequest{Plugin: "churn", Revision: revision, Attempt: "churn/" + revision + "/1", Incarnation: h.worker.incarnation, Deps: map[string]string{}})
 	if err == nil || calls.Load() != 17 {
 		t.Fatalf("replayed pruned request: calls=%d err=%v", calls.Load(), err)
 	}

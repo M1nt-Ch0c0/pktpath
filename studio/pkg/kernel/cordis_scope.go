@@ -11,6 +11,10 @@ import (
 // F02 staging is type-agnostic: opaque Go values/functions never cross the wire.
 // Only enrolled activations use it. Other plugin types are NOT thereby migrated.
 type cordisScope struct {
+	cleanupTimedOut                       bool // owner.mu; not the actual cleanup return error
+	host                                  *cordisWorker
+	hostIncarnation                       string
+	admissionEpoch                        uint64
 	owner                                 *CordisLifecycleHost
 	scope                                 *PluginContext
 	plugin, revision, attempt, generation string
@@ -133,14 +137,13 @@ func (h *CordisLifecycleHost) startCleanup(b *cordisScope) {
 			h.mu.Lock()
 			b.cleanupError = errors.Join(errs...)
 			b.cleanupOK = b.cleanupError == nil
-			if !b.cleanupOK {
-				h.eventLocked(b.plugin, "cleanup-blocked", b.generation, b.cleanupError.Error())
-			} else {
-				h.eventLocked(b.plugin, "disposed", b.generation, "")
-			}
+			action := h.cleanupFinishedLocked(b)
 			close(b.cleanupDone)
 			h.signalLocked()
 			h.mu.Unlock()
+			if action != nil {
+				h.resumeAfterDrain(action)
+			}
 		}()
 	})
 }

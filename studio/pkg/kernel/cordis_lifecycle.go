@@ -27,6 +27,7 @@ type CordisLifecycleOptions struct {
 	CleanupTimeout, OperationTimeout time.Duration
 }
 type CordisPluginState struct {
+	Recovery   string `json:"recovery,omitempty"`
 	Plugin     string `json:"plugin"`
 	Desired    string `json:"desired_revision"`
 	Effective  string `json:"effective_revision"`
@@ -41,13 +42,19 @@ type CordisLifecycleEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 type CordisLifecycleSnapshot struct {
-	Protocol string                 `json:"protocol"`
-	Core     string                 `json:"core"`
-	Node     string                 `json:"node,omitempty"`
-	Plugins  []CordisPluginState    `json:"plugins"`
-	Events   []CordisLifecycleEvent `json:"events"`
+	HostIncarnation string                 `json:"host_incarnation,omitempty"`
+	HostEpoch       string                 `json:"host_epoch"`
+	HostAlive       bool                   `json:"host_alive"`
+	Protocol        string                 `json:"protocol"`
+	Core            string                 `json:"core"`
+	Node            string                 `json:"node,omitempty"`
+	Plugins         []CordisPluginState    `json:"plugins"`
+	Events          []CordisLifecycleEvent `json:"events"`
 }
 type CordisLifecycleHost struct {
+	recoveries                   map[string]*cordisRecovery
+	nextRecovery                 uint64
+	hostEpoch                    uint64
 	highestAttempt               map[string]uint64
 	closeOnce                    sync.Once
 	closeDone                    chan struct{}
@@ -74,6 +81,7 @@ type cordisPlan struct {
 }
 type cordisNodeRequest struct {
 	ID, Op, Plugin, Revision, Attempt string
+	Incarnation                       string
 	Deps                              map[string]string
 }
 
@@ -114,7 +122,10 @@ func (h *CordisLifecycleHost) Snapshot() *CordisLifecycleSnapshot {
 	s := &CordisLifecycleSnapshot{Protocol: cordisLifecycleProtocol, Core: "3.18.1", Events: append([]CordisLifecycleEvent(nil), h.events...)}
 	if h.worker != nil {
 		s.Node = h.worker.nodeVersion
+		s.HostIncarnation = h.worker.incarnation
+		s.HostAlive = h.sourceValidLocked(h.worker, h.worker.incarnation)
 	}
+	s.HostEpoch = strconv.FormatUint(h.hostEpoch, 10)
 	for _, v := range h.states {
 		s.Plugins = append(s.Plugins, *v)
 	}
@@ -126,7 +137,7 @@ func (h *CordisLifecycleHost) start(k *Kernel) error {
 	if h.startupError != nil {
 		return h.startupError
 	}
-	w, err := startCordisWorkerMode(CordisAnalyzerOptions{NodePath: h.opts.NodePath, HostPath: h.opts.HostPath}, cordisLifecycleProtocol, h.handle)
+	w, err := startCordisWorkerMode(CordisAnalyzerOptions{NodePath: h.opts.NodePath, HostPath: h.opts.HostPath}, cordisLifecycleProtocol, h.handle, h.failWorker)
 	if err != nil {
 		h.mu.Lock()
 		h.startupError = err
@@ -134,6 +145,15 @@ func (h *CordisLifecycleHost) start(k *Kernel) error {
 		return err
 	}
 	h.mu.Lock()
+	if w.dead.Load() {
+		bindErr := errors.New("host died before binding")
+		h.startupError = bindErr
+		h.mu.Unlock()
+		w.abort()
+		<-w.exited
+		return bindErr
+	}
+	h.hostEpoch++
 	h.worker = w
 	k.mu.RLock()
 	ids := k.sortedIDsLocked()
@@ -155,7 +175,7 @@ func (h *CordisLifecycleHost) start(k *Kernel) error {
 	k.mu.RUnlock()
 	h.mu.Unlock()
 	if err = w.control("plan", map[string]any{"entries": plans}, nil); err != nil {
-		h.failHost(err)
+		h.failWorker(w, err)
 		return err
 	}
 	go func() {
@@ -164,23 +184,48 @@ func (h *CordisLifecycleHost) start(k *Kernel) error {
 		closed := h.closed
 		h.mu.Unlock()
 		if !closed {
-			h.failHost(errors.New("lifecycle host unavailable; no Go fallback/retry"))
+			h.failWorker(w, errors.New("lifecycle host unavailable; no Go fallback/retry"))
 		}
 	}()
 	return nil
 }
 func (h *CordisLifecycleHost) failHost(err error) {
 	h.mu.Lock()
+	w := h.worker
+	h.mu.Unlock()
+	h.failWorker(w, err)
+}
+func (h *CordisLifecycleHost) failWorker(w *cordisWorker, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || w != h.worker {
+		return
+	} // an obsolete host cannot fail its replacement
+	if h.startupError == nil {
+		h.hostEpoch++
+	}
 	h.startupError = err
+	h.recoveries = nil
 	for _, b := range h.attempts {
 		h.revokeLocked(b, "host-unavailable")
 	}
-	for _, s := range h.states {
-		s.State = "host-unavailable"
-		s.Error = err.Error()
+	for _, state := range h.states {
+		state.State = "host-unavailable"
+		state.Error = err.Error()
 	}
 	h.signalLocked()
-	h.mu.Unlock()
+}
+
+// Both admission and final publication call this while holding the owner lock.
+// A transport callback is bound to its source worker, not whichever host is now current.
+func (h *CordisLifecycleHost) sourceValidLocked(w *cordisWorker, incarnation string) bool {
+	return !h.closed && h.sourceCurrentLocked(w, incarnation)
+}
+
+// Closing rejects new prepare but must still acknowledge exact current-host
+// cleanup callbacks, otherwise dispose itself can never observe graceful drain.
+func (h *CordisLifecycleHost) sourceCurrentLocked(w *cordisWorker, incarnation string) bool {
+	return h.startupError == nil && w != nil && w == h.worker && !w.dead.Load() && incarnation != "" && incarnation == w.incarnation
 }
 func (h *CordisLifecycleHost) handle(w *cordisWorker, raw []byte) {
 	var req cordisNodeRequest
@@ -189,14 +234,14 @@ func (h *CordisLifecycleHost) handle(w *cordisWorker, raw []byte) {
 	if err == nil {
 		switch req.Op {
 		case "prepare":
-			data, err = h.prepare(req)
+			data, err = h.prepareFrom(w, req)
 		case "revoke":
-			err = h.revoke(req)
+			err = h.revokeFrom(w, req)
 		default:
 			err = errors.New("unknown Node operation")
 		}
 	}
-	reply := map[string]any{"id": req.ID, "kind": "response", "protocol": cordisLifecycleProtocol, "ok": err == nil, "data": data}
+	reply := map[string]any{"id": req.ID, "kind": "response", "protocol": cordisLifecycleProtocol, "incarnation": w.incarnation, "ok": err == nil, "data": data}
 	if err != nil {
 		reply["error"] = err.Error()
 	}
@@ -249,6 +294,12 @@ func cordisAttemptNumber(req cordisNodeRequest) (uint64, error) {
 	return n, nil
 }
 func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
+	h.mu.Lock()
+	w := h.worker
+	h.mu.Unlock()
+	return h.prepareFrom(w, req)
+}
+func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest) (any, error) {
 	number, parseErr := cordisAttemptNumber(req)
 	if parseErr != nil {
 		return nil, parseErr
@@ -259,8 +310,8 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 	s := h.states[req.Plugin]
 	rec := k.records[req.Plugin]
 	reject := func(err error) (any, error) { k.mu.Unlock(); h.mu.Unlock(); return nil, err }
-	if h.closed || s == nil || rec == nil || !rec.enabled || s.Desired != req.Revision {
-		return reject(errors.New("stale/cancelled activation intent"))
+	if !h.sourceValidLocked(w, req.Incarnation) || s == nil || rec == nil || !rec.enabled || s.Desired != req.Revision {
+		return reject(errors.New("host/session failed or stale/cancelled activation intent"))
 	}
 	if number <= h.highestAttempt[req.Plugin] {
 		return reject(errors.New("stale/duplicate/cancelled attempt; never re-execute"))
@@ -280,25 +331,6 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 	if _, duplicate := h.attempts[req.Attempt]; duplicate {
 		return reject(errors.New("duplicate prepare; never re-execute"))
 	}
-	// A revoked scope retains its resource slot until Apply and ALL tracked cleanup
-	// actually return. A timeout alone never licenses reuse.
-	for _, old := range h.attempts {
-		if old.plugin != req.Plugin {
-			continue
-		}
-		select {
-		case <-old.cleanupDone:
-			if old.cleanupOK {
-				continue
-			}
-		default:
-		}
-		err := errors.New("cleanup-blocked: previous activation still owns resource slot")
-		s.State = "cleanup-blocked"
-		s.Error = err.Error()
-		h.eventLocked(req.Plugin, "cleanup-blocked", old.generation, err.Error())
-		return reject(err)
-	}
 	meta := rec.plugin.Meta()
 	if len(req.Deps) != len(meta.Requires) {
 		return reject(errors.New("dependency snapshot shape mismatch"))
@@ -315,10 +347,48 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 			injected[name] = value
 		}
 	}
+	// A revoked scope retains its resource slot until Apply and ALL tracked cleanup
+	// actually return. A timeout alone never licenses reuse.
+	for _, old := range h.attempts {
+		if old.plugin != req.Plugin {
+			continue
+		}
+		select {
+		case <-old.cleanupDone:
+			if old.cleanupOK {
+				continue
+			}
+		default:
+		}
+		state := "cleanup-pending"
+		select {
+		case <-old.cleanupDone:
+			state = "cleanup-failed"
+		default:
+			if old.cleanupTimedOut {
+				state = "cleanup-timeout-pending"
+			}
+		}
+		err := fmt.Errorf("%s: previous activation still owns resource slot", state)
+		s.State = state
+		s.Error = err.Error()
+		s.Recovery = "explicit-reload-after-successful-drain"
+		// Only dependency-driven restart under the SAME user intent can arm
+		// one retry. Direct toggle/config/reload never silently gets another Apply.
+		if state != "cleanup-failed" && old.revoked && old.revision == req.Revision && len(req.Deps) > 0 && !sameCordisDeps(old.deps, req.Deps) {
+			if h.recoveries == nil {
+				h.recoveries = map[string]*cordisRecovery{}
+			}
+			h.recoveries[req.Plugin] = &cordisRecovery{old: old, host: w, incarnation: w.incarnation, epoch: h.hostEpoch, plugin: req.Plugin, revision: req.Revision, deps: cloneCordisDeps(req.Deps)}
+			s.Recovery = "one-dependency-retry-armed"
+		}
+		h.eventLocked(req.Plugin, state, old.generation, err.Error())
+		return reject(err)
+	}
 	h.nextGeneration++
 	generation := h.incarnation + "/" + strconv.FormatUint(h.nextGeneration, 10)
 	c := &PluginContext{kernel: k, pluginID: req.Plugin}
-	b := &cordisScope{owner: h, scope: c, plugin: req.Plugin, revision: req.Revision, attempt: req.Attempt, generation: generation, deps: req.Deps, depOwners: owners, provided: map[string]any{}, injected: injected, applyDone: make(chan struct{}), cleanupDone: make(chan struct{})}
+	b := &cordisScope{host: w, hostIncarnation: w.incarnation, admissionEpoch: h.hostEpoch, owner: h, scope: c, plugin: req.Plugin, revision: req.Revision, attempt: req.Attempt, generation: generation, deps: req.Deps, depOwners: owners, provided: map[string]any{}, injected: injected, applyDone: make(chan struct{}), cleanupDone: make(chan struct{})}
 	c.staging = b
 	h.attempts[req.Attempt] = b
 	s.State = "preparing"
@@ -341,7 +411,7 @@ func (h *CordisLifecycleHost) prepare(req cordisNodeRequest) (any, error) {
 	h.mu.Lock()
 	k.mu.Lock()
 	s = h.states[req.Plugin]
-	if err == nil && (h.closed || b.revoked || s.Desired != b.revision || !rec.enabled || !h.depsMatchLocked(b)) {
+	if err == nil && (!h.sourceValidLocked(b.host, b.hostIncarnation) || b.admissionEpoch != h.hostEpoch || b.revoked || s.Desired != b.revision || !rec.enabled || !h.depsMatchLocked(b)) {
 		err = errors.New("stale Apply completion fenced")
 	}
 	if err == nil {
@@ -448,8 +518,13 @@ func (h *CordisLifecycleHost) revokeLocked(b *cordisScope, reason string) {
 		}
 	}
 }
-func (h *CordisLifecycleHost) revoke(req cordisNodeRequest) error {
+func (h *CordisLifecycleHost) revoke(req cordisNodeRequest) error { return h.revokeFrom(nil, req) }
+func (h *CordisLifecycleHost) revokeFrom(w *cordisWorker, req cordisNodeRequest) error {
 	h.mu.Lock()
+	if w != nil && !h.sourceCurrentLocked(w, req.Incarnation) {
+		h.mu.Unlock()
+		return errors.New("host incarnation/liveness admission rejected")
+	}
 	number, err := cordisAttemptNumber(req)
 	if err != nil || !h.manages(req.Plugin) {
 		h.mu.Unlock()
@@ -463,7 +538,7 @@ func (h *CordisLifecycleHost) revoke(req cordisNodeRequest) error {
 		h.mu.Unlock()
 		return nil
 	}
-	if b.plugin != req.Plugin || b.revision != req.Revision {
+	if b.plugin != req.Plugin || b.revision != req.Revision || (w != nil && (b.host != w || b.hostIncarnation != req.Incarnation)) {
 		h.mu.Unlock()
 		return errors.New("revoke identity mismatch")
 	}
@@ -486,14 +561,15 @@ func (h *CordisLifecycleHost) revoke(req cordisNodeRequest) error {
 			return err
 		default:
 		}
-		b.cleanupError = errors.New("cleanup deadline: resource remains quarantined")
-		if s := h.states[b.plugin]; s != nil && s.Generation == b.generation {
-			s.State = "cleanup-blocked"
-			s.Error = b.cleanupError.Error()
+		b.cleanupTimedOut = true
+		err := errors.New("cleanup-timeout-pending: actual completion not proved; resource remains quarantined")
+		if state := h.states[b.plugin]; state != nil && state.Generation == b.generation && h.sourceValidLocked(b.host, b.hostIncarnation) {
+			state.State = "cleanup-timeout-pending"
+			state.Error = err.Error()
 		}
-		h.eventLocked(b.plugin, "cleanup-blocked", b.generation, b.cleanupError.Error())
+		h.eventLocked(b.plugin, "cleanup-timeout-pending", b.generation, err.Error())
 		h.mu.Unlock()
-		return errors.New("cleanup-blocked; callback/Apply has not proved exit")
+		return err
 	}
 }
 
@@ -502,7 +578,12 @@ func (h *CordisLifecycleHost) revoke(req cordisNodeRequest) error {
 func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string]any, persist bool) error {
 	h.mu.Lock()
 	k := h.kernel
-	if h.closed || h.startupError != nil || h.worker == nil {
+	if !h.sourceValidLocked(h.worker, func() string {
+		if h.worker != nil {
+			return h.worker.incarnation
+		}
+		return ""
+	}()) {
 		err := h.startupError
 		if err == nil {
 			err = errors.New("lifecycle host unavailable/closed")
@@ -523,10 +604,12 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	if config != nil {
 		rec.config = config
 	}
+	delete(h.recoveries, id)
 	h.nextRevision++
 	revision := strconv.FormatUint(h.nextRevision, 10)
 	s := h.states[id]
 	s.Desired = revision
+	s.Recovery = ""
 	s.Error = ""
 	s.State = "waiting-deps"
 	if !rec.enabled {
@@ -549,7 +632,7 @@ func (h *CordisLifecycleHost) update(id string, enabled *bool, config map[string
 	h.mu.Unlock()
 	err := w.control("plan", map[string]any{"entries": []cordisPlan{plan}}, nil)
 	if err != nil {
-		h.failHost(err)
+		h.failWorker(w, err)
 	}
 	var savedErr error
 	if persist {
@@ -595,7 +678,11 @@ func (h *CordisLifecycleHost) waitRevision(ctx context.Context, id, revision str
 			h.mu.Unlock()
 			return nil
 		}
-		if state.State == "failed" || state.State == "cleanup-blocked" || state.State == "host-unavailable" {
+		cleanupTerminal := strings.HasPrefix(state.State, "cleanup-")
+		if !allowDisabled && (state.State == "cleanup-pending" || state.State == "cleanup-timeout-pending") {
+			cleanupTerminal = false
+		}
+		if state.State == "failed" || cleanupTerminal || state.State == "host-unavailable" {
 			h.mu.Unlock()
 			return fmt.Errorf("%s: %s", state.State, state.Error)
 		}

@@ -2,6 +2,10 @@
 import { Context } from '@cordisjs/core';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
+// stdout is exclusively the framed protocol, including during root ctx.stop()
+// when Cordis3 removes user logging listeners and uses console.info fallback.
+console.info = (...args) => console.error(...args);
+console.log = (...args) => console.error(...args);
 const core = createRequire(import.meta.url)('@cordisjs/core/package.json').version;
 const protocol = 'pktpath.cordis3.lifecycle/2';
 const ctx = new Context();
@@ -10,7 +14,8 @@ const entries = new Map(), publications = new Map(), facades = new Map();
 const pending = new Map(), retired = new Map();
 let sequence = 0n, attemptSequence = 0n, closing = false;
 const trace = [];
-const emit = data => process.stdout.write(JSON.stringify({ protocol, ...data }) + '\n');
+let incarnation;
+const emit = data => process.stdout.write(JSON.stringify({ protocol, incarnation, ...data }) + '\n');
 const key = name => `f02:${name}`;
 function record(phase, data) { trace.push({ phase, ...data }); while (trace.length > 256 || Buffer.byteLength(JSON.stringify(trace)) > 32768) trace.shift(); }
 function callGo(op, data) {
@@ -51,7 +56,7 @@ function install(plan) {
   const old = entries.get(plan.plugin);
   if (old && BigInt(plan.revision) <= BigInt(old.revision)) return; // stale Go intent cannot revert newer
   if (old?.fork) old.fork.dispose();
-  const entry = { ...plan, fork: null };
+  const entry = { ...plan, fork: null, lastRecovery: 0n };
   entries.set(plan.plugin, entry);
   refresh();
   if (!plan.enabled) return;
@@ -96,11 +101,22 @@ async function dispatch(req) {
   switch (req.op) {
     case 'hello':
       if (core !== '3.18.1' || Number(process.versions.node.split('.')[0]) < 22) throw new Error('unsupported core/runtime');
-      return { core, node: process.version };
+      if(typeof req.incarnation!=='string'||!req.incarnation||(incarnation&&incarnation!==req.incarnation))throw new Error('invalid host incarnation');
+      incarnation=req.incarnation;return { core, node: process.version, incarnation };
     case 'plan':
       if (closing) throw new Error('host closing');
       for (const plan of req.entries) install(plan);
       return { accepted: true };
+    case 'resume': {
+      const e=entries.get(req.plugin);
+      if(closing||!e?.enabled||e.revision!==req.revision||!e.fork)throw new Error('stale recovery intent');
+      for(const name of e.requires)if(facades.get(name)?.instance!==req.deps?.[name])throw new Error('stale recovery dependency');
+      const number=BigInt(req.recovery);if(number<=e.lastRecovery)throw new Error('duplicate/stale recovery');
+      e.lastRecovery=number;
+      record('bounded-recovery', {plugin:e.plugin,revision:e.revision,recovery:req.recovery});
+      e.fork.update({},true); // Cordis3 public forced update; no loader/HMR
+      return {accepted:true};
+    }
     case 'state':
       return { data: { trace, pending: pending.size, plugins: [...entries.values()].map(e => ({ plugin: e.plugin, revision: e.revision, status: e.fork?.status ?? 'disabled' })) } };
     case 'shutdown':
@@ -118,6 +134,7 @@ lines.on('line', line => {
     if (Buffer.byteLength(line) > 65535) throw new Error('oversize frame');
     const req = JSON.parse(line);
     if (req.protocol !== protocol || typeof req.id !== 'string') throw new Error('bad protocol/id');
+    if(req.op!=='hello'&&req.incarnation!==incarnation)throw new Error('stale host incarnation');
     if (req.kind === 'response' && req.id.startsWith('node/')) {
       const waiter = pending.get(req.id);
       if (!waiter) return; // duplicate/late reply never re-executes
