@@ -109,9 +109,10 @@ pktpath/
 
 ### Prerequisites
 
-- **eBPF**: `clang` (`>= 15`, BPF target `bpfel`)
-- **Android arm64 collector**: Android NDK (`aarch64-linux-android28-clang`)
+- **eBPF**: `clang` (`>= 15`, BPF target `bpfel`) and `pyelftools` (`pip install -r requirements-build.txt`)
+- **Android arm64 collector**: Android NDK (`aarch64-linux-android28-clang`; CI compile-checks with official NDK r28b / 28.1.13356709, not on-device)
 - **Linux x86_64 static collector**: `gcc -static` (Linux or WSL)
+- **Linux arm64 static collector**: `aarch64-linux-gnu-gcc -static` (optional local; required in CI)
 - **PktPath Studio (Windows)**: Go `>= 1.22` (`CGO_ENABLED=0`)
 - **Host CLI**: Python `>= 3.10` (standard library only)
 

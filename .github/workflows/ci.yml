@@ -20,10 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install clang, llvm & cross-compilers
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Install Python build dependencies
+        run: python3 -m pip install -r requirements-build.txt
 
       - name: Build dual-arch eBPF bytecode headers
         run: python3 scripts/build_bpf.py --arch all
@@ -34,8 +41,31 @@ jobs:
           python3 scripts/build_device.py --target linux-arm64
           file bin/pktpath-linux-x86_64 bin/pktpath-linux-arm64
 
+  android-arm64-ndk:
+    # Independent compile-only check. ubuntu-latest does not ship the NDK,
+    # and `if: env.ANDROID_NDK_HOME != ''` cannot see values written to
+    # $GITHUB_ENV, so the previous step was silently skipped. This job
+    # always installs official NDK r28b and compiles the collector.
+    # Success here is not on-device or kernel-version evidence.
+    name: Android arm64 collector (NDK compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache official Android NDK r28b
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pktpath-ci/android-ndk-r28b
+          key: ndk-r28b-linux-e9f2759862cecfd48c20bbb7d8cfedbb020f4d91b5f78d9a2fc106f7db3c27ed
+
+      - name: Install official Android NDK r28b
+        run: bash scripts/ci_install_ndk.sh "$HOME/.cache/pktpath-ci/android-ndk-r28b"
+
       - name: Build Android arm64 collector (NDK)
-        if: env.ANDROID_NDK_HOME != '' || env.ANDROID_NDK_ROOT != ''
         run: |
           python3 scripts/build_device.py --target android-arm64
           file bin/pktpath-android-arm64

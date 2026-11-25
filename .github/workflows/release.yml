@@ -20,10 +20,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install toolchains
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Install Python build dependencies
+        run: python3 -m pip install -r requirements-build.txt
+
+      - name: Cache official Android NDK r28b
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pktpath-ci/android-ndk-r28b
+          key: ndk-r28b-linux-e9f2759862cecfd48c20bbb7d8cfedbb020f4d91b5f78d9a2fc106f7db3c27ed
+
+      - name: Install official Android NDK r28b
+        run: bash scripts/ci_install_ndk.sh "$HOME/.cache/pktpath-ci/android-ndk-r28b"
 
       - name: Compile dual-arch BPF headers & collectors
         run: |

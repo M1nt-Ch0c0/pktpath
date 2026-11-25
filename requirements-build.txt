@@ -1,0 +1,3 @@
+# Build-time Python dependencies for scripts/build_bpf.py.
+# Not required by the host CLI (pktpath.py), which stays stdlib-only.
+pyelftools==0.33
