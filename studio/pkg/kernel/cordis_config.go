@@ -163,6 +163,9 @@ func (h *CordisLifecycleHost) configure(ctx context.Context, id string, target m
 		return err
 	}
 	old, err := readCordisDisk(k.configPath)
+	if e := k.checkConfigImageCompatibilityLocked("transaction-admission", old, err); e != nil {
+		err = e
+	}
 	if err == nil {
 		_, err = cordisConfigDocument(old, id, target)
 		if err == nil && old.exists {

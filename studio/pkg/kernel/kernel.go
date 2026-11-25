@@ -341,7 +341,17 @@ func (k *Kernel) RegisterBuiltin(p Plugin, defaultEnabled bool) {
 // Start loads persisted configuration, discovers external plugin bundles, and
 // activates all enabled plugins in deterministic order.
 func (k *Kernel) Start() error {
-	persisted := k.readPersistedConfig()
+	persisted, startupErr := k.readCandidateStartupConfig()
+	if err := startupErr; err != nil {
+		k.mu.Lock()
+		for id, rec := range k.records {
+			if k.host.LifecycleHost.manages(id) {
+				rec.lastError = err.Error()
+			}
+		}
+		k.mu.Unlock()
+		return err
+	}
 
 	// Discover external plugins in PluginsDir (folders with manifest.json + legacy *.json).
 	_ = k.discoverExternalPlugins()
@@ -521,6 +531,9 @@ func (k *Kernel) deactivatePlugin(id string) {
 // SetEnabled toggles a plugin on/off at runtime with full effect-scope rollback
 // and automatic dependent cascade (Cordis-style dependency lifecycle).
 func (k *Kernel) SetEnabled(id string, enabled bool) error {
+	if err := k.checkConfigCompatibility("control"); err != nil {
+		return err
+	}
 	if h := k.host.LifecycleHost; h.manages(id) {
 		return h.update(id, &enabled, nil, true)
 	}
@@ -596,6 +609,9 @@ func (k *Kernel) SetConfig(id string, raw map[string]any) (map[string]any, error
 	return k.SetConfigContext(context.Background(), id, raw)
 }
 func (k *Kernel) SetConfigContext(ctx context.Context, id string, raw map[string]any) (map[string]any, error) {
+	if err := k.checkConfigCompatibility("control"); err != nil {
+		return nil, err
+	}
 	k.mu.RLock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -646,6 +662,9 @@ func (k *Kernel) ResetConfig(id string) (map[string]any, error) {
 	return k.ResetConfigContext(context.Background(), id)
 }
 func (k *Kernel) ResetConfigContext(ctx context.Context, id string) (map[string]any, error) {
+	if err := k.checkConfigCompatibility("control"); err != nil {
+		return nil, err
+	}
 	k.mu.RLock()
 	rec, ok := k.records[id]
 	if !ok {
@@ -659,6 +678,9 @@ func (k *Kernel) ResetConfigContext(ctx context.Context, id string) (map[string]
 
 // Reload disposes and re-applies a plugin's current configuration.
 func (k *Kernel) Reload(id string) error {
+	if err := k.checkConfigCompatibility("control"); err != nil {
+		return err
+	}
 	if h := k.host.LifecycleHost; h.manages(id) {
 		return h.update(id, nil, nil, false)
 	}
@@ -1035,6 +1057,9 @@ func (k *Kernel) savePersistedConfig() error {
 	if k.host.LifecycleHost != nil {
 		k.persistMu.Lock()
 		defer k.persistMu.Unlock()
+	}
+	if err := k.checkConfigCompatibilityLocked("writer"); err != nil {
+		return err
 	}
 	if k.configPath == "" {
 		return nil

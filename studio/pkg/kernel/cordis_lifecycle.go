@@ -46,18 +46,20 @@ type CordisLifecycleEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 type CordisLifecycleSnapshot struct {
-	ConfigOperations []CordisConfigOperationView `json:"config_operations,omitempty"`
-	CleanupScopes    []CordisCleanupView         `json:"cleanup_scopes,omitempty"`
-	HostIncarnation  string                      `json:"host_incarnation,omitempty"`
-	HostEpoch        string                      `json:"host_epoch"`
-	HostAlive        bool                        `json:"host_alive"`
-	Protocol         string                      `json:"protocol"`
-	Core             string                      `json:"core"`
-	Node             string                      `json:"node,omitempty"`
-	Plugins          []CordisPluginState         `json:"plugins"`
-	Events           []CordisLifecycleEvent      `json:"events"`
+	ConfigCompatibility *CordisConfigCompatibilityView `json:"config_compatibility,omitempty"`
+	ConfigOperations    []CordisConfigOperationView    `json:"config_operations,omitempty"`
+	CleanupScopes       []CordisCleanupView            `json:"cleanup_scopes,omitempty"`
+	HostIncarnation     string                         `json:"host_incarnation,omitempty"`
+	HostEpoch           string                         `json:"host_epoch"`
+	HostAlive           bool                           `json:"host_alive"`
+	Protocol            string                         `json:"protocol"`
+	Core                string                         `json:"core"`
+	Node                string                         `json:"node,omitempty"`
+	Plugins             []CordisPluginState            `json:"plugins"`
+	Events              []CordisLifecycleEvent         `json:"events"`
 }
 type CordisLifecycleHost struct {
+	configCompatibility                      *CordisConfigCompatibilityView
 	configLastGeneration, configLastRevision map[string]string
 	configFence                              sync.RWMutex // intent admission vs one file commit; never owner.mu across FS
 	configSequence                           uint64
@@ -145,6 +147,10 @@ func (h *CordisLifecycleHost) Snapshot() *CordisLifecycleSnapshot {
 		s.Node = h.worker.nodeVersion
 		s.HostIncarnation = h.worker.incarnation
 		s.HostAlive = h.sourceValidLocked(h.worker, h.worker.incarnation)
+	}
+	if h.configCompatibility != nil {
+		v := *h.configCompatibility
+		s.ConfigCompatibility = &v
 	}
 	s.HostEpoch = strconv.FormatUint(h.hostEpoch, 10)
 	for _, op := range h.configOperations {

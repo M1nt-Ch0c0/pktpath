@@ -118,3 +118,31 @@ reconciliation, arbitrary filesystem timeout, power-loss atomicity, general plug
 rollback, cross-process writer protection, or Windows execution acceptance.**
 Only controlled four metadata plugins/synthetic faults are covered. Actual
 capture ownership, C/rebuild/transport and Go default remain unchanged.
+
+
+## F03.1a: known-schema compatibility admission (local candidate)
+
+The existing explicit F03 switch now checks the Studio configuration BEFORE
+Kernel discovery/Apply and BEFORE spawning Node. Existing file version 2, legacy
+missing-version, missing-file and documented null/default forms remain supported.
+Known managed plugin config keys/types must validate. ConfigSchema has no schema
+version API: any managed entry `schemaVersion` is rejected, NOT assumed to be 1
+or Cordis major 3. No migration, version stamp or backup is written.
+
+Bad/uninterpretable input makes this experimental Kernel startup fail closed;
+HTTP state still exposes `config_compatibility` with scope, reason, source and a
+zoned observation time/hash. Normal config/toggle/reset/reload admission and the
+single normal file writer check the same known schema. F03 transactions validate
+their own captured image too. Quarantine is sticky in-process; ordinary Reset or
+editing the file does not silently clear it. Running A is not automatically killed
+if incompatibility is discovered later; actual runtime state stays separate.
+
+This is **known-managed-schema/file-version admission only**, not arbitrary
+configuration compatibility. Opaque envelope/entry fields are accepted without
+interpretation and unchanged by startup; general legacy whole-file writer opaque
+roundtrip is NOT solved by this slice. No orphan-entry/uninstall policy is changed.
+No field transformation, downgrade/backup restore, persistent journal, crash
+transaction recovery, cross-process file locking or arbitrary plugin rollback.
+A startup format check does NOT restore a lost F03.0 operation after restart or
+persist `recovery-required`. F04 package mutations/legacy plugin APIs are outside
+this admission slice. Default Go and F02 without F03 switch retain prior behavior.
