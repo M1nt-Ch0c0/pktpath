@@ -14,12 +14,136 @@ import struct
 import subprocess
 import sys
 import tempfile
-from elftools.elf.elffile import ELFFile
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 INC_DIR = ROOT_DIR / "include"
 SRC_PATH = ROOT_DIR / "bpf" / "probe_core.bpf.c"
 OUT_HDR = ROOT_DIR / "bpf" / "generated_progs.h"
+
+REQUIREMENTS_BUILD_NAME = "requirements-build.txt"
+# Fallback when this checkout has no requirements-build.txt (for example an
+# older main). Keep in sync with that file when it is present.
+PYELFTOOLS_REQUIREMENT = "pyelftools==0.33"
+
+
+def requirements_build_path() -> Path:
+    return ROOT_DIR / REQUIREMENTS_BUILD_NAME
+
+
+def pinned_pyelftools_requirement(requirements_file):
+    if requirements_file is not None and requirements_file.is_file():
+        for raw in requirements_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            name = line.split("==")[0].split(">")[0].split("<")[0].split("[")[0].strip()
+            if name.lower() == "pyelftools":
+                return line
+    return PYELFTOOLS_REQUIREMENT
+
+
+def is_missing_elftools_module(exc: BaseException) -> bool:
+    """True only when the top-level elftools package is not installed.
+
+    A ModuleNotFoundError whose name is elftools.elf, elftools.elf.elffile,
+    or any other elftools.* submodule means the package is present but
+    incomplete or broken. Those, and any other ImportError, must be left
+    unchanged so the original traceback is shown.
+    """
+    if not isinstance(exc, ModuleNotFoundError):
+        return False
+    return exc.name == "elftools"
+
+
+def format_missing_pyelftools_message(
+    *,
+    interpreter: str,
+    requirements_file,
+    windows: bool,
+) -> str:
+    pin = pinned_pyelftools_requirement(requirements_file)
+    req_exists = requirements_file is not None and requirements_file.is_file()
+    if windows:
+        venv_python = ".venv\\Scripts\\python.exe"
+        script_path = "scripts\\build_bpf.py"
+        cmd_prefix = "& "
+        tested_note = (
+            "These lines are written for PowerShell and include the call "
+            "operator &. They were not executed on Windows and are not a "
+            "tested Windows, PowerShell, or cmd.exe matrix."
+        )
+    else:
+        venv_python = ".venv/bin/python"
+        script_path = "scripts/build_bpf.py"
+        cmd_prefix = ""
+        tested_note = (
+            "A PowerShell venv on the same interpreter would use "
+            "& .venv\\Scripts\\python.exe instead of .venv/bin/python. "
+            "Those Windows commands were not executed for this change; "
+            "do not treat them as a tested Windows matrix."
+        )
+
+    lines = [
+        "error: pyelftools is not installed for this Python interpreter.",
+        f"  interpreter: {interpreter}",
+        "",
+        "scripts/build_bpf.py needs the PyPI package pyelftools to read compiled BPF ELF objects.",
+    ]
+    if req_exists:
+        req = requirements_file.resolve()
+        lines.extend(
+            [
+                "",
+                "This checkout includes the build-dependency file:",
+                f"  {req}",
+                f"  (declares {pin})",
+                "",
+                "Create a virtual environment with this same interpreter and install from that file.",
+                "Do not use pip to modify a system-managed Python (PEP 668 / externally managed environments).",
+                "",
+                f'  {cmd_prefix}"{interpreter}" -m venv .venv',
+                f'  {cmd_prefix}"{venv_python}" -m pip install -r "{req}"',
+                f'  {cmd_prefix}"{venv_python}" {script_path}',
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "This checkout has no requirements-build.txt, so there is no local requirements path to give.",
+                "That file exists on main after the CI build-dependency fix; older checkouts may lack it.",
+                f"This source revision expects: {pin}",
+                "",
+                "Create a virtual environment with this same interpreter and install that package.",
+                "Do not use pip to modify a system-managed Python (PEP 668 / externally managed environments).",
+                "",
+                f'  {cmd_prefix}"{interpreter}" -m venv .venv',
+                f'  {cmd_prefix}"{venv_python}" -m pip install "{pin}"',
+                f'  {cmd_prefix}"{venv_python}" {script_path}',
+            ]
+        )
+    lines.extend(["", tested_note])
+    return "\n".join(lines)
+
+
+def require_elffile():
+    """Return ELFFile, or exit with an actionable install hint if pyelftools is missing."""
+    try:
+        from elftools.elf.elffile import ELFFile
+    except ImportError as exc:
+        if is_missing_elftools_module(exc):
+            req = requirements_build_path()
+            print(
+                format_missing_pyelftools_message(
+                    interpreter=sys.executable,
+                    requirements_file=req if req.is_file() else None,
+                    windows=(sys.platform == "win32"),
+                ),
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from exc
+        raise
+    return ELFFile
 
 # Exact map relocation order matching `enum pkt_map_idx` in include/pktpath_bpf.h
 MAP_NAMES = [
@@ -365,6 +489,7 @@ def build_one_arch(arch: str, extra_defines: list[str], out_hdr: Path) -> None:
         extracted = []
         max_seen_stack = 0
 
+        ELFFile = require_elffile()
         with open(obj_path, "rb") as fh:
             elf = ELFFile(fh)
             for entry in PROBES:
@@ -485,6 +610,7 @@ def build_one_arch(arch: str, extra_defines: list[str], out_hdr: Path) -> None:
 
 
 def main() -> int:
+    require_elffile()
     arm64_hdr = OUT_HDR.parent / "generated_progs_arm64.h"
     x86_hdr = OUT_HDR.parent / "generated_progs_x86_64.h"
     build_one_arch("arm64", [], arm64_hdr)
