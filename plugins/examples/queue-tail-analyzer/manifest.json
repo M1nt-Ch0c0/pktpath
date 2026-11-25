@@ -1,0 +1,34 @@
+{
+  "id": "community.queue-tail",
+  "name": "队列尾延迟与数据覆盖分析",
+  "version": "0.1.0",
+  "author": "PktPath Community",
+  "category": "external",
+  "description": "真实Node子进程统计已有Go重建样本的正值队列驻留p95/超阈数及未标完整样本；不提升证据等级。",
+  "entrypoint": {
+    "command": [
+      "@EXPLICIT_NODE@",
+      "analyze.mjs"
+    ]
+  },
+  "analyzers": [
+    {
+      "id": "community.queue-tail.summary",
+      "name": "外部JS队列尾延迟",
+      "priority": 150
+    }
+  ],
+  "config_schema": {
+    "fields": [
+      {
+        "key": "threshold_us",
+        "label": "正值驻留预警阈值",
+        "type": "number",
+        "default": 5000,
+        "min": 0,
+        "max": 1000000000,
+        "unit": "us"
+      }
+    ]
+  }
+}
