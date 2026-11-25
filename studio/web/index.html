@@ -6,6 +6,7 @@
   <title>PktPath Studio · 单包路径跟踪工作台</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="workbench-layout.css">
 </head>
 <body>
 <div id="app" class="app">
@@ -69,7 +70,7 @@
     </div>
   </header>
 
-  <div class="layout" id="workbenchView">
+  <div class="layout wb-layout" id="workbenchView">
     <!-- ===================== Left Control Rail ===================== -->
     <aside class="rail" id="rail">
       <section class="card step" id="railEmptyNotice" hidden>
@@ -284,8 +285,17 @@
       <div class="rail-foot muted">数据保存在本机 · 采集结束自动清理设备临时文件</div>
     </aside>
 
+    <div id="railSplitter" class="wb-splitter wb-splitter-x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整控制栏宽度" aria-controls="rail"></div>
+
     <!-- ===================== Right Diagnostic Canvas ===================== -->
     <main class="canvas" id="canvas">
+      <div class="wb-toolbar" aria-label="工作台布局">
+        <strong>可调工作台</strong>
+        <span class="badge badge-muted" id="layoutDemoBadge" hidden>离线示例数据 · 不连接设备</span>
+        <span class="muted">拖拽分隔线或面板底边调整尺寸 · 聚焦分隔线可用方向键</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnResetLayout">重置布局</button>
+        <span class="wb-layout-status muted" id="layoutStatus" role="status" aria-live="polite"></span>
+      </div>
       <div class="empty-state" id="emptyState">
         <svg viewBox="0 0 120 80" width="144" height="96" aria-hidden="true">
           <rect x="4" y="30" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
@@ -337,8 +347,8 @@
         <div class="kpis" id="kpis"></div>
 
         <!-- Visual row -->
-        <div class="visual-row">
-          <section class="card panel">
+        <div class="visual-row wb-charts" id="chartRow">
+          <section class="card panel wb-panel" id="panelFlow">
             <div class="panel-head">
               <h3>队列路径流向图</h3>
               <span class="hint">线宽 = 包数 · 徽标 = p95 驻留 · 点击节点筛选下表</span>
@@ -346,8 +356,10 @@
               <button class="link-btn" id="btnClearPath" hidden>清除路径筛选</button>
             </div>
             <div class="svg-wrap" id="flowWrap"></div>
+            <div id="flowHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整路径图面板高度" aria-controls="panelFlow"></div>
           </section>
-          <section class="card panel">
+          <div id="chartSplitter" class="wb-splitter wb-splitter-x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整两个图表的宽度比例" aria-controls="panelFlow panelLatency"></div>
+          <section class="card panel wb-panel" id="panelLatency">
             <div class="panel-head">
               <h3>各队列驻留耗时对比</h3>
               <span class="legend">
@@ -355,11 +367,12 @@
               </span>
             </div>
             <div class="svg-wrap" id="latWrap"></div>
+            <div id="latencyHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整耗时图面板高度" aria-controls="panelLatency"></div>
           </section>
         </div>
 
         <!-- Sample table -->
-        <section class="card panel table-panel">
+        <section class="card panel table-panel wb-panel" id="panelSamples">
           <div class="panel-head table-tools">
             <h3>样本明细</h3>
             <span class="count-pill num" id="tableCount">0</span>
@@ -398,6 +411,7 @@
             </table>
             <div class="table-more" id="tableMore" hidden><button class="btn btn-ghost btn-sm" id="btnMore">显示更多</button></div>
           </div>
+          <div id="tableHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整样本表面板高度" aria-controls="panelSamples"></div>
         </section>
       </div>
     </main>
@@ -510,5 +524,6 @@
 </div>
 <script src="app.js"></script>
 <script src="plugin-center.js"></script>
+<script src="workbench-layout.js"></script>
 </body>
 </html>

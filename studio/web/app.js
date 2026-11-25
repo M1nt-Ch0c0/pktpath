@@ -1470,6 +1470,7 @@
       : `<span class="chip ${c === 'accent' ? 'chip-accent' : ''}">${esc(t)}</span>`).join('');
     renderKPIs();
     renderCharts();
+    document.dispatchEvent(new CustomEvent('pktpath:session-rendered'));
     renderUidFilter();
     renderTable();
     if (window.PktPathStudio && typeof window.PktPathStudio._onSessionRendered === 'function') {
@@ -2532,6 +2533,7 @@
     });
 
     window.addEventListener('resize', debounce(renderCharts, 150));
+    document.addEventListener('pktpath:layout-resized', debounce(renderCharts, 50));
     document.addEventListener('visibilitychange', () => { if (!document.hidden && !S.capturing && !S.quitting) refreshDevices(false); });
   }
 
