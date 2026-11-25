@@ -43,17 +43,16 @@ def pinned_pyelftools_requirement(requirements_file):
 
 
 def is_missing_elftools_module(exc: BaseException) -> bool:
-    """True only when the pyelftools package itself is not installed.
+    """True only when the top-level elftools package is not installed.
 
-    Other ImportError values (broken install, missing transitive import,
-    "cannot import name") must be left unchanged.
+    A ModuleNotFoundError whose name is elftools.elf, elftools.elf.elffile,
+    or any other elftools.* submodule means the package is present but
+    incomplete or broken. Those, and any other ImportError, must be left
+    unchanged so the original traceback is shown.
     """
     if not isinstance(exc, ModuleNotFoundError):
         return False
-    name = exc.name
-    if not name:
-        return False
-    return name == "elftools" or name.startswith("elftools.")
+    return exc.name == "elftools"
 
 
 def format_missing_pyelftools_message(
@@ -67,17 +66,19 @@ def format_missing_pyelftools_message(
     if windows:
         venv_python = ".venv\\Scripts\\python.exe"
         script_path = "scripts\\build_bpf.py"
+        cmd_prefix = "& "
         tested_note = (
-            "The Windows command shape is shown because this interpreter "
-            "reports a Windows platform. These exact commands were not "
-            "executed as a tested Windows matrix in this change."
+            "These lines are written for PowerShell and include the call "
+            "operator &. They were not executed on Windows and are not a "
+            "tested Windows, PowerShell, or cmd.exe matrix."
         )
     else:
         venv_python = ".venv/bin/python"
         script_path = "scripts/build_bpf.py"
+        cmd_prefix = ""
         tested_note = (
-            "A Windows venv on the same interpreter would use "
-            ".venv\\Scripts\\python.exe instead of .venv/bin/python. "
+            "A PowerShell venv on the same interpreter would use "
+            "& .venv\\Scripts\\python.exe instead of .venv/bin/python. "
             "Those Windows commands were not executed for this change; "
             "do not treat them as a tested Windows matrix."
         )
@@ -100,9 +101,9 @@ def format_missing_pyelftools_message(
                 "Create a virtual environment with this same interpreter and install from that file.",
                 "Do not use pip to modify a system-managed Python (PEP 668 / externally managed environments).",
                 "",
-                f'  "{interpreter}" -m venv .venv',
-                f'  "{venv_python}" -m pip install -r "{req}"',
-                f'  "{venv_python}" {script_path}',
+                f'  {cmd_prefix}"{interpreter}" -m venv .venv',
+                f'  {cmd_prefix}"{venv_python}" -m pip install -r "{req}"',
+                f'  {cmd_prefix}"{venv_python}" {script_path}',
             ]
         )
     else:
@@ -116,9 +117,9 @@ def format_missing_pyelftools_message(
                 "Create a virtual environment with this same interpreter and install that package.",
                 "Do not use pip to modify a system-managed Python (PEP 668 / externally managed environments).",
                 "",
-                f'  "{interpreter}" -m venv .venv',
-                f'  "{venv_python}" -m pip install "{pin}"',
-                f'  "{venv_python}" {script_path}',
+                f'  {cmd_prefix}"{interpreter}" -m venv .venv',
+                f'  {cmd_prefix}"{venv_python}" -m pip install "{pin}"',
+                f'  {cmd_prefix}"{venv_python}" {script_path}',
             ]
         )
     lines.extend(["", tested_note])

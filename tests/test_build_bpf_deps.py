@@ -24,17 +24,30 @@ def load_build_bpf():
     return mod
 
 
+def write_fixture(root: Path, files: dict[str, str]) -> None:
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
 class TestMissingElftoolsClassification(unittest.TestCase):
     def setUp(self) -> None:
         self.mod = load_build_bpf()
 
-    def test_missing_elftools_package_is_detected(self) -> None:
-        for name in ("elftools", "elftools.elf", "elftools.elf.elffile"):
+    def test_missing_top_level_elftools_package_is_detected(self) -> None:
+        exc = ModuleNotFoundError("No module named 'elftools'", name="elftools")
+        self.assertTrue(self.mod.is_missing_elftools_module(exc))
+
+    def test_missing_elftools_submodule_is_not_rewritten(self) -> None:
+        # Package is present but incomplete or internally broken.
+        for name in (
+            "elftools.elf",
+            "elftools.elf.elffile",
+            "elftools.missing_internal_review_fixture",
+        ):
             exc = ModuleNotFoundError("No module named {!r}".format(name), name=name)
-            self.assertTrue(
-                self.mod.is_missing_elftools_module(exc),
-                msg=name,
-            )
+            self.assertFalse(self.mod.is_missing_elftools_module(exc), msg=name)
 
     def test_other_module_not_found_is_not_rewritten(self) -> None:
         exc = ModuleNotFoundError(
@@ -69,6 +82,7 @@ class TestMissingElftoolsMessage(unittest.TestCase):
         self.assertIn(real, msg)
         self.assertIn('"/tmp/fake-python" -m venv .venv', msg)
         self.assertIn('"{0}/bin/python" -m pip install -r "{1}"'.format(".venv", real), msg)
+        self.assertNotIn("& \"/tmp/fake-python\"", msg)
         self.assertNotIn("--break-system-packages", msg)
         self.assertNotIn("sudo pip", msg)
         self.assertIn("PEP 668", msg)
@@ -90,50 +104,51 @@ class TestMissingElftoolsMessage(unittest.TestCase):
         self.assertIn('pip install "pyelftools==0.33"', msg)
         self.assertNotIn("--break-system-packages", msg)
 
-    def test_windows_shape_is_marked_untested_when_requested(self) -> None:
+    def test_windows_powershell_call_operator_is_present_and_untested(self) -> None:
+        interpreter = r"C:\Python With Spaces\python.exe"
         msg = self.mod.format_missing_pyelftools_message(
-            interpreter=r"C:\\Python\\python.exe",
+            interpreter=interpreter,
             requirements_file=REQUIREMENTS_BUILD,
             windows=True,
         )
-        self.assertIn(r".venv\Scripts\python.exe", msg)
-        self.assertIn(r"scripts\build_bpf.py", msg)
-        self.assertIn("not executed as a tested Windows matrix", msg)
+        self.assertIn('& "C:\\Python With Spaces\\python.exe" -m venv .venv', msg)
+        self.assertIn(r'& ".venv\Scripts\python.exe" -m pip install -r', msg)
+        self.assertIn(r'& ".venv\Scripts\python.exe" scripts\build_bpf.py', msg)
+        self.assertIn("PowerShell", msg)
+        self.assertIn("call operator", msg)
+        self.assertIn("not executed on Windows", msg)
         self.assertNotIn(".venv/bin/python", msg)
 
 
 class TestBuildBpfEntrypoint(unittest.TestCase):
-    def _run(self, env, cwd=None, extra_pythonpath=None):
+    def _run(self, *, pythonpath=None, isolated_no_site=False):
         run_env = os.environ.copy()
         run_env["PYTHONNOUSERSITE"] = "1"
-        # Drop inherited PYTHONPATH unless the test injects a fixture.
         run_env.pop("PYTHONPATH", None)
-        if extra_pythonpath is not None:
-            run_env["PYTHONPATH"] = extra_pythonpath
-        run_env.update(env)
+        if pythonpath is not None:
+            run_env["PYTHONPATH"] = pythonpath
+        cmd = [sys.executable]
+        if isolated_no_site:
+            cmd.append("-S")
+        cmd.append(str(BUILD_BPF))
         return subprocess.run(
-            [sys.executable, str(BUILD_BPF)],
-            cwd=str(cwd or REPO_ROOT),
+            cmd,
+            cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
             env=run_env,
             check=False,
         )
 
+    def _run_fixture(self, files: dict[str, str]):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_fixture(Path(tmp), files)
+            return self._run(pythonpath=tmp), tmp
+
     def test_script_missing_elftools_prints_hint_without_traceback(self) -> None:
         # -S skips site-packages so this fails closed even when the runner
         # already has pyelftools installed (as a developer venv might).
-        isolated = os.environ.copy()
-        isolated["PYTHONNOUSERSITE"] = "1"
-        isolated.pop("PYTHONPATH", None)
-        proc = subprocess.run(
-            [sys.executable, "-S", str(BUILD_BPF)],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            env=isolated,
-            check=False,
-        )
+        proc = self._run(isolated_no_site=True)
         self.assertEqual(proc.returncode, 1)
         self.assertNotIn("Traceback", proc.stderr)
         self.assertIn("error: pyelftools is not installed", proc.stderr)
@@ -147,31 +162,82 @@ class TestBuildBpfEntrypoint(unittest.TestCase):
             self.assertIn("pyelftools==0.33", proc.stderr)
         self.assertNotIn("--break-system-packages", proc.stderr)
 
-    def test_internal_import_error_is_not_masked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            pkg = Path(tmp) / "elftools" / "elf"
-            pkg.mkdir(parents=True)
-            (Path(tmp) / "elftools" / "__init__.py").write_text("", encoding="utf-8")
-            (pkg / "__init__.py").write_text("", encoding="utf-8")
-            (pkg / "elffile.py").write_text(
-                "import definitely_not_a_real_pktpath_dep\n",
-                encoding="utf-8",
-            )
-            env = os.environ.copy()
-            env["PYTHONNOUSERSITE"] = "1"
-            env["PYTHONPATH"] = tmp
-            proc = subprocess.run(
-                [sys.executable, str(BUILD_BPF)],
-                cwd=str(REPO_ROOT),
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
-            self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("Traceback", proc.stderr)
-            self.assertIn("definitely_not_a_real_pktpath_dep", proc.stderr)
-            self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+    def test_missing_elf_subpackage_keeps_traceback(self) -> None:
+        # Yan PR3 counterexample 1: top-level elftools exists, elf subpackage does not.
+        proc, _ = self._run_fixture({"elftools/__init__.py": ""})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertTrue(
+            "elftools.elf" in proc.stderr or "No module named 'elftools.elf'" in proc.stderr,
+            proc.stderr,
+        )
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+
+    def test_missing_internal_elftools_module_keeps_traceback(self) -> None:
+        # Yan PR3 counterexample 2: package imports a missing elftools submodule.
+        proc, _ = self._run_fixture(
+            {
+                "elftools/__init__.py": "",
+                "elftools/elf/__init__.py": "",
+                "elftools/elf/elffile.py": "import elftools.missing_internal_review_fixture\n",
+            }
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertIn("elftools.missing_internal_review_fixture", proc.stderr)
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+
+    def test_external_transitive_import_error_is_not_masked(self) -> None:
+        proc, _ = self._run_fixture(
+            {
+                "elftools/__init__.py": "",
+                "elftools/elf/__init__.py": "",
+                "elftools/elf/elffile.py": "import definitely_not_a_real_pktpath_dep\n",
+            }
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertIn("definitely_not_a_real_pktpath_dep", proc.stderr)
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+
+    def test_plain_importerror_is_not_masked(self) -> None:
+        proc, _ = self._run_fixture(
+            {
+                "elftools/__init__.py": "",
+                "elftools/elf/__init__.py": "",
+                "elftools/elf/elffile.py": "raise ImportError('broken install review fixture')\n",
+            }
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertIn("broken install review fixture", proc.stderr)
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+
+    def test_missing_elffile_symbol_is_not_masked(self) -> None:
+        proc, _ = self._run_fixture(
+            {
+                "elftools/__init__.py": "",
+                "elftools/elf/__init__.py": "",
+                "elftools/elf/elffile.py": "",
+            }
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertIn("ELFFile", proc.stderr)
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
+
+    def test_runtime_error_inside_package_is_not_masked(self) -> None:
+        proc, _ = self._run_fixture(
+            {
+                "elftools/__init__.py": "",
+                "elftools/elf/__init__.py": "",
+                "elftools/elf/elffile.py": "raise RuntimeError('package runtime review fixture')\n",
+            }
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Traceback", proc.stderr)
+        self.assertIn("package runtime review fixture", proc.stderr)
+        self.assertNotIn("error: pyelftools is not installed", proc.stderr)
 
 
 if __name__ == "__main__":
