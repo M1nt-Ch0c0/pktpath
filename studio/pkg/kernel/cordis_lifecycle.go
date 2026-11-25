@@ -22,18 +22,21 @@ const cordisLifecycleProtocol = "pktpath.cordis3.lifecycle/2"
 var cordisCollectorPlugins = []string{"builtin.collector.ebpf-tc", "builtin.collector.kernel-ext", "builtin.mode.oneshot", "builtin.mode.daemon"}
 
 type CordisLifecycleOptions struct {
-	NodePath, HostPath               string
-	PluginIDs                        []string // explicit trusted test/development enrollment, NOT a package loader
-	CleanupTimeout, OperationTimeout time.Duration
+	NodePath, HostPath      string
+	PluginIDs               []string      // explicit trusted test/development enrollment, NOT a package loader
+	CleanupTimeout          time.Duration // observation only: Apply wait and revoke acknowledgement, default 2s
+	OperationTimeout        time.Duration
+	CleanupExecutionTimeout time.Duration // independent bounded hook-chain budget, starts AFTER Apply exits
 }
 type CordisPluginState struct {
-	Recovery   string `json:"recovery,omitempty"`
-	Plugin     string `json:"plugin"`
-	Desired    string `json:"desired_revision"`
-	Effective  string `json:"effective_revision"`
-	Generation string `json:"generation"`
-	State      string `json:"state"`
-	Error      string `json:"error,omitempty"`
+	CleanupPhase string `json:"cleanup_phase,omitempty"`
+	Recovery     string `json:"recovery,omitempty"`
+	Plugin       string `json:"plugin"`
+	Desired      string `json:"desired_revision"`
+	Effective    string `json:"effective_revision"`
+	Generation   string `json:"generation"`
+	State        string `json:"state"`
+	Error        string `json:"error,omitempty"`
 }
 type CordisLifecycleEvent struct {
 	Plugin     string `json:"plugin"`
@@ -42,6 +45,7 @@ type CordisLifecycleEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 type CordisLifecycleSnapshot struct {
+	CleanupScopes   []CordisCleanupView    `json:"cleanup_scopes,omitempty"`
 	HostIncarnation string                 `json:"host_incarnation,omitempty"`
 	HostEpoch       string                 `json:"host_epoch"`
 	HostAlive       bool                   `json:"host_alive"`
@@ -89,6 +93,9 @@ func NewCordisLifecycleHost(opts CordisLifecycleOptions) *CordisLifecycleHost {
 	if opts.CleanupTimeout <= 0 {
 		opts.CleanupTimeout = 2 * time.Second
 	}
+	if opts.CleanupExecutionTimeout <= 0 {
+		opts.CleanupExecutionTimeout = 2 * time.Second
+	}
 	if opts.OperationTimeout <= 0 {
 		opts.OperationTimeout = 3 * time.Second
 	}
@@ -126,6 +133,12 @@ func (h *CordisLifecycleHost) Snapshot() *CordisLifecycleSnapshot {
 		s.HostAlive = h.sourceValidLocked(h.worker, h.worker.incarnation)
 	}
 	s.HostEpoch = strconv.FormatUint(h.hostEpoch, 10)
+	for _, b := range h.attempts {
+		if b.revoked {
+			s.CleanupScopes = append(s.CleanupScopes, h.cleanupViewLocked(b))
+		}
+	}
+	sort.Slice(s.CleanupScopes, func(i, j int) bool { return s.CleanupScopes[i].Generation < s.CleanupScopes[j].Generation })
 	for _, v := range h.states {
 		s.Plugins = append(s.Plugins, *v)
 	}
@@ -361,11 +374,14 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 		default:
 		}
 		state := "cleanup-pending"
+		if old.cleanupExecutionTimedOut {
+			state = "cleanup-execution-timeout-pending"
+		}
 		select {
 		case <-old.cleanupDone:
 			state = "cleanup-failed"
 		default:
-			if old.cleanupTimedOut {
+			if old.cleanupTimedOut && !old.cleanupExecutionTimedOut {
 				state = "cleanup-timeout-pending"
 			}
 		}
@@ -375,7 +391,7 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 		s.Recovery = "explicit-reload-after-successful-drain"
 		// Only dependency-driven restart under the SAME user intent can arm
 		// one retry. Direct toggle/config/reload never silently gets another Apply.
-		if state != "cleanup-failed" && old.revoked && old.revision == req.Revision && len(req.Deps) > 0 && !sameCordisDeps(old.deps, req.Deps) {
+		if state != "cleanup-failed" && !old.cleanupExecutionTimedOut && old.revoked && old.revision == req.Revision && len(req.Deps) > 0 && !sameCordisDeps(old.deps, req.Deps) {
 			if h.recoveries == nil {
 				h.recoveries = map[string]*cordisRecovery{}
 			}
@@ -388,11 +404,12 @@ func (h *CordisLifecycleHost) prepareFrom(w *cordisWorker, req cordisNodeRequest
 	h.nextGeneration++
 	generation := h.incarnation + "/" + strconv.FormatUint(h.nextGeneration, 10)
 	c := &PluginContext{kernel: k, pluginID: req.Plugin}
-	b := &cordisScope{host: w, hostIncarnation: w.incarnation, admissionEpoch: h.hostEpoch, owner: h, scope: c, plugin: req.Plugin, revision: req.Revision, attempt: req.Attempt, generation: generation, deps: req.Deps, depOwners: owners, provided: map[string]any{}, injected: injected, applyDone: make(chan struct{}), cleanupDone: make(chan struct{})}
+	b := &cordisScope{host: w, hostIncarnation: w.incarnation, admissionEpoch: h.hostEpoch, owner: h, scope: c, plugin: req.Plugin, revision: req.Revision, attempt: req.Attempt, generation: generation, deps: req.Deps, depOwners: owners, provided: map[string]any{}, injected: injected, applyDone: make(chan struct{}), cleanupDone: make(chan struct{}), cleanupHooksDone: make(chan struct{})}
 	c.staging = b
 	h.attempts[req.Attempt] = b
 	s.State = "preparing"
 	s.Generation = generation
+	s.CleanupPhase = ""
 	s.Error = ""
 	rec.activationRevision++
 	cfg, _ := DeepCloneValue(rec.config).(map[string]any)
@@ -503,6 +520,7 @@ func (h *CordisLifecycleHost) revokeLocked(b *cordisScope, reason string) {
 		s.Error = reason
 	}
 	k.mu.Unlock()
+	b.disposeCause = reason
 	h.eventLocked(b.plugin, "revoke", b.generation, reason)
 	h.startCleanup(b)
 	// Iterate to a fixed point, not one reverse registration pass.
@@ -774,6 +792,10 @@ func (h *CordisLifecycleHost) closeHost(ctx context.Context) (result error) {
 				return err
 			}
 		case <-ctx.Done():
+			h.mu.Lock()
+			b.closeObservationTimedOut = true
+			h.eventLocked(b.plugin, "close-observation-timeout", b.generation, ctx.Err().Error())
+			h.mu.Unlock()
 			if w != nil {
 				w.abort()
 			}

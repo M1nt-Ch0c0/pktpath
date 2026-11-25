@@ -42,3 +42,39 @@ PKTPATH_TEST_CORDIS_HOST="$PWD/cordis-analyzer-host/host.mjs" go test -race -cou
 ```
 
 从studio目录运行。集成用例只在显式提供该变量时启动Node；默认测试跳过可选Node集成，不能把SKIP称PASS。用例包含原15s timeout；`-short`会跳过它。fixture原始十进制覆盖2^53相邻值/u64max，失败ACK/host退出不重复执行、同ID阻塞重载、资源读两次/真实删除保护、反向mutation状态拒接、单终态、配置显式恢复、Linux中文空格路径。禁止用该命令替代Windows/设备/发行验收。
+
+
+## F02 v4 cleanup-budget correction (local candidate, not accepted/default)
+
+`CleanupTimeout` is an **observation** bound (default 2s), not proof that Apply
+or cleanup finished. `CleanupExecutionTimeout` is an independent bounded budget
+(default 2s) for the **whole LIFO hook chain**, freshly started only after the real
+Go Apply returned and its cleanup list is sealed. Caller RPC/Close cancellation,
+Node death and newer desired intent never erase the old resource cleanup debt.
+They still fence recovery/commit. Actual error/panic/execution-budget overrun
+is quarantined; Reload cannot bypass it. Returning nil after that execution
+budget does not count as success. A successful, timely drain only consumes a
+previously eligible dependency recovery ticket once, after existing fences.
+
+Snapshot `cleanup_scopes` reports generation, disposal cause, waiting Apply,
+Apply-observation timeout, hooks started/returned, execution timeout, actual
+completion observed, cleanup result and resource-slot hold separately. The
+current plugin's `cleanup_phase` is cleared on a new activation; old generations
+remain identified in the scope ledger. `cleanupDone` closes only after all hooks
+actually returned and owner recorded the result. No resource slot is released
+just because an observer timed out. Close has a bounded observer and its original
+failure result remains historical even if the old cleanup later finishes.
+
+**Not forced cancellation:** arbitrary in-process Go code that never returns
+cannot be killed by context. One held obligation/waiter per old scope and the
+quarantined slot remain observable; no repeated worker/retry is spawned. Such
+a hook needs explicit resource repair or controlled owning-process retirement,
+not a successful Reload. This candidate does not claim arbitrary plugin or
+descendant safety, eventual reclamation of uncooperative code, or process sandboxing.
+
+**Distribution pairing:** `pktpath.cordis3.lifecycle/2` alone is not a build
+compatibility promise. v3 introduced a required per-worker session, not present
+in v2. Ship/review the exact candidate Go binary + `host.mjs` + `lifecycle.mjs` +
+lockfile from the same fixed source index, never mix by protocol-string equality.
+v4 changes the Go cleanup policy/diagnostics; no new capability negotiation or
+full mixed-version distribution acceptance is claimed. F01 analyzer/1 is unchanged.
