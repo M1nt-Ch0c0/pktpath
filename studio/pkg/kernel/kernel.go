@@ -1081,7 +1081,9 @@ func (k *Kernel) savePersistedConfig() error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	k.configDiskRevision++
+	if k.host.LifecycleHost != nil {
+		k.configDiskRevision++
+	}
 	return nil
 }
 
