@@ -314,3 +314,14 @@ test('renderPluginIcon maps Material/Lucide slugs to icons and never leaks raw A
   assert.equal(surface.renderPluginIcon('unknown-slug-icon', '📤'), '📤');
   assert.equal(surface.renderPluginIcon('', '🧩'), '🧩');
 });
+
+test('asPluginRecord derives can_uninstall=true for external plugins when backend omits it', () => {
+  const builtin = surface.asPluginRecord({ id: 'builtin.ui.theme', name: 'Theme', builtin: true });
+  assert.equal(builtin.can_uninstall, false);
+  const ext = surface.asPluginRecord({ id: 'community.analyzer.evidence-auditor', name: '审计', builtin: false });
+  assert.equal(ext.can_uninstall, true);
+  const explicitFalse = surface.asPluginRecord({ id: 'community.locked', name: 'Locked', builtin: false, can_uninstall: false });
+  assert.equal(explicitFalse.can_uninstall, false);
+  const wrappedExt = surface.asPluginRecord({ meta: { id: 'community.wrapped', builtin: false } });
+  assert.equal(wrappedExt.can_uninstall, true);
+});

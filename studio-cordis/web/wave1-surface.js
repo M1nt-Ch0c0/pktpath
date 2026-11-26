@@ -42,8 +42,13 @@
    * ({id,name,...,config}), not the older {meta:{...}} wrapper. Keep both. */
   function asPluginRecord(p) {
     if (!p || typeof p !== 'object') return p;
-    if (p.meta && p.meta.id) return p;
+    if (p.meta && p.meta.id) {
+      if (p.can_uninstall !== undefined) return p;
+      return Object.assign({}, p, { can_uninstall: p.meta.builtin === false });
+    }
+    const canUninstall = p.can_uninstall !== undefined ? !!p.can_uninstall : p.builtin === false;
     return Object.assign({}, p, {
+      can_uninstall: canUninstall,
       meta: {
         id: p.id,
         name: p.name,
