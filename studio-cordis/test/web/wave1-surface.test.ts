@@ -325,3 +325,65 @@ test('asPluginRecord derives can_uninstall=true for external plugins when backen
   const wrappedExt = surface.asPluginRecord({ meta: { id: 'community.wrapped', builtin: false } });
   assert.equal(wrappedExt.can_uninstall, true);
 });
+
+test('parseTcQdiscLine extracts dev, root, and parent for tc text fallback', () => {
+  const mq = surface.parseTcQdiscLine('qdisc mq 0: dev wlan0 root');
+  assert.equal(mq.kind, 'mq');
+  assert.equal(mq.handle, '0:');
+  assert.equal(mq.dev, 'wlan0');
+  assert.equal(mq.root, true);
+  assert.equal(mq.parent, 'root');
+
+  const child = surface.parseTcQdiscLine('qdisc fq_codel 0: dev wlan0 parent :1 limit 10240p flows 1024');
+  assert.equal(child.kind, 'fq_codel');
+  assert.equal(child.handle, '0:');
+  assert.equal(child.dev, 'wlan0');
+  assert.equal(child.root, false);
+  assert.equal(child.parent, ':1');
+
+  const htbChild = surface.parseTcQdiscLine('qdisc fq_codel 10: dev wlan0 parent 1:10 limit 10240p');
+  assert.equal(htbChild.parent, '1:10');
+  assert.equal(htbChild.root, false);
+
+  const clsact = surface.parseTcQdiscLine('qdisc clsact ffff: dev wlan0 parent ffff:fff1');
+  assert.equal(clsact.kind, 'clsact');
+  assert.equal(clsact.handle, 'ffff:');
+  assert.equal(clsact.parent, 'ffff:fff1');
+
+  const noDev = surface.parseTcQdiscLine('qdisc pfifo_fast 0: root refcnt 2');
+  assert.equal(noDev.dev, '');
+  assert.equal(noDev.root, true);
+  assert.equal(noDev.parent, 'root');
+});
+
+test('normalizeQdiscs filters multi-device tc lines by selected dev and preserves structured objects', () => {
+  const lines = [
+    'qdisc noqueue 0: dev lo root refcnt 2',
+    'qdisc pfifo_fast 0: dev rmnet_data0 root refcnt 2',
+    'qdisc mq 0: dev wlan0 root',
+    'qdisc fq_codel 0: dev wlan0 parent :1 limit 10240p',
+    'qdisc fq_codel 0: dev wlan0 parent :2 limit 10240p',
+    'qdisc htb 1: dev eth0@if12 root r2q 10',
+  ];
+  const wlan = surface.normalizeQdiscs(lines, 'wlan0');
+  assert.equal(wlan.length, 3);
+  assert.equal(wlan[0].kind, 'mq');
+  assert.equal(wlan[0].root, true);
+  assert.equal(wlan[0].parent, 'root');
+  assert.equal(wlan[1].parent, ':1');
+  assert.equal(wlan[2].parent, ':2');
+
+  const eth0 = surface.normalizeQdiscs(lines, 'eth0');
+  assert.equal(eth0.length, 1);
+  assert.equal(eth0[0].kind, 'htb');
+
+  // Structured objects from `pktpath inspect --dev wlan0 --json` (without dev field) stay intact
+  const structured = surface.normalizeQdiscs([
+    { kind: 'htb', handle: '1:', root: true, packets: 42 },
+    { kind: 'fq_codel', handle: '10:', parent: '1:10', packets: 12 },
+  ], 'wlan0');
+  assert.equal(structured.length, 2);
+  assert.equal(structured[0].parent, 'root');
+  assert.equal(structured[0].packets, 42);
+  assert.equal(structured[1].parent, '1:10');
+});

@@ -748,10 +748,16 @@
   function renderTopo(ins) {
     const tree = $('#topoTree'), caps = $('#capList'), cb = $('#capBadge');
     if (!ins) { tree.innerHTML = '<div class="empty-mini">选择设备后自动检测</div>'; caps.innerHTML = ''; cb.className = 'badge badge-muted'; cb.textContent = '未检测'; return; }
+    const selectedDev = String(S.iface || ins.dev || '').trim();
     const qd = (Wave1 && Wave1.normalizeQdiscs)
-      ? Wave1.normalizeQdiscs(ins.qdiscs)
+      ? Wave1.normalizeQdiscs(ins.qdiscs, selectedDev)
       : arr(ins.qdiscs).filter((q) => q && (q.kind || q.handle !== undefined));
-    const clsList = arr(ins.classes).filter((c) => c && (c.kind || c.handle !== undefined));
+    const selectedBase = selectedDev.split('@')[0];
+    const clsList = arr(ins.classes).filter((c) => {
+      if (!c || !(c.kind || c.handle !== undefined)) return false;
+      if (selectedBase && c.dev && String(c.dev).trim().split('@')[0] !== selectedBase) return false;
+      return true;
+    });
     const qNodes = qd.map((q) => ({ type: 'qdisc', q, h: parseHandle(q.handle), p: parseHandle(q.parent), children: [] }));
     const cNodes = clsList.map((c) => ({ type: 'class', c, h: parseHandle(c.handle), p: parseHandle(c.parent), leaf: parseHandle(c.leaf), children: [], autoLeafKind: '', autoLeafQ: null }));
 

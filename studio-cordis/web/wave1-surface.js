@@ -135,19 +135,45 @@
       || id === 'builtin.exporter.redact' || id === 'redact';
   }
 
-  /* Lin inspect returns qdiscs as raw `tc qdisc show` lines, not objects. */
+  /* Lin inspect may return qdiscs as raw `tc qdisc show` lines or structured objects. */
+  function baseIfaceName(dev) {
+    return String(dev || '').trim().split('@')[0];
+  }
+
   function parseTcQdiscLine(line) {
     const s = String(line || '').trim();
     if (!s) return null;
     const m = s.match(/^(?:qdisc\s+)?(\S+)\s+(\S+)/);
-    return { kind: m ? m[1] : s, handle: m ? m[2] : '', raw: s };
+    const rest = m ? s.slice(m[0].length) : '';
+    const devM = rest.match(/(?:^|\s)dev\s+(\S+)/);
+    const parentM = rest.match(/(?:^|\s)parent\s+(\S+)/);
+    const isRoot = !parentM && /(?:^|\s)root(?:\s|$)/.test(rest);
+    const parent = parentM ? parentM[1] : (isRoot ? 'root' : '');
+    return {
+      kind: m ? m[1] : s,
+      handle: m ? m[2] : '',
+      dev: devM ? devM[1] : '',
+      parent,
+      root: isRoot,
+      raw: s,
+    };
   }
 
-  function normalizeQdiscs(raw) {
+  function normalizeQdiscs(raw, dev) {
+    const target = baseIfaceName(dev);
     return arr(raw).map((q) => {
       if (typeof q === 'string') return parseTcQdiscLine(q);
+      if (q && typeof q === 'object' && q.root === true && (q.parent === undefined || q.parent === null || q.parent === '')) {
+        return Object.assign({}, q, { parent: 'root' });
+      }
       return q;
-    }).filter((q) => q && (q.kind || q.handle !== undefined));
+    }).filter((q) => {
+      if (!q || !(q.kind || q.handle !== undefined)) return false;
+      if (target && q.dev) {
+        return baseIfaceName(q.dev) === target;
+      }
+      return true;
+    });
   }
 
   function isRemovedPlugin(p) {
