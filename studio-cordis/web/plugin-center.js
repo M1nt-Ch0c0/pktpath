@@ -8,6 +8,23 @@
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
   const B = () => window.PktPathStudio || {};
   const Wave1 = () => window.PktPathWave1Surface || null;
+  function pluginIcon(icon, fallback) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.renderPluginIcon === 'function') return w1.renderPluginIcon(icon, fallback);
+    const fb = fallback !== undefined ? String(fallback) : '🧩';
+    const raw = String(icon || '').trim();
+    if (!raw || /^[a-z0-9][a-z0-9_-]*$/i.test(raw)) return fb;
+    return raw;
+  }
+  function normalizePreview(resp) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.normalizeInstallPreview === 'function') return w1.normalizeInstallPreview(resp);
+    if (resp && resp.preview && typeof resp.preview === 'object') {
+      const ok = resp.ok !== false && resp.preview.ok !== false;
+      return Object.assign({}, resp.preview, { ok, error: ok ? undefined : (resp.preview.error || resp.error || '格式无效') });
+    }
+    return resp && resp.ok ? resp : { ok: false, error: (resp && resp.error) || '解析失败' };
+  }
   const esc = (s) => (B().esc ? B().esc(s) : String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
 
   const CAT_LABELS = {
@@ -231,7 +248,7 @@
       cur = kinds[0];
     }
     seg.innerHTML = list.map((t) =>
-      `<button data-v="${esc(t.kind)}" class="${t.kind === cur ? 'active' : ''}" title="${esc(t.description || t.name)}">${esc(t.icon || '')} ${esc(t.short_label || t.name)}</button>`
+      `<button data-v="${esc(t.kind)}" class="${t.kind === cur ? 'active' : ''}" title="${esc(t.description || t.name)}">${esc(pluginIcon(t.icon, ''))} ${esc(t.short_label || t.name)}</button>`
     ).join('');
     if (B().switchTransport && cur !== appState.transport) {
       B().switchTransport(cur);
@@ -335,7 +352,7 @@
       return;
     }
     bar.innerHTML = list.map((ex) =>
-      `<button class="btn btn-ghost btn-sm dyn-export-btn" data-exporter="${esc(ex.id)}" title="${esc(ex.description || ex.name)}">${esc(ex.icon || '📤')} ${esc(ex.button_label || ex.name)}</button>`
+      `<button class="btn btn-ghost btn-sm dyn-export-btn" data-exporter="${esc(ex.id)}" title="${esc(ex.description || ex.name)}">${esc(pluginIcon(ex.icon, '📤'))} ${esc(ex.button_label || ex.name)}</button>`
     ).join('');
   }
 
@@ -372,7 +389,7 @@
       if (!res || !res.ok) {
         throw new Error((res && res.error) || '导出失败');
       }
-      if (B().showSavedBar) B().showSavedBar(res.out_path, `${ex.icon || '✔'} ${res.summary || '已保存'}：`);
+      if (B().showSavedBar) B().showSavedBar(res.out_path, `${pluginIcon(ex.icon, '✔')} ${res.summary || '已保存'}：`);
       toast(res.summary || `已保存：${res.out_path}`, 'ok', 5500);
       if (res.new_session_id && B().loadSessions) B().loadSessions();
     } catch (e) {
@@ -542,7 +559,7 @@
       return `
         <div class="pc-item ${sel ? 'active' : ''} ${p.enabled ? '' : 'is-disabled'}" data-pid="${esc(m.id)}">
           <div class="pc-item-head">
-            <span class="pc-icon">${esc(m.icon || '🧩')}</span>
+            <span class="pc-icon">${esc(pluginIcon(m.icon, '🧩'))}</span>
             <div class="pc-item-titles">
               <div class="pc-item-name">
                 <span class="pc-dot ${dotCls}"></span>
@@ -586,7 +603,7 @@
 
     el.innerHTML = `
       <div class="pc-det-head">
-        <div class="pc-det-icon">${esc(m.icon || '🧩')}</div>
+        <div class="pc-det-icon">${esc(pluginIcon(m.icon, '🧩'))}</div>
         <div class="pc-det-title">
           <div class="pc-det-name-row">
             <h2>${esc(m.name)}</h2>
@@ -887,7 +904,7 @@
       if (!r || r.cancelled || !r.path) return;
       const pv = await api('/api/kernel/plugins/preview', { body: { path: r.path } });
       PC.pendingInstallPath = r.path;
-      PC.pendingPreview = pv && pv.preview ? pv.preview : { ok: false, error: (pv && pv.error) || '解析失败' };
+      PC.pendingPreview = normalizePreview(pv);
       openInstallModal(PC.pendingPreview);
     } catch (e) {
       toast('预览外部插件失败：' + e.message, 'bad');
@@ -915,7 +932,7 @@
 
       body.innerHTML = `
         <div class="inst-summary">
-          <div class="inst-icon">${esc(pv.icon || '🧩')}</div>
+          <div class="inst-icon">${esc(pluginIcon(pv.icon, '🧩'))}</div>
           <div>
             <div class="inst-name">${esc(pv.name)} <span class="muted">v${esc(pv.version || '1.0')}</span></div>
             <div class="muted" style="font-size:12px">ID: <code>${esc(pv.id)}</code> · 类型: ${esc(pv.source_type || 'bundle')}${pv.author ? ' · 作者: ' + esc(pv.author) : ''}</div>

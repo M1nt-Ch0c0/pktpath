@@ -258,3 +258,59 @@ test('disabled builtin.ui.theme hides #btnTheme while keeping the UI category ta
   assert.equal(elems.btnTheme.hidden, false);
   assert.equal(uiCat.hidden, false);
 });
+
+test('normalizeInstallPreview preserves ok=true from outer API envelope and surfaces errors cleanly', () => {
+  const okWrapped = surface.normalizeInstallPreview({
+    ok: true,
+    preview: {
+      id: 'community.analyzer.evidence-auditor',
+      name: '证据完整性审计',
+      version: '0.3.0',
+      icon: 'search',
+      capabilities: ['analyzer.evidence-auditor'],
+    },
+  });
+  assert.equal(okWrapped.ok, true);
+  assert.equal(okWrapped.id, 'community.analyzer.evidence-auditor');
+  assert.equal(okWrapped.name, '证据完整性审计');
+
+  const failedNoPreview = surface.normalizeInstallPreview({
+    ok: false,
+    error: '缺少 manifest.json',
+  });
+  assert.equal(failedNoPreview.ok, false);
+  assert.equal(failedNoPreview.error, '缺少 manifest.json');
+
+  const failedOuterWithPreview = surface.normalizeInstallPreview({
+    ok: false,
+    error: '签名校验失败',
+    preview: { id: 'bad.plugin', name: 'Bad' },
+  });
+  assert.equal(failedOuterWithPreview.ok, false);
+  assert.equal(failedOuterWithPreview.error, '签名校验失败');
+
+  const failedInner = surface.normalizeInstallPreview({
+    ok: true,
+    preview: { ok: false, error: '版本不兼容' },
+  });
+  assert.equal(failedInner.ok, false);
+  assert.equal(failedInner.error, '版本不兼容');
+
+  const empty = surface.normalizeInstallPreview(null);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.error, '解析失败');
+});
+
+test('renderPluginIcon maps Material/Lucide slugs to icons and never leaks raw ASCII slugs', () => {
+  assert.equal(surface.renderPluginIcon('smartphone'), '📱');
+  assert.equal(surface.renderPluginIcon('cpu'), '⚙️');
+  assert.equal(surface.renderPluginIcon('play-circle'), '▶️');
+  assert.equal(surface.renderPluginIcon('activity'), '📈');
+  assert.equal(surface.renderPluginIcon('palette'), '🎨');
+  assert.equal(surface.renderPluginIcon('📑'), '📑');
+  assert.equal(surface.renderPluginIcon('🦈'), '🦈');
+  assert.equal(surface.renderPluginIcon('🛡️'), '🛡️');
+  assert.equal(surface.renderPluginIcon('unknown-slug-icon'), '🧩');
+  assert.equal(surface.renderPluginIcon('unknown-slug-icon', '📤'), '📤');
+  assert.equal(surface.renderPluginIcon('', '🧩'), '🧩');
+});

@@ -253,6 +253,64 @@
     if (uiCat) uiCat.hidden = !hasThemePlugin(state);
   }
 
+  const ICON_SLUG_MAP = Object.freeze({
+    smartphone: '📱',
+    cpu: '⚙️',
+    'play-circle': '▶️',
+    activity: '📈',
+    palette: '🎨',
+    folder: '📂',
+    'file-text': '📑',
+    shield: '🛡️',
+    search: '🔎',
+    radar: '📡',
+    network: '🕸️',
+    download: '📤',
+    package: '📦',
+    plug: '🔌',
+    settings: '⚙️',
+    sliders: '🎛️',
+    terminal: '💻',
+    database: '🗄️',
+    zap: '⚡',
+    globe: '🌐',
+    layers: '🧩',
+    puzzle: '🧩',
+  });
+
+  function renderPluginIcon(icon, fallback) {
+    const fb = fallback !== undefined ? String(fallback) : '🧩';
+    const raw = String(icon || '').trim();
+    if (!raw) return fb;
+    const lower = raw.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(ICON_SLUG_MAP, lower)) {
+      return ICON_SLUG_MAP[lower];
+    }
+    if (/^[a-z0-9][a-z0-9_-]*$/i.test(raw)) {
+      return fb;
+    }
+    return raw;
+  }
+
+  function normalizeInstallPreview(resp) {
+    if (!resp || typeof resp !== 'object') {
+      return { ok: false, error: '解析失败' };
+    }
+    if (resp.preview && typeof resp.preview === 'object') {
+      const inner = resp.preview;
+      const ok = resp.ok !== false && inner.ok !== false;
+      const merged = Object.assign({}, inner, { ok });
+      if (!ok && !merged.error) {
+        merged.error = resp.error || '格式无效';
+      }
+      return merged;
+    }
+    if (resp.ok === true) {
+      return Object.assign({}, resp, { ok: true });
+    }
+    return Object.assign({}, resp, { ok: false, error: resp.error || '解析失败' });
+  }
+
   return {
     REMOVED_PLUGIN_IDS,
     REMOVED_TRANSPORT_KINDS,
@@ -284,5 +342,8 @@
     parseTriggerThresholdMs,
     parseTcQdiscLine,
     normalizeQdiscs,
+    ICON_SLUG_MAP,
+    renderPluginIcon,
+    normalizeInstallPreview,
   };
 });
