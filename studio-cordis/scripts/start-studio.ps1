@@ -115,6 +115,8 @@ function Show-Usage {
     Write-Host "启动成功后会打开系统默认浏览器。本机不会做数据包采集。"
     Write-Host "停止服务：双击 stop-studio.cmd，或运行 start-studio.cmd --stop"
     Write-Host "排障时前台运行：start-studio.cmd --foreground"
+    Write-Host "关闭最后一个浏览器标签后默认约 25 秒自动优雅退出；禁用：start-studio.cmd --no-auto-quit"
+    Write-Host "自定义空闲退出时间：start-studio.cmd --auto-quit-ms 25000"
 }
 
 function Get-DefaultAppDir {

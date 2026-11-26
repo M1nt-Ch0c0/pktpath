@@ -8,6 +8,7 @@ import type { BuiltinPluginDefinition } from './kernel/types.ts';
 import { createAnalysisWave1Builtins } from './plugins/analysis/index.ts';
 import { registerWave1Builtins } from './plugins/register.ts';
 import { uiThemePlugin } from './plugins/ui/theme.ts';
+import { getOrCreateCaptureController } from './plugins/adb/capture-controller.ts';
 import { handleSessionRoute } from './routes/session-routes.ts';
 import { startStudioApp } from './server/app.ts';
 
@@ -15,9 +16,20 @@ export interface CliConfig {
   host: string;
   port: number;
   noOpen: boolean;
+  autoQuitMs: number;
   version: string;
   paths: HostPaths;
 }
+
+const BOOLEAN_FLAGS = new Set(['no-open', 'no-auto-quit']);
+
+export function envFlagEnabled(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+export const DEFAULT_AUTO_QUIT_MS = 25_000;
 
 function defaultAppDir(): string {
   if (process.platform === 'win32') {
@@ -33,7 +45,8 @@ export function parseCliArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
   const packageRoot = path.resolve(studioRoot, '..');
 
   const flags = new Map<string, string>();
-  let noOpen = env.PKTPATH_NO_OPEN === '1' || env.PKTPATH_NO_OPEN === 'true';
+  let noOpen = envFlagEnabled(env.PKTPATH_NO_OPEN);
+  let noAutoQuit = envFlagEnabled(env.PKTPATH_NO_AUTO_QUIT);
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -41,13 +54,26 @@ export function parseCliArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
       noOpen = true;
       continue;
     }
+    if (arg === '--no-auto-quit') {
+      noAutoQuit = true;
+      continue;
+    }
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       if (eq > 2) {
-        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+        const key = arg.slice(2, eq);
+        flags.set(key, arg.slice(eq + 1));
+        if (key === 'no-auto-quit') noAutoQuit = true;
+        if (key === 'no-open') noOpen = true;
+      } else if (BOOLEAN_FLAGS.has(arg.slice(2))) {
+        flags.set(arg.slice(2), 'true');
+        if (arg === '--no-auto-quit') noAutoQuit = true;
+        if (arg === '--no-open') noOpen = true;
       } else if (i + 1 < argv.length) {
         flags.set(arg.slice(2), argv[i + 1]);
         i += 1;
+      } else {
+        flags.set(arg.slice(2), '');
       }
     }
   }
@@ -76,10 +102,23 @@ export function parseCliArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
   const adbPathRaw = getVal('adb-path', 'PKTPATH_ADB_PATH', '');
   const version = getVal('version', 'PKTPATH_VERSION', 'cordis-wave1');
 
+  let autoQuitMs = DEFAULT_AUTO_QUIT_MS;
+  if (noAutoQuit) {
+    autoQuitMs = 0;
+  } else {
+    const raw = flags.get('auto-quit-ms') ?? env.PKTPATH_AUTO_QUIT_MS ?? String(DEFAULT_AUTO_QUIT_MS);
+    const parsedMs = Number.parseInt(raw, 10);
+    if (!Number.isInteger(parsedMs) || parsedMs < 0) {
+      throw new Error(`invalid auto-quit-ms: ${raw}`);
+    }
+    autoQuitMs = parsedMs;
+  }
+
   return {
     host: listenHost,
     port,
     noOpen,
+    autoQuitMs,
     version,
     paths: {
       appDir,
@@ -117,11 +156,14 @@ async function main(): Promise<void> {
   host.registerBuiltin(uiThemePlugin);
   await host.start();
 
+  const capture = getOrCreateCaptureController(host);
   const app = await startStudioApp({
     host,
     listenHost: cfg.host,
     listenPort: cfg.port,
     extraRouteHandlers: [handleSessionRoute],
+    autoQuitMs: cfg.autoQuitMs,
+    hasActiveCapture: () => capture.hasActiveCapture(),
     onQuitRequested: () => {
       process.exit(0);
     },

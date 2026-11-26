@@ -27,7 +27,7 @@ Aligned with WAVE1-CONTRACT.md (zero Go Studio binary, zero pktpath-studio.exe):
       MANIFEST.sha256
 
   Linux (--os linux):
-    Same layout with node/bin/node and start-studio.sh.
+    Same layout with node/bin/node, start-studio.sh, and stop-studio.sh.
 
 Does not push, tag, or publish.
 """
@@ -538,8 +538,13 @@ def write_launchers(target_os: str, bundle_dir: Path, launchers_dir: Path | None
         override = (launchers_dir / filename) if launchers_dir is not None else None
         if override is not None and override.is_symlink():
             raise ValueError(f"Symlink launcher forbidden: {override}")
+        source_has_bom = False
         if override is not None and override.is_file():
-            content = override.read_text(encoding="utf-8")
+            raw = override.read_bytes()
+            if raw.startswith(b"\xef\xbb\xbf"):
+                source_has_bom = True
+                raw = raw[3:]
+            content = raw.decode("utf-8")
         elif fallback_text is not None:
             content = fallback_text
         else:
@@ -547,8 +552,15 @@ def write_launchers(target_os: str, bundle_dir: Path, launchers_dir: Path | None
         normalized = content.replace("\r\n", "\n")
         if crlf:
             normalized = normalized.replace("\n", "\r\n")
+        data = normalized.encode("utf-8")
+        # PowerShell 5.1 on Chinese Windows (CP936) needs a UTF-8 BOM to parse
+        # Chinese strings correctly. Preserve a source BOM, and always emit one
+        # for .ps1 so packaged launchers stay consistent with studio-cordis/scripts.
+        if filename.endswith(".ps1") or source_has_bom:
+            if not data.startswith(b"\xef\xbb\xbf"):
+                data = b"\xef\xbb\xbf" + data
         dst = bundle_dir / filename
-        dst.write_bytes(normalized.encode("utf-8"))
+        dst.write_bytes(data)
         if not crlf:
             dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         written.append(filename)

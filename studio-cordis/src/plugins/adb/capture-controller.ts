@@ -153,6 +153,11 @@ export class CaptureController {
     this.host = host;
   }
 
+  /** Read-only: true while a device capture is running or being finalized (pulled). */
+  hasActiveCapture(): boolean {
+    return this.state === 'running' || this.state === 'pulling';
+  }
+
   private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.lockChain.then(fn, fn);
     this.lockChain = next.catch(() => {});

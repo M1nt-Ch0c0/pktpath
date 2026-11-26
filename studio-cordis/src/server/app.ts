@@ -15,12 +15,18 @@ export type ExtraRouteHandler = (
   res: ServerResponse,
 ) => Promise<boolean>;
 
+export const DEFAULT_AUTO_QUIT_MS = 25_000;
+
 export interface StudioAppOptions {
   host: CordisHost;
   listenHost?: string;
   listenPort?: number;
   extraRouteHandlers?: ExtraRouteHandler[];
   onQuitRequested?: () => void;
+  /** Idle auto-quit timeout in ms. 0 or negative disables. Default 25000. */
+  autoQuitMs?: number;
+  /** Read-only probe: true while a capture is running or finalizing. */
+  hasActiveCapture?: () => boolean;
 }
 
 export interface RunningStudioApp {
@@ -28,6 +34,8 @@ export interface RunningStudioApp {
   readonly url: string;
   readonly port: number;
   readonly host: CordisHost;
+  readonly everHadClient: boolean;
+  activeClients(): number;
   close(): Promise<void>;
 }
 
@@ -69,8 +77,17 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
   const listenHost = opts.listenHost ?? '127.0.0.1';
   const listenPort = opts.listenPort ?? 0;
   const extraHandlers = opts.extraRouteHandlers ?? [];
+  const autoQuitMs = opts.autoQuitMs === undefined ? DEFAULT_AUTO_QUIT_MS : opts.autoQuitMs;
+  const hasActiveCapture = (): boolean => {
+    try {
+      return opts.hasActiveCapture?.() === true;
+    } catch {
+      return false;
+    }
+  };
 
   const sseClients = new Set<ServerResponse>();
+  let everHadClient = false;
   const heartbeat = setInterval(() => {
     for (const client of sseClients) {
       try {
@@ -85,10 +102,49 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
   let closing = false;
   let boundPort = 0;
   let server: http.Server;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idlePoll: ReturnType<typeof setInterval> | undefined;
+
+  const disarmAutoQuit = (): void => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+
+  const considerAutoQuit = (): void => {
+    if (closing || autoQuitMs <= 0 || !everHadClient) {
+      disarmAutoQuit();
+      return;
+    }
+    if (sseClients.size === 0 && !hasActiveCapture()) {
+      if (idleTimer === undefined) {
+        idleTimer = setTimeout(() => {
+          idleTimer = undefined;
+          if (closing || sseClients.size > 0 || hasActiveCapture()) {
+            considerAutoQuit();
+            return;
+          }
+          process.stderr.write(`pktpath studio-cordis: 0 browser tabs & 0 active captures for ${autoQuitMs}ms; auto-shutting down\n`);
+          void closeAll().finally(() => {
+            if (opts.onQuitRequested) opts.onQuitRequested();
+          });
+        }, autoQuitMs);
+        idleTimer.unref();
+      }
+    } else {
+      disarmAutoQuit();
+    }
+  };
 
   const closeAll = async (): Promise<void> => {
     if (closing) return;
     closing = true;
+    disarmAutoQuit();
+    if (idlePoll !== undefined) {
+      clearInterval(idlePoll);
+      idlePoll = undefined;
+    }
     clearInterval(heartbeat);
     for (const client of sseClients) {
       try {
@@ -102,6 +158,11 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
       server.close(() => resolve());
     });
     await host.shutdown(5_000);
+  };
+
+  const detachSse = (res: ServerResponse): void => {
+    if (!sseClients.delete(res)) return;
+    considerAutoQuit();
   };
 
   server = http.createServer(async (req, res) => {
@@ -151,14 +212,27 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
       if (method === 'GET' && pathname === '/api/app/events') {
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
+          'Cache-Control': 'no-cache, no-store',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
         });
-        res.write('event: ready\ndata: {"ok":true}\n\n');
+        try {
+          res.write(': connected\n\n');
+          res.write('event: ready\ndata: {"ok":true}\n\n');
+        } catch {
+          return;
+        }
+        everHadClient = true;
         sseClients.add(res);
-        req.on('close', () => {
-          sseClients.delete(res);
-        });
+        considerAutoQuit();
+        let detached = false;
+        const onClose = (): void => {
+          if (detached) return;
+          detached = true;
+          detachSse(res);
+        };
+        req.on('close', onClose);
+        res.on('close', onClose);
         return;
       }
 
@@ -178,8 +252,16 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
         const action = pathname.slice('/api/dialog/'.length);
         if (action === 'pick-folder' || action === 'save-file' || action === 'open-file' || action === 'reveal') {
           const body = await readJsonBody(req);
+          if (action === 'pick-folder') {
+            const init = body.initial_dir;
+            if (typeof init !== 'string' || init.trim() === '') {
+              body.initial_dir = host.paths.sessionsRoot;
+            }
+          }
           const result = await handleDialogAction(action, body);
-          sendJson(res, result.ok ? 200 : result.unsupported ? 501 : 400, result);
+          const { httpStatus, ...payload } = result;
+          const status = httpStatus ?? (payload.ok || payload.cancelled ? 200 : payload.unsupported ? 501 : 400);
+          sendJson(res, status, payload);
           return;
         }
       }
@@ -217,6 +299,14 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
     });
   });
 
+  if (autoQuitMs > 0) {
+    const pollMs = Math.min(1_000, Math.max(25, Math.floor(autoQuitMs / 4)));
+    idlePoll = setInterval(() => {
+      considerAutoQuit();
+    }, pollMs);
+    idlePoll.unref();
+  }
+
   const addr = server.address() as AddressInfo;
   boundPort = addr.port;
   const boundUrl = `http://${listenHost}:${addr.port}`;
@@ -226,6 +316,10 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
     url: boundUrl,
     port: addr.port,
     host,
+    get everHadClient() {
+      return everHadClient;
+    },
+    activeClients: () => sseClients.size,
     close: closeAll,
   };
 }
