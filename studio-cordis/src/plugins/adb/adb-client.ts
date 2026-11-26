@@ -6,6 +6,7 @@ import path from 'node:path';
 export const REMOTE_DIR = '/data/local/tmp/.pktpath_studio';
 export const REMOTE_AGENT = `${REMOTE_DIR}/pktpath`;
 export const REMOTE_TMP = '/data/local/tmp/pktpath_tmp';
+export const REMOTE_PLUGINS_DIR = `${REMOTE_DIR}/plugins`;
 
 export type RootMode = '' | 'adbd-root' | 'adb-root' | 'su' | 'none';
 
@@ -173,16 +174,29 @@ export function parseIPBrAddr(out: string): IfaceInfo[] {
   for (const raw of normNL(out).split('\n')) {
     const fields = raw.trim().split(/\s+/).filter(Boolean);
     if (fields.length < 2) continue;
-    let name = fields[0];
+    // Support `ip -o addr` fallback format: "2: wlan0    inet 192.168.1.5/24 ..."
+    let name: string;
+    let state: string;
+    let addrs: string[];
+    if (/^\d+:$/.test(fields[0]) && fields.length >= 4) {
+      name = fields[1].replace(/:$/, '');
+      state = 'UP';
+      addrs = (fields[2] === 'inet' || fields[2] === 'inet6') ? [fields[3]] : [];
+    } else {
+      name = fields[0];
+      state = fields[1];
+      addrs = fields.slice(2).filter((a) => a.includes('.') || a.includes(':'));
+    }
     const at = name.indexOf('@');
     if (at > 0) name = name.slice(0, at);
-    const addrs = fields.slice(2).filter((a) => a.includes('.') || a.includes(':'));
     const existingIdx = seen.get(name);
     if (existingIdx !== undefined) {
-      res[existingIdx].addrs.push(...addrs);
+      for (const a of addrs) {
+        if (!res[existingIdx].addrs.includes(a)) res[existingIdx].addrs.push(a);
+      }
     } else {
       seen.set(name, res.length);
-      res.push({ name, state: fields[1], addrs });
+      res.push({ name, state, addrs });
     }
   }
   return res;
@@ -233,25 +247,54 @@ export function sha256File(filePath: string): string {
   return hash.digest('hex');
 }
 
+function isExistingFile(filePath: string | undefined): filePath is string {
+  if (!filePath || !filePath.trim()) return false;
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function resolveAdbBinary(preferredPath?: string): string | undefined {
-  if (preferredPath && fs.existsSync(preferredPath)) {
+  if (isExistingFile(preferredPath)) {
     return preferredPath;
   }
+  const envOverride = (process.env.PKTPATH_ADB ?? '').trim();
+  if (isExistingFile(envOverride)) {
+    return envOverride;
+  }
+  const isWin = process.platform === 'win32';
+  const binNames = isWin ? ['adb.exe', 'adb'] : ['adb'];
   const envPath = process.env.PATH ?? '';
-  const sep = process.platform === 'win32' ? ';' : ':';
-  const candidates = process.platform === 'win32' ? ['adb.exe', 'adb'] : ['adb'];
+  const sep = isWin ? ';' : ':';
   for (const dir of envPath.split(sep)) {
     if (!dir) continue;
-    for (const name of candidates) {
+    for (const name of binNames) {
       const full = path.join(dir, name);
-      try {
-        if (fs.existsSync(full) && fs.statSync(full).isFile()) {
-          return full;
-        }
-      } catch {
-        // ignore inaccessible PATH entries
-      }
+      if (isExistingFile(full)) return full;
     }
+  }
+  const primaryName = isWin ? 'adb.exe' : 'adb';
+  const fallbackCandidates: string[] = [];
+  if (process.execPath) {
+    fallbackCandidates.push(path.join(path.dirname(process.execPath), primaryName));
+  }
+  for (const envKey of ['ANDROID_SDK_ROOT', 'ANDROID_HOME'] as const) {
+    const sdk = (process.env[envKey] ?? '').trim();
+    if (sdk) {
+      fallbackCandidates.push(path.join(sdk, 'platform-tools', primaryName));
+    }
+  }
+  if (isWin) {
+    const localAppData = (process.env.LOCALAPPDATA ?? '').trim();
+    if (localAppData) {
+      fallbackCandidates.push(path.join(localAppData, 'Android', 'Sdk', 'platform-tools', 'adb.exe'));
+    }
+    fallbackCandidates.push('C:\\platform-tools\\adb.exe');
+  }
+  for (const candidate of fallbackCandidates) {
+    if (isExistingFile(candidate)) return candidate;
   }
   return undefined;
 }
@@ -473,10 +516,33 @@ export class AdbClient {
     return { pushed: true, remoteSha: got };
   }
 
+  async syncPluginFiles(serial: string, localPaths: string[]): Promise<number> {
+    if (localPaths.length === 0) {
+      await this.priv(serial, `rm -rf ${REMOTE_PLUGINS_DIR}`, 10_000).catch(() => {});
+      return 0;
+    }
+    await this.priv(
+      serial,
+      `rm -rf ${REMOTE_PLUGINS_DIR} && mkdir -p ${REMOTE_PLUGINS_DIR} && chmod 755 ${REMOTE_PLUGINS_DIR}`,
+      15_000,
+    );
+    let pushed = 0;
+    for (const localPath of localPaths) {
+      const name = path.basename(localPath);
+      const stage = `${REMOTE_TMP}_plug_${name}`;
+      await this.run(['-s', serial, 'push', localPath, stage], 20_000);
+      const dst = `${REMOTE_PLUGINS_DIR}/${name}`;
+      await this.priv(serial, `mv -f ${shQuote(stage)} ${shQuote(dst)} && chmod 644 ${shQuote(dst)}`, 10_000);
+      pushed += 1;
+    }
+    return pushed;
+  }
+
   async inspect(
     serial: string,
     dev?: string,
     scope = 'tc-egress',
+    pluginPaths?: string[],
   ): Promise<{
     dev: string;
     scope: string;
@@ -484,13 +550,21 @@ export class AdbClient {
     qdiscs: unknown[];
     inspect?: Record<string, unknown>;
   }> {
-    const ifaceRes = await this.shell(serial, 'ip -br addr 2>/dev/null || ip -o addr', 10_000);
+    const ifaceRes = await this.shell(serial, 'ip -br addr 2>/dev/null || ip -o addr 2>/dev/null', 10_000);
     const ifaces = parseIPBrAddr(ifaceRes.stdout);
     const targetDev = (dev ?? '').trim() || pickDefaultIface(ifaces, 'wlan0');
     const rawScope = (scope ?? '').trim();
     const targetScope = !rawScope || rawScope === 'all' ? 'tc-egress' : rawScope;
 
-    const inspectCmd = `${REMOTE_AGENT} inspect --dev ${shQuote(targetDev)} --scope ${shQuote(targetScope)} --json`;
+    let pluginFlag = '';
+    if (pluginPaths && pluginPaths.length > 0) {
+      const synced = await this.syncPluginFiles(serial, pluginPaths).catch(() => 0);
+      if (synced > 0) {
+        pluginFlag = ` --plugin-dir ${shQuote(REMOTE_PLUGINS_DIR)}`;
+      }
+    }
+
+    const inspectCmd = `${REMOTE_AGENT} inspect --dev ${shQuote(targetDev)} --scope ${shQuote(targetScope)}${pluginFlag} --json`;
     const inspRes = await this.priv(serial, inspectCmd, 45_000).catch(() => ({
       stdout: '',
       stderr: '',
@@ -518,7 +592,11 @@ export class AdbClient {
   }
 
   async listApps(serial: string): Promise<AppEntry[]> {
-    const r = await this.shell(serial, 'cmd package list packages -U 2>/dev/null', 15_000).catch(() => ({
+    const r = await this.shell(
+      serial,
+      'cmd package list packages -U 2>/dev/null || pm list packages -U 2>/dev/null',
+      15_000,
+    ).catch(() => ({
       stdout: '',
       stderr: '',
       exitCode: 1,

@@ -31,6 +31,39 @@ export interface RunningStudioApp {
   close(): Promise<void>;
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+function checkLoopbackGuard(
+  req: IncomingMessage,
+  method: string,
+  parsedUrl: URL,
+  boundPort: number,
+): { ok: true } | { ok: false; status: number; error: string } {
+  const rawHost = (req.headers.host ?? '').trim();
+  if (boundPort > 0 && rawHost) {
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (!LOOPBACK_HOSTS.has(hostname)) {
+      return { ok: false, status: 403, error: 'forbidden host' };
+    }
+    if (parsedUrl.port && parsedUrl.port !== String(boundPort)) {
+      return { ok: false, status: 403, error: 'forbidden host port' };
+    }
+    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim().toLowerCase() : '';
+    if (rawOrigin && rawOrigin !== 'null' && method !== 'GET' && method !== 'HEAD') {
+      const okOrigin =
+        rawOrigin.startsWith('http://127.0.0.1:') ||
+        rawOrigin.startsWith('http://localhost:') ||
+        rawOrigin.startsWith('http://[::1]:') ||
+        rawOrigin === 'http://127.0.0.1' ||
+        rawOrigin === 'http://localhost';
+      if (!okOrigin) {
+        return { ok: false, status: 403, error: 'forbidden origin' };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStudioApp> {
   const { host } = opts;
   const listenHost = opts.listenHost ?? '127.0.0.1';
@@ -50,6 +83,7 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
   heartbeat.unref();
 
   let closing = false;
+  let boundPort = 0;
   let server: http.Server;
 
   const closeAll = async (): Promise<void> => {
@@ -79,6 +113,13 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
       sendJson(res, 400, { ok: false, error: 'invalid request URL or Host header' });
       return;
     }
+
+    const guard = checkLoopbackGuard(req, method, url, boundPort);
+    if (!guard.ok) {
+      sendJson(res, guard.status, { ok: false, error: guard.error });
+      return;
+    }
+
     const pathname = url.pathname;
 
     try {
@@ -150,9 +191,9 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
         if (await handler(host, method, url, req, res)) return;
       }
 
-      // All unlisted /api/* routes (including all 6 removed Wave 2/3 feature routes) strictly return 404.
+      // All unlisted /api/* routes (including cut linux-ssh routes) strictly return 404.
       if (pathname.startsWith('/api/')) {
-        sendJson(res, 404, { ok: false, error: 'not found' });
+        sendJson(res, 404, { ok: false, error: `unknown API endpoint: ${method} ${pathname}` });
         return;
       }
 
@@ -177,6 +218,7 @@ export async function startStudioApp(opts: StudioAppOptions): Promise<RunningStu
   });
 
   const addr = server.address() as AddressInfo;
+  boundPort = addr.port;
   const boundUrl = `http://${listenHost}:${addr.port}`;
 
   return {

@@ -9,12 +9,28 @@ import {
 import type { DaemonCaptureService } from '../plugins/adb/daemon.ts';
 import type { CaptureSpec } from '../plugins/adb/ebpf-tc.ts';
 import type { OneshotCaptureService } from '../plugins/adb/oneshot.ts';
+import {
+  deleteRuntimePlugin,
+  importRuntimePlugin,
+  listRuntimePlugins,
+  previewRuntimePlugin,
+  toggleRuntimePlugin,
+} from '../plugins/adb/runtime-plugins.ts';
 import { readJsonBody, sendJson } from '../server/http-utils.ts';
 
 function statusCodeForError(err: unknown): number {
   if (err instanceof CaptureConflictError) return err.statusCode;
   if (err instanceof CaptureBadRequestError) return err.statusCode;
+  if (err && typeof err === 'object' && 'statusCode' in err && typeof (err as { statusCode?: unknown }).statusCode === 'number') {
+    return (err as { statusCode: number }).statusCode;
+  }
   return 400;
+}
+
+async function resolveSerial(adb: AdbTransportService, explicit: string): Promise<string> {
+  const trimmed = explicit.trim();
+  if (trimmed) return trimmed;
+  return adb.defaultSerial();
 }
 
 export async function handleAdbRoute(
@@ -26,6 +42,63 @@ export async function handleAdbRoute(
 ): Promise<boolean> {
   const pathname = url.pathname;
 
+  // ---- Device-side Runtime JSON Plugins (/api/plugins*) ----
+  if (method === 'GET' && pathname === '/api/plugins') {
+    const { plugins, slots } = listRuntimePlugins(host.paths.pluginsDir);
+    sendJson(res, 200, {
+      ok: true,
+      plugins_dir: host.paths.pluginsDir,
+      plugins,
+      slots,
+    });
+    return true;
+  }
+
+  if (method === 'POST' && pathname === '/api/plugins/preview') {
+    try {
+      const body = await readJsonBody(req);
+      const out = previewRuntimePlugin(host.paths.pluginsDir, body);
+      sendJson(res, 200, out);
+    } catch (err) {
+      sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  if (method === 'POST' && pathname === '/api/plugins/import') {
+    try {
+      const body = await readJsonBody(req);
+      const out = importRuntimePlugin(host.paths.pluginsDir, body);
+      sendJson(res, 200, out);
+    } catch (err) {
+      sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  if (method === 'POST' && pathname === '/api/plugins/toggle') {
+    try {
+      const body = await readJsonBody(req);
+      const out = toggleRuntimePlugin(host.paths.pluginsDir, body);
+      sendJson(res, 200, out);
+    } catch (err) {
+      sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  if (method === 'POST' && pathname === '/api/plugins/delete') {
+    try {
+      const body = await readJsonBody(req);
+      const out = deleteRuntimePlugin(host.paths.pluginsDir, body);
+      sendJson(res, 200, out);
+    } catch (err) {
+      sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  // ---- Devices & ADB ----
   if (method === 'GET' && pathname === '/api/devices') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
@@ -48,7 +121,7 @@ export async function handleAdbRoute(
       return true;
     }
     const body = await readJsonBody(req);
-    const serial = typeof body.serial === 'string' ? body.serial.trim() : '';
+    const serial = await resolveSerial(adb, typeof body.serial === 'string' ? body.serial : '');
     if (!serial) {
       sendJson(res, 400, { ok: false, error: 'serial is required' });
       return true;
@@ -68,15 +141,17 @@ export async function handleAdbRoute(
       sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
       return true;
     }
-    const serial = (url.searchParams.get('serial') ?? '').trim();
+    const serial = await resolveSerial(adb, url.searchParams.get('serial') ?? '');
     const dev = (url.searchParams.get('dev') ?? '').trim() || undefined;
     const scope = (url.searchParams.get('scope') ?? '').trim() || 'tc-egress';
+    const pluginsParam = (url.searchParams.get('plugins') ?? '').trim().toLowerCase();
+    const enablePlugins = !(pluginsParam === '0' || pluginsParam === 'false' || pluginsParam === 'off');
     if (!serial) {
       sendJson(res, 400, { ok: false, error: 'serial query parameter is required' });
       return true;
     }
     try {
-      const info = await adb.inspectDevice(serial, dev, scope);
+      const info = await adb.inspectDevice(serial, dev, scope, enablePlugins);
       sendJson(res, 200, { ok: true, ...info });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -90,14 +165,14 @@ export async function handleAdbRoute(
       sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
       return true;
     }
-    const serial = (url.searchParams.get('serial') ?? '').trim();
+    const serial = await resolveSerial(adb, url.searchParams.get('serial') ?? '');
     if (!serial) {
       sendJson(res, 400, { ok: false, error: 'serial query parameter is required' });
       return true;
     }
     try {
       const apps = await adb.listApps(serial);
-      sendJson(res, 200, { ok: true, apps });
+      sendJson(res, 200, { ok: true, serial, apps });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -106,7 +181,7 @@ export async function handleAdbRoute(
 
   if (method === 'POST' && pathname === '/api/capture/start') {
     const body = await readJsonBody(req);
-    const mode = typeof body.mode === 'string' && body.mode.trim() ? body.mode.trim() : 'oneshot';
+    const mode = typeof body.mode === 'string' && body.mode.trim() ? body.mode.trim().toLowerCase() : 'oneshot';
     if (mode !== 'oneshot' && mode !== 'daemon') {
       sendJson(res, 400, { ok: false, error: `unsupported capture mode "${mode}" (oneshot|daemon)` });
       return true;
@@ -153,7 +228,24 @@ export async function handleAdbRoute(
   if (method === 'GET' && pathname === '/api/capture/status') {
     const controller = host.getService<CaptureController>('capture.controller');
     if (!controller) {
-      sendJson(res, 200, { ok: true, status: 'idle' });
+      sendJson(res, 200, {
+        ok: true,
+        active: false,
+        status: 'idle',
+        phase: 'idle',
+        capture_id: '',
+        serial: '',
+        mode: '',
+        dev: '',
+        scope: '',
+        elapsed_sec: 0,
+        duration_sec: 0,
+        log_tail: [],
+        log_lines: [],
+        last_session_id: '',
+        session_path: '',
+        error: '',
+      });
       return true;
     }
     const snap = await controller.status();
