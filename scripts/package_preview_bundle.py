@@ -45,6 +45,7 @@ OFFICIAL_NODE = {
         "url": f"https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-win-x64.zip",
         "sha256": "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
         "node_member": f"node-{NODE_VERSION}-win-x64/node.exe",
+        "node_sha256": "d702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5",
         "license_member": f"node-{NODE_VERSION}-win-x64/LICENSE",
         "bundle_node_rel": "node/node.exe",
     },
@@ -69,7 +70,8 @@ HOST_REQUIRED_FILES = [
 
 START_STUDIO_CMD = """@echo off
 setlocal EnableExtensions DisableDelayedExpansion
-rem Fail-closed PktPath Studio launcher (Cordis default host).
+rem Primary double-click launcher for PktPath Studio (Cordis default host).
+rem Extract the full zip archive before running; do not run directly from a zip preview.
 rem Refuses to start if packaged Node, host, or @cordisjs/core is missing.
 rem Never falls back to PATH Node.
 
@@ -78,8 +80,10 @@ if "%HERE:~-1%"=="\\" set "HERE=%HERE:~0,-1%"
 
 set "BIN=%HERE%\\pktpath-studio.exe"
 set "NODE=%HERE%\\node\\node.exe"
-set "HOSTJS=%HERE%\\cordis-analyzer-host\\plugin-runtime.mjs"
-set "WAITJS=%HERE%\\cordis-analyzer-host\\cleanup-wait.mjs"
+set "HOSTDIR=%HERE%\\cordis-analyzer-host"
+set "HOSTJS=%HOSTDIR%\\plugin-runtime.mjs"
+set "WAITJS=%HOSTDIR%\\cleanup-wait.mjs"
+set "CORDISPKG=%HOSTDIR%\\node_modules\\@cordisjs\\core\\package.json"
 
 if not exist "%BIN%" (
   echo pktpath-studio.exe missing in bundle >&2
@@ -97,8 +101,12 @@ if not exist "%WAITJS%" (
   echo packaged Cordis cleanup-wait module missing ^(cordis-analyzer-host\\cleanup-wait.mjs^) >&2
   exit /b 1
 )
+if not exist "%CORDISPKG%" (
+  echo packaged @cordisjs/core missing ^(cordis-analyzer-host\\node_modules\\@cordisjs\\core\\package.json^) >&2
+  exit /b 1
+)
 
-pushd "%HERE%\\cordis-analyzer-host" >nul
+pushd "%HOSTDIR%" >nul
 "%NODE%" --input-type=module -e "await import('@cordisjs/core')"
 set "IMPERR=%ERRORLEVEL%"
 popd >nul
@@ -107,11 +115,16 @@ if not "%IMPERR%"=="0" (
   exit /b 1
 )
 
+set "PKTPATH_CORDIS_NODE=%NODE%"
+set "PKTPATH_CORDIS_PLUGIN_RUNTIME=%HOSTJS%"
 "%BIN%" --cordis-plugin-runtime "%HOSTJS%" --cordis-analyzer-node "%NODE%" %*
 exit /b %ERRORLEVEL%
 """
 
-START_STUDIO_PS1 = """# Fail-closed PktPath Studio launcher (Cordis default host).
+START_STUDIO_PS1 = r"""# Fail-closed PktPath Studio launcher (Cordis default host).
+# Extract the full zip archive before running; double-click entry is start-studio.cmd.
+# Under Restricted execution policy, run:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File ".\start-studio.ps1"
 # Refuses to start if packaged Node, host, or @cordisjs/core is missing.
 # Never falls back to PATH Node.
 $ErrorActionPreference = "Stop"
@@ -123,31 +136,44 @@ function Fail([int]$code, [string]$message) {
 }
 
 $bin = Join-Path $here "pktpath-studio.exe"
-$node = Join-Path $here "node\\node.exe"
-$hostjs = Join-Path $here "cordis-analyzer-host\\plugin-runtime.mjs"
-$waitjs = Join-Path $here "cordis-analyzer-host\\cleanup-wait.mjs"
+$node = Join-Path $here "node\node.exe"
+$hostDir = Join-Path $here "cordis-analyzer-host"
+$hostjs = Join-Path $hostDir "plugin-runtime.mjs"
+$waitjs = Join-Path $hostDir "cleanup-wait.mjs"
+$cordisPkg = Join-Path $hostDir "node_modules\@cordisjs\core\package.json"
 
 if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
     Fail 1 "pktpath-studio.exe missing in bundle"
 }
 if (-not (Test-Path -LiteralPath $node -PathType Leaf)) {
-    Fail 1 "packaged Windows x64 Node missing (node\\node.exe); no PATH fallback"
+    Fail 1 "packaged Windows x64 Node missing (node\node.exe); no PATH fallback"
 }
 if (-not (Test-Path -LiteralPath $hostjs -PathType Leaf)) {
-    Fail 1 "packaged Cordis plugin runtime missing (cordis-analyzer-host\\plugin-runtime.mjs)"
+    Fail 1 "packaged Cordis plugin runtime missing (cordis-analyzer-host\plugin-runtime.mjs)"
 }
 if (-not (Test-Path -LiteralPath $waitjs -PathType Leaf)) {
-    Fail 1 "packaged Cordis cleanup-wait module missing (cordis-analyzer-host\\cleanup-wait.mjs)"
+    Fail 1 "packaged Cordis cleanup-wait module missing (cordis-analyzer-host\cleanup-wait.mjs)"
+}
+if (-not (Test-Path -LiteralPath $cordisPkg -PathType Leaf)) {
+    Fail 1 "packaged @cordisjs/core missing (cordis-analyzer-host\node_modules\@cordisjs\core\package.json)"
 }
 
-$import = Start-Process -FilePath $node -ArgumentList @("--input-type=module", "-e", "await import('@cordisjs/core')") -WorkingDirectory (Join-Path $here "cordis-analyzer-host") -NoNewWindow -Wait -PassThru
-if ($import.ExitCode -ne 0) {
+Push-Location -LiteralPath $hostDir
+try {
+    & $node --input-type=module -e "await import('@cordisjs/core')"
+    $impCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($impCode -ne 0) {
     Fail 1 "packaged Cordis host cannot import @cordisjs/core with packaged Node"
 }
 
-$forward = @("--cordis-plugin-runtime", $hostjs, "--cordis-analyzer-node", $node) + $args
-$proc = Start-Process -FilePath $bin -ArgumentList $forward -NoNewWindow -Wait -PassThru
-exit $proc.ExitCode
+$env:PKTPATH_CORDIS_NODE = $node
+$env:PKTPATH_CORDIS_PLUGIN_RUNTIME = $hostjs
+$launchArgs = @("--cordis-plugin-runtime", $hostjs, "--cordis-analyzer-node", $node) + $args
+& $bin @launchArgs
+exit $LASTEXITCODE
 """
 
 START_STUDIO_SH = """#!/usr/bin/env bash
@@ -159,8 +185,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HERE/pktpath-studio"
 NODE="$HERE/node/bin/node"
-HOSTJS="$HERE/cordis-analyzer-host/plugin-runtime.mjs"
-WAITJS="$HERE/cordis-analyzer-host/cleanup-wait.mjs"
+HOSTDIR="$HERE/cordis-analyzer-host"
+HOSTJS="$HOSTDIR/plugin-runtime.mjs"
+WAITJS="$HOSTDIR/cleanup-wait.mjs"
+CORDISPKG="$HOSTDIR/node_modules/@cordisjs/core/package.json"
 
 if [[ ! -x "$BIN" ]]; then
   echo "pktpath-studio missing or not executable in bundle" >&2
@@ -174,12 +202,18 @@ if [[ ! -f "$HOSTJS" || ! -f "$WAITJS" ]]; then
   echo "packaged Cordis host module missing" >&2
   exit 1
 fi
+if [[ ! -f "$CORDISPKG" ]]; then
+  echo "packaged @cordisjs/core missing (cordis-analyzer-host/node_modules/@cordisjs/core/package.json)" >&2
+  exit 1
+fi
 
-(cd "$HERE/cordis-analyzer-host" && "$NODE" --input-type=module -e "await import('@cordisjs/core')") || {
+(cd "$HOSTDIR" && "$NODE" --input-type=module -e "await import('@cordisjs/core')") || {
   echo "packaged Cordis host cannot import @cordisjs/core with packaged Node" >&2
   exit 1
 }
 
+export PKTPATH_CORDIS_NODE="$NODE"
+export PKTPATH_CORDIS_PLUGIN_RUNTIME="$HOSTJS"
 exec "$BIN" --cordis-plugin-runtime "$HOSTJS" --cordis-analyzer-node "$NODE" "$@"
 """
 
@@ -239,6 +273,13 @@ def extract_node(target_os: str, archive: Path, bundle_dir: Path) -> None:
                 with f, dst.open("wb") as out:
                     shutil.copyfileobj(f, out)
         node_out.chmod(node_out.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    expected_node_sha = spec.get("node_sha256")
+    if expected_node_sha:
+        actual_node_sha = sha256_file(node_out)
+        if actual_node_sha != expected_node_sha:
+            raise ValueError(
+                f"SHA-256 mismatch for extracted {node_out.name}: expected {expected_node_sha}, got {actual_node_sha}"
+            )
 
 
 def check_binary_magic(path: Path, target_os: str) -> None:
