@@ -70,7 +70,7 @@ export async function handleAdbRoute(
     }
     const serial = (url.searchParams.get('serial') ?? '').trim();
     const dev = (url.searchParams.get('dev') ?? '').trim() || undefined;
-    const scope = (url.searchParams.get('scope') ?? '').trim() || 'all';
+    const scope = (url.searchParams.get('scope') ?? '').trim() || 'tc-egress';
     if (!serial) {
       sendJson(res, 400, { ok: false, error: 'serial query parameter is required' });
       return true;

@@ -32,7 +32,9 @@ export interface AdbTransportService {
     scope: string;
     dev: string;
     ifaces: IfaceInfo[];
-    qdiscs: string[];
+    interfaces: IfaceInfo[];
+    qdiscs: unknown[];
+    inspect?: Record<string, unknown>;
   }>;
   listApps(serial: string): Promise<AppEntry[]>;
 }
@@ -103,16 +105,18 @@ export const androidAdbPlugin: BuiltinPlugin = {
           pushed,
         };
       },
-      async inspectDevice(serial: string, dev?: string, scope = 'all') {
+      async inspectDevice(serial: string, dev?: string, scope = 'tc-egress') {
         if (!serial.trim()) throw new Error('serial is required');
         if (!adbPath) throw new Error('adb executable not found');
-        const res = await client.inspect(serial, dev);
+        const res = await client.inspect(serial, dev, scope);
         return {
           serial,
-          scope,
-          dev: dev ?? '',
+          scope: res.scope,
+          dev: res.dev,
           ifaces: res.ifaces,
+          interfaces: res.ifaces,
           qdiscs: res.qdiscs,
+          ...(res.inspect ? { inspect: res.inspect } : {}),
         };
       },
       async listApps(serial: string) {

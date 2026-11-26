@@ -126,6 +126,47 @@ export function parseDevicesL(out: string): DeviceEntry[] {
   return res;
 }
 
+export function pickDefaultIface(ifaces: IfaceInfo[], fallback = 'wlan0'): string {
+  if (fallback) {
+    const hit = ifaces.find((it) => it.name === fallback);
+    if (hit) return fallback;
+  }
+  for (const pref of ['wlan0', 'eth0', 'ens33', 'enp0s3']) {
+    if (ifaces.some((it) => it.name === pref)) return pref;
+  }
+  const up = ifaces.find((it) => it.name !== 'lo' && it.state.toUpperCase() === 'UP');
+  if (up) return up.name;
+  if (ifaces.length > 0) return ifaces[0].name;
+  return fallback || 'wlan0';
+}
+
+export function extractJsonObject(raw: string): Record<string, unknown> | undefined {
+  const s = raw.trim();
+  if (!s) return undefined;
+  if (s.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // fall through to brace slice
+    }
+  }
+  const i = s.indexOf('{');
+  const j = s.lastIndexOf('}');
+  if (i < 0 || j <= i) return undefined;
+  try {
+    const parsed = JSON.parse(s.slice(i, j + 1));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 export function parseIPBrAddr(out: string): IfaceInfo[] {
   const res: IfaceInfo[] = [];
   const seen = new Map<string, number>();
@@ -432,18 +473,48 @@ export class AdbClient {
     return { pushed: true, remoteSha: got };
   }
 
-  async inspect(serial: string, dev?: string): Promise<{ ifaces: IfaceInfo[]; qdiscs: string[] }> {
-    const ifaceRes = await this.shell(serial, 'ip -br addr 2>/dev/null', 10_000);
+  async inspect(
+    serial: string,
+    dev?: string,
+    scope = 'tc-egress',
+  ): Promise<{
+    dev: string;
+    scope: string;
+    ifaces: IfaceInfo[];
+    qdiscs: unknown[];
+    inspect?: Record<string, unknown>;
+  }> {
+    const ifaceRes = await this.shell(serial, 'ip -br addr 2>/dev/null || ip -o addr', 10_000);
     const ifaces = parseIPBrAddr(ifaceRes.stdout);
-    const qdiscCmd = dev
-      ? `tc qdisc show dev ${shQuote(dev)} 2>/dev/null`
-      : 'tc qdisc show 2>/dev/null';
+    const targetDev = (dev ?? '').trim() || pickDefaultIface(ifaces, 'wlan0');
+    const rawScope = (scope ?? '').trim();
+    const targetScope = !rawScope || rawScope === 'all' ? 'tc-egress' : rawScope;
+
+    const inspectCmd = `${REMOTE_AGENT} inspect --dev ${shQuote(targetDev)} --scope ${shQuote(targetScope)} --json`;
+    const inspRes = await this.priv(serial, inspectCmd, 45_000).catch(() => ({
+      stdout: '',
+      stderr: '',
+      exitCode: 1,
+    }));
+    const parsedInspect = extractJsonObject(inspRes.stdout);
+    if (parsedInspect) {
+      const qdiscs = Array.isArray(parsedInspect.qdiscs) ? parsedInspect.qdiscs : [];
+      return {
+        dev: targetDev,
+        scope: targetScope,
+        ifaces,
+        qdiscs,
+        inspect: parsedInspect,
+      };
+    }
+
+    const qdiscCmd = `tc qdisc show dev ${shQuote(targetDev)} 2>/dev/null`;
     const qRes = await this.priv(serial, qdiscCmd, 10_000).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
     const qdiscs = normNL(qRes.stdout)
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
-    return { ifaces, qdiscs };
+    return { dev: targetDev, scope: targetScope, ifaces, qdiscs };
   }
 
   async listApps(serial: string): Promise<AppEntry[]> {
@@ -517,6 +588,27 @@ export class AdbClient {
   async signal(serial: string, pid: number, sig: 'INT' | 'TERM' | 'USR1' | 'KILL'): Promise<void> {
     if (pid <= 0) throw new Error(`invalid pid ${pid}`);
     await this.priv(serial, `kill -${sig} ${pid}`, 10_000);
+  }
+
+  async remoteExists(serial: string, remotePath: string): Promise<boolean> {
+    const r = await this.priv(
+      serial,
+      `[ -e ${shQuote(remotePath)} ] && echo "@@exists=1" || echo "@@exists=0"`,
+      10_000,
+    ).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    return parseMarked(r.stdout).exists === '1';
+  }
+
+  async readLogTail(serial: string, logPath: string, tail = 60): Promise<string[]> {
+    const r = await this.priv(
+      serial,
+      `tail -n ${tail} ${shQuote(logPath)} 2>/dev/null; true`,
+      10_000,
+    ).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    return normNL(r.stdout)
+      .split('\n')
+      .map((l) => l.trimEnd())
+      .filter((l) => l.trim().length > 0);
   }
 
   async prepareForPull(serial: string, run: RemoteRun): Promise<void> {

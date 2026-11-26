@@ -86,23 +86,55 @@ export class CaptureController {
     const activeId = this.captureId;
     this.state = 'pulling';
     const localDir = path.join(this.host.paths.sessionsRoot, activeId);
+    const tmpParent = path.join(this.host.paths.sessionsRoot, `.pulling_${activeId}`);
     let pulledOk = false;
     try {
+      const remoteExists = await adb.client.remoteExists(activeSerial, activeRun.outDir);
+      if (!remoteExists) {
+        const latestTail = await adb.client.readLogTail(activeSerial, activeRun.logPath, 60).catch(() => []);
+        if (latestTail.length > 0) this.logTail = latestTail;
+        const lastMsg = this.logTail.length > 0 ? this.logTail[this.logTail.length - 1] : '';
+        throw new Error(
+          lastMsg
+            ? `remote run directory missing (record failed?): ${lastMsg}`
+            : `remote run directory missing (${activeRun.outDir})`,
+        );
+      }
+
       await adb.client.prepareForPull(activeSerial, activeRun);
-      fs.mkdirSync(localDir, { recursive: true });
-      await adb.client.pull(activeSerial, `${activeRun.outDir}/.`, localDir);
+      fs.rmSync(tmpParent, { recursive: true, force: true });
+      fs.mkdirSync(tmpParent, { recursive: true });
+      await adb.client.pull(activeSerial, activeRun.outDir, tmpParent);
+
+      const pulledSubdir = path.join(tmpParent, path.posix.basename(activeRun.outDir));
+      const pulledDir = fs.existsSync(pulledSubdir) && fs.statSync(pulledSubdir).isDirectory()
+        ? pulledSubdir
+        : tmpParent;
+      fs.rmSync(localDir, { recursive: true, force: true });
+      fs.renameSync(pulledDir, localDir);
+      fs.rmSync(tmpParent, { recursive: true, force: true });
+
+      await adb.client
+        .pull(activeSerial, activeRun.logPath, path.join(localDir, 'studio_record.log'), 60_000)
+        .catch(() => {});
+
       this.sessionId = activeId;
       this.sessionDir = localDir;
       pulledOk = true;
       this.state = 'done';
       this.lastError = undefined;
     } catch (err) {
+      if (this.logTail.length === 0) {
+        const latestTail = await adb.client.readLogTail(activeSerial, activeRun.logPath, 60).catch(() => []);
+        if (latestTail.length > 0) this.logTail = latestTail;
+      }
       this.state = 'error';
       this.lastError = err instanceof Error ? err.message : String(err);
       if (!pulledOk) {
         fs.rmSync(localDir, { recursive: true, force: true });
       }
     } finally {
+      fs.rmSync(tmpParent, { recursive: true, force: true });
       if (this.cleanupRemote) {
         await adb.client.cleanupRun(activeSerial, activeRun).catch(() => {});
       }
@@ -215,7 +247,14 @@ export class CaptureController {
     });
   }
 
-  stop(): Promise<{ ok: boolean; status: CaptureStateKind; session_id?: string; session_dir?: string; error?: string }> {
+  stop(): Promise<{
+    ok: boolean;
+    status: CaptureStateKind;
+    session_id?: string;
+    session_dir?: string;
+    error?: string;
+    log_tail?: string[];
+  }> {
     return this.runExclusive(async () => {
       if (this.state !== 'running' || !this.serial || !this.run) {
         return {
@@ -224,6 +263,7 @@ export class CaptureController {
           session_id: this.sessionId,
           session_dir: this.sessionDir,
           error: this.lastError,
+          log_tail: this.logTail.length > 0 ? this.logTail : undefined,
         };
       }
       const adb = this.host.getService<AdbTransportService>('transport.adb');
@@ -260,6 +300,7 @@ export class CaptureController {
         session_id: this.sessionId,
         session_dir: this.sessionDir,
         error: this.lastError,
+        log_tail: this.logTail.length > 0 ? this.logTail : undefined,
       };
     });
   }
