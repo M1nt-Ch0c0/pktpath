@@ -92,7 +92,7 @@ func TestCordisF031AIncompatibleStartupNoApplyNoNode(t *testing.T) {
 func TestCordisF031ACompatibleFormatsPositive(t *testing.T) {
 	host := os.Getenv("PKTPATH_TEST_CORDIS_HOST")
 	if host == "" {
-		t.Fatal("explicit controlled host")
+		t.Skip("explicit controlled host")
 	}
 	for _, tc := range []struct {
 		name, raw, want string
@@ -144,7 +144,7 @@ func TestCordisF031ACompatibleFormatsPositive(t *testing.T) {
 func TestCordisF031ARuntimeBadFileBlocksControlAndWriter(t *testing.T) {
 	host := os.Getenv("PKTPATH_TEST_CORDIS_HOST")
 	if host == "" {
-		t.Fatal("explicit controlled host")
+		t.Skip("explicit controlled host")
 	}
 	for _, first := range []string{"control", "writer"} {
 		t.Run(first, func(t *testing.T) {
@@ -211,7 +211,7 @@ func TestCordisF031ALegacyDefaultAndF02RemainUnchanged(t *testing.T) {
 			} else {
 				host := os.Getenv("PKTPATH_TEST_CORDIS_HOST")
 				if host == "" {
-					t.Fatal("explicit host")
+					t.Skip("explicit host")
 				}
 				k, h, _ = compatKernel(t, raw, true, CordisLifecycleOptions{HostPath: host}, &calls)
 			}
@@ -242,7 +242,7 @@ func TestCordisF031ALegacyDefaultAndF02RemainUnchanged(t *testing.T) {
 func TestCordisF031AExactTransactionImageAlsoValidated(t *testing.T) {
 	host := os.Getenv("PKTPATH_TEST_CORDIS_HOST")
 	if host == "" {
-		t.Fatal("explicit host")
+		t.Skip("explicit host")
 	}
 	var calls atomic.Int32
 	k, h, path := compatKernel(t, `{"version":2,"plugins":{"txn":{"config":{"mode":"user-A"}}}}`, true, CordisLifecycleOptions{HostPath: host, ConfigTransactions: true}, &calls)
