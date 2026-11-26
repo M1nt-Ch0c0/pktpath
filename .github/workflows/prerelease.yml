@@ -9,6 +9,12 @@ on:
       tag:
         description: "Pre-release tag (e.g. preview-cordis-wave1-r1)"
         required: true
+        type: string
+      allow_existing_release:
+        description: "Allow updating an existing Release (blocks conflicting bundle names and recomputes full SHA256SUMS.txt)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -97,7 +103,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          New-Item -ItemType Directory -Force release_assets | Out-Null
+          New-Item -ItemType Directory -Force release_assets_windows | Out-Null
           $bundleArgs = @(
             "scripts/package_preview_bundle.py",
             "--os", "windows",
@@ -106,7 +112,7 @@ jobs:
             "--repo-license", "LICENSE",
             "--download-node",
             "--cache-dir", "$env:RUNNER_TEMP/pktpath-node-cache",
-            "--out-dir", "release_assets",
+            "--out-dir", "release_assets_windows",
             "--bundle-name", "pktpath-windows-x64-$env:TAG"
           )
           if (-not (Test-Path -LiteralPath "studio-cordis/scripts/start-studio.cmd" -PathType Leaf) -or
@@ -115,49 +121,192 @@ jobs:
           }
           $bundleArgs += @("--launchers-dir", "studio-cordis/scripts")
           python -W error @bundleArgs
-          Copy-Item bin/pktpath-android-arm64 release_assets/
-          Copy-Item bin/pktpath-linux-x86_64 release_assets/
-          Copy-Item bin/pktpath-linux-arm64 release_assets/
+          Copy-Item bin/pktpath-android-arm64 release_assets_windows/
+          Copy-Item bin/pktpath-linux-x86_64 release_assets_windows/
+          Copy-Item bin/pktpath-linux-arm64 release_assets_windows/
 
-      - name: Generate SHA256SUMS.txt
-        shell: pwsh
-        run: |
-          Get-ChildItem release_assets -File | Sort-Object Name | ForEach-Object {
-            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$h  $($_.Name)"
-          } | Set-Content -Encoding ascii release_assets/SHA256SUMS.txt
-          Get-Content release_assets/SHA256SUMS.txt
-
-      - name: Upload release bundle
+      - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets
-          path: release_assets/*
+          name: release-assets-windows
+          path: release_assets_windows/*
 
-  publish-prerelease:
-    name: Publish GitHub Pre-release
-    needs: package-studio-windows
+  package-studio-linux:
+    name: Package Pure-Cordis Studio Bundle (Linux x64 + Bundled Node v24.22.1)
+    needs: build-collectors
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+          cache: "npm"
+          cache-dependency-path: studio-cordis/package-lock.json
+
       - uses: actions/download-artifact@v4
         with:
-          name: release-assets
+          name: collectors
+          path: bin
+
+      - name: Install pure Cordis production dependencies
+        working-directory: studio-cordis
+        run: |
+          npm ci --ignore-scripts --omit=dev
+          node --input-type=module -e "await import('@cordisjs/core')"
+
+      - name: Cache official Linux Node v24.22.1
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pktpath-node-cache
+          key: node-v24.22.1-linux-x64-6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+
+      - name: Package & verify unified Linux x64 pure-Cordis bundle
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          mkdir -p release_assets_linux
+          BUNDLE_NAME="pktpath-linux-x64-${TAG}"
+          BUNDLE_ARGS=(
+            scripts/package_preview_bundle.py
+            --os linux
+            --studio-dir studio-cordis
+            --collectors-dir bin
+            --repo-license LICENSE
+            --download-node
+            --cache-dir "${RUNNER_TEMP}/pktpath-node-cache"
+            --out-dir release_assets_linux
+            --bundle-name "${BUNDLE_NAME}"
+          )
+          if [ -f studio-cordis/scripts/start-studio.sh ]; then
+            BUNDLE_ARGS+=(--launchers-dir studio-cordis/scripts)
+          fi
+          python3 -W error "${BUNDLE_ARGS[@]}"
+
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+          tar -xzf "release_assets_linux/${BUNDLE_NAME}.tar.gz" -C "$VERIFY_DIR"
+          (
+            cd "${VERIFY_DIR}/${BUNDLE_NAME}"
+            sha256sum -c MANIFEST.sha256
+            test -x start-studio.sh
+            NODE_VER="$(./node/bin/node --version)"
+            test "$NODE_VER" = "v24.22.1"
+          )
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-linux
+          path: release_assets_linux/*
+
+  publish-prerelease:
+    name: Publish GitHub Pre-release
+    needs:
+      - package-studio-windows
+      - package-studio-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets-windows
           path: dist
 
-      - name: Create GitHub Pre-release
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets-linux
+          path: dist
+
+      - name: Guard existing Release & publish with complete SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          ALLOW_EXISTING_RELEASE: ${{ inputs.allow_existing_release || false }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; uploading assets only."
-            gh release upload "$TAG" dist/* --clobber
+          set -euo pipefail
+          WORK_DIR="$(mktemp -d)"
+          trap 'rm -rf "$WORK_DIR"' EXIT
+
+          EXISTING_JSON="${WORK_DIR}/existing-assets.json"
+          VIEW_ERR="${WORK_DIR}/release-view.err"
+          if gh release view "$TAG" --json assets > "$EXISTING_JSON" 2>"$VIEW_ERR"; then
+            RELEASE_EXISTS="true"
+          elif grep -qi "release not found" "$VIEW_ERR"; then
+            RELEASE_EXISTS="false"
+            rm -f "$EXISTING_JSON"
           else
+            cat "$VIEW_ERR" >&2
+            exit 1
+          fi
+
+          CHECK_ARGS=(
+            scripts/reconcile_release_checksums.py
+            check-existing
+            --dist-dir dist
+            --release-exists "$RELEASE_EXISTS"
+            --event-name "$EVENT_NAME"
+            --allow-existing-release "$ALLOW_EXISTING_RELEASE"
+          )
+          if [ "$RELEASE_EXISTS" = "true" ]; then
+            CHECK_ARGS+=(--existing-assets-json "$EXISTING_JSON")
+          fi
+
+          ACTION="$(python3 -W error "${CHECK_ARGS[@]}")"
+          echo "Resolved release action: ${ACTION}"
+
+          if [ "$ACTION" = "skip" ]; then
+            echo "Skipping Release upload for ${TAG}; existing Release and SHA256SUMS.txt left untouched."
+            exit 0
+          fi
+
+          if [ "$ACTION" = "create" ]; then
+            python3 -W error scripts/reconcile_release_checksums.py build-sums \
+              --assets-dir dist \
+              --out dist/SHA256SUMS.txt
+            cat dist/SHA256SUMS.txt
             gh release create "$TAG" dist/* \
               --title "PktPath $TAG (pre-release)" \
               --notes-file PREVIEW-NOTES.md \
               --prerelease \
               --target "${GITHUB_SHA}"
+            exit 0
           fi
+
+          if [ "$ACTION" = "merge" ]; then
+            UPLOAD_FILES=()
+            for f in dist/*; do
+              [ "$(basename "$f")" = "SHA256SUMS.txt" ] && continue
+              UPLOAD_FILES+=("$f")
+            done
+            gh release upload "$TAG" "${UPLOAD_FILES[@]}" --clobber
+
+            POST_JSON="${WORK_DIR}/post-assets.json"
+            ALL_DIR="${WORK_DIR}/all-assets"
+            mkdir -p "$ALL_DIR"
+            gh release view "$TAG" --json assets > "$POST_JSON"
+            gh release download "$TAG" --dir "$ALL_DIR"
+            rm -f "${ALL_DIR}/SHA256SUMS.txt"
+
+            SUMS_OUT="${WORK_DIR}/SHA256SUMS.txt"
+            python3 -W error scripts/reconcile_release_checksums.py build-sums \
+              --assets-dir "$ALL_DIR" \
+              --expected-assets-json "$POST_JSON" \
+              --out "$SUMS_OUT"
+            cat "$SUMS_OUT"
+            gh release upload "$TAG" "$SUMS_OUT" --clobber
+            exit 0
+          fi
+
+          echo "Unexpected action: ${ACTION}" >&2
+          exit 1
