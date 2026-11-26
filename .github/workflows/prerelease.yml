@@ -1,0 +1,133 @@
+name: Pre-release
+
+on:
+  push:
+    tags:
+      - "preview-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Pre-release tag (e.g. preview-dd5ee9fb-r1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-collectors:
+    name: Build Native Collectors (Android arm64 + Linux x86_64/arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm gcc gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Install Python build dependencies
+        run: python3 -m pip install -r requirements-build.txt
+
+      - name: Cache official Android NDK r28b
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pktpath-ci/android-ndk-r28b
+          key: ndk-r28b-linux-e9f2759862cecfd48c20bbb7d8cfedbb020f4d91b5f78d9a2fc106f7db3c27ed
+
+      - name: Install official Android NDK r28b
+        run: bash scripts/ci_install_ndk.sh "$HOME/.cache/pktpath-ci/android-ndk-r28b"
+
+      - name: Compile dual-arch BPF headers & collectors
+        run: |
+          python3 scripts/build_bpf.py --arch all
+          python3 scripts/build_device.py --target android-arm64
+          python3 scripts/build_device.py --target linux-x86_64
+          python3 scripts/build_device.py --target linux-arm64
+          ls -lh bin/
+
+      - name: Upload collector artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: collectors
+          path: |
+            bin/pktpath-android-arm64
+            bin/pktpath-linux-x86_64
+            bin/pktpath-linux-arm64
+
+  build-studio-windows:
+    name: Build PktPath Studio (Windows x64 GUI)
+    needs: build-collectors
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: studio/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: collectors
+          path: bin
+
+      - name: Build single-file pktpath-studio.exe
+        run: python studio/scripts/build_studio.py
+
+      - name: Package example external plugin bundles (.pktplugin)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release_assets | Out-Null
+          Copy-Item bin/pktpath-studio.exe release_assets/
+          Copy-Item bin/pktpath-android-arm64 release_assets/
+          Copy-Item bin/pktpath-linux-x86_64 release_assets/
+          Copy-Item bin/pktpath-linux-arm64 release_assets/
+          Compress-Archive -Path plugins/examples/hello-ext-bundle/* -DestinationPath release_assets/example-sla-auditor.pktplugin -Force
+          Compress-Archive -Path plugins/examples/kernel-ext-bundle/* -DestinationPath release_assets/example-multi-qdisc.pktplugin -Force
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          Get-ChildItem release_assets -File | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Set-Content -Encoding ascii release_assets/SHA256SUMS.txt
+          Get-Content release_assets/SHA256SUMS.txt
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release_assets/*
+
+  publish-prerelease:
+    name: Publish GitHub Pre-release
+    needs: build-studio-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create GitHub Pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading assets only."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "PktPath $TAG (pre-release, not a first version)" \
+              --notes-file PREVIEW-NOTES.md \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
