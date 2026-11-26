@@ -99,6 +99,14 @@ func resolvePluginRuntimeHost(explicit string) (string, error) {
 }
 
 func resolvePluginRuntimeNode(explicit string) (string, error) {
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	return resolvePluginRuntimeNodeWithExeDir(explicit, exeDir, runtime.GOOS)
+}
+
+func resolvePluginRuntimeNodeWithExeDir(explicit, exeDir, goos string) (string, error) {
 	try := func(s string) (string, bool) {
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -125,8 +133,8 @@ func resolvePluginRuntimeNode(explicit string) (string, error) {
 	if p, ok := try(os.Getenv("PKTPATH_CORDIS_NODE")); ok {
 		return p, nil
 	}
-	if exe, err := os.Executable(); err == nil {
-		for _, c := range bundledNodeCandidates(filepath.Dir(exe), runtime.GOOS) {
+	if exeDir != "" {
+		for _, c := range bundledNodeCandidates(exeDir, goos) {
 			if p, ok := try(c); ok {
 				return p, nil
 			}

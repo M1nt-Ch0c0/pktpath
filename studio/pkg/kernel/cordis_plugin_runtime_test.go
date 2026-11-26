@@ -183,3 +183,41 @@ func TestBundledNodeCandidates(t *testing.T) {
 		t.Fatalf("unexpected linux bundled node candidates: %v", lin)
 	}
 }
+
+func TestResolvePluginRuntimeNodePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	envNode := filepath.Join(dir, "env-node")
+	explicitNode := filepath.Join(dir, "explicit-node")
+	winBundled := filepath.Join(dir, "exe", "node", "node.exe")
+	linBundled := filepath.Join(dir, "exe", "node", "bin", "node")
+	for _, p := range []string{envNode, explicitNode, winBundled, linBundled} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("stub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("PKTPATH_CORDIS_NODE", envNode)
+	got, err := resolvePluginRuntimeNodeWithExeDir("", filepath.Join(dir, "exe"), "windows")
+	if err != nil || got != envNode {
+		t.Fatalf("empty explicit should pick PKTPATH_CORDIS_NODE (%s), got %q err=%v", envNode, got, err)
+	}
+
+	got, err = resolvePluginRuntimeNodeWithExeDir(explicitNode, filepath.Join(dir, "exe"), "windows")
+	if err != nil || got != explicitNode {
+		t.Fatalf("non-empty explicit should win (%s), got %q err=%v", explicitNode, got, err)
+	}
+
+	t.Setenv("PKTPATH_CORDIS_NODE", "")
+	got, err = resolvePluginRuntimeNodeWithExeDir("", filepath.Join(dir, "exe"), "windows")
+	if err != nil || got != winBundled {
+		t.Fatalf("empty explicit + unset env should pick bundled windows node (%s), got %q err=%v", winBundled, got, err)
+	}
+
+	got, err = resolvePluginRuntimeNodeWithExeDir("", filepath.Join(dir, "exe"), "linux")
+	if err != nil || got != linBundled {
+		t.Fatalf("empty explicit + unset env should pick bundled linux node (%s), got %q err=%v", linBundled, got, err)
+	}
+}

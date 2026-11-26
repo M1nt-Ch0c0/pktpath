@@ -15,6 +15,7 @@ import (
 	"pktpath/studio"
 	"pktpath/studio/pkg/adb"
 	"pktpath/studio/pkg/server"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -31,7 +32,7 @@ func run() error {
 	_ = flag.Bool("headless", true, "always headless; no browser is opened")
 	lifecycle := flag.String("cordis-plugin-host", "", "explicit experimental F02 lifecycle host; empty leaves F02 off")
 	pluginNode := flag.String("cordis-plugin-node", "node", "Node executable for explicit lifecycle host")
-	analyzerNode := flag.String("cordis-analyzer-node", "node", "Node executable for explicit external-analyzer host")
+	analyzerNode := flag.String("cordis-analyzer-node", "", "Explicit Node executable for external-analyzer host or plugin runtime; empty auto-resolves PKTPATH_CORDIS_NODE / bundled Node / PATH")
 	analyzer := flag.String("cordis-analyzer-host", "", "explicit experimental F01 analyzer host; empty leaves F01 off")
 	runtimeHost := flag.String("cordis-plugin-runtime", "", "in-process plugin runtime; empty uses the bundled new-preview default")
 	collectorManifest := flag.String("collector-manifest", "", "explicit absolute collector manifest; no disk/PATH fallback")
@@ -64,7 +65,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Options{Runtime: rt, AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: *analyzerNode, CordisPluginRuntime: *runtimeHost})
+	srv := server.New(server.Options{Runtime: rt, AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: defaultNodeIfEmpty(*analyzerNode), CordisPluginRuntime: *runtimeHost, CordisPluginRuntimeNode: strings.TrimSpace(*analyzerNode)})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -99,4 +100,11 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func defaultNodeIfEmpty(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		return s
+	}
+	return "node"
 }

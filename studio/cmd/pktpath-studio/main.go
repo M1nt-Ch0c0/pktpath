@@ -55,7 +55,7 @@ func main() {
 		flagPluginHost    = flag.String("cordis-plugin-host", "", "EXPERIMENTAL F02: Cordis3 lifecycle.mjs metadata scheduler; empty leaves F02 off")
 		flagPluginNode    = flag.String("cordis-plugin-node", "node", "EXPERIMENTAL F02: explicit candidate Node runtime; no auto install")
 		flagCordisHost    = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL F01: absolute legacy host.mjs path; empty leaves F01 off")
-		flagCordisNode    = flag.String("cordis-analyzer-node", "node", "Node executable for optional F01 analyzer host or plugin runtime")
+		flagCordisNode    = flag.String("cordis-analyzer-node", "", "Explicit Node executable for optional F01 analyzer host or plugin runtime; empty auto-resolves PKTPATH_CORDIS_NODE / bundled Node / PATH")
 		flagPluginRuntime = flag.String("cordis-plugin-runtime", "", "Cordis in-process plugin runtime (plugin-runtime.mjs); empty uses the bundled new-preview default")
 		flagDebug         = flag.Bool("debug", true, "Enable WebView2 context menu & DevTools")
 	)
@@ -127,7 +127,7 @@ func main() {
 		Logger:                   logger,
 		Version:                  studioVersion,
 		CordisAnalyzerHost:       strings.TrimSpace(*flagCordisHost),
-		CordisAnalyzerNode:       *flagCordisNode,
+		CordisAnalyzerNode:       defaultNodeIfEmpty(*flagCordisNode),
 		CordisPluginHost:         strings.TrimSpace(*flagPluginHost),
 		CordisPluginNode:         *flagPluginNode,
 		CordisConfigTransactions: *flagConfigTxn,
@@ -465,4 +465,11 @@ func attachParentConsoleIfNeeded() {
 	if errOut, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
 		os.Stderr = errOut
 	}
+}
+
+func defaultNodeIfEmpty(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		return s
+	}
+	return "node"
 }
