@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,7 @@ type PluginContext struct {
 	staging  *cordisScope
 
 	mu        sync.Mutex
-	disposers []func()
+	disposers []func() error
 	extPoints []string
 	services  []string
 	disposed  bool
@@ -64,12 +65,13 @@ func (c *PluginContext) Provide(name string, impl any) {
 
 	c.mu.Lock()
 	c.services = append(c.services, name)
-	c.disposers = append(c.disposers, func() {
+	c.disposers = append(c.disposers, func() error {
 		c.kernel.mu.Lock()
 		if cur, ok := c.kernel.services[name]; ok && cur.pluginID == c.pluginID {
 			delete(c.kernel.services, name)
 		}
 		c.kernel.mu.Unlock()
+		return nil
 	})
 	c.mu.Unlock()
 }
@@ -99,7 +101,7 @@ func (c *PluginContext) RegisterExtension(point string, value any) {
 
 	c.mu.Lock()
 	c.extPoints = append(c.extPoints, point)
-	c.disposers = append(c.disposers, func() {
+	c.disposers = append(c.disposers, func() error {
 		c.kernel.mu.Lock()
 		list := c.kernel.extensions[point]
 		kept := list[:0]
@@ -114,15 +116,24 @@ func (c *PluginContext) RegisterExtension(point string, value any) {
 			c.kernel.extensions[point] = kept
 		}
 		c.kernel.mu.Unlock()
+		return nil
 	})
 	c.mu.Unlock()
 }
 
 // OnDispose registers a custom cleanup callback invoked in LIFO order on dispose.
 func (c *PluginContext) OnDispose(fn func()) {
+	if fn == nil {
+		return
+	}
+	c.OnDisposeErr(func() error { fn(); return nil })
+}
+
+// OnDisposeErr registers a cleanup callback whose error is reported on deactivate.
+func (c *PluginContext) OnDisposeErr(fn func() error) {
 	if c.staging != nil {
 		if fn != nil {
-			_ = c.staging.cleanup(func(context.Context) error { fn(); return nil })
+			_ = c.staging.cleanup(func(context.Context) error { return fn() })
 		}
 		return
 	}
@@ -134,34 +145,42 @@ func (c *PluginContext) OnDispose(fn func()) {
 	c.mu.Unlock()
 }
 
-func (c *PluginContext) dispose() {
+func (c *PluginContext) dispose() error {
 	if c.staging != nil {
 		b := c.staging
 		h := b.owner
 		h.mu.Lock()
 		h.revokeLocked(b, "Go scope disposed")
 		h.mu.Unlock()
-		return
+		return nil
 	}
 	c.mu.Lock()
 	if c.disposed {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 	c.disposed = true
-	fns := make([]func(), len(c.disposers))
+	fns := make([]func() error, len(c.disposers))
 	copy(fns, c.disposers)
 	c.disposers = nil
 	c.extPoints = nil
 	c.services = nil
 	c.mu.Unlock()
 
+	var errs []error
 	for i := len(fns) - 1; i >= 0; i-- {
 		func() {
-			defer func() { _ = recover() }()
-			fns[i]()
+			defer func() {
+				if r := recover(); r != nil {
+					errs = append(errs, fmt.Errorf("dispose panic: %v", r))
+				}
+			}()
+			if err := fns[i](); err != nil {
+				errs = append(errs, err)
+			}
 		}()
 	}
+	return errors.Join(errs...)
 }
 
 func (c *PluginContext) summary() (points []string, services []string) {
@@ -510,17 +529,16 @@ func (k *Kernel) activatePlugin(id string) error {
 	return nil
 }
 
-func (k *Kernel) deactivatePlugin(id string) {
+func (k *Kernel) deactivatePlugin(id string) error {
 	if h := k.host.LifecycleHost; h.manages(id) {
 		enabled := false
-		_ = h.update(id, &enabled, nil, false)
-		return
+		return h.update(id, &enabled, nil, false)
 	}
 	k.mu.Lock()
 	rec, ok := k.records[id]
 	if !ok {
 		k.mu.Unlock()
-		return
+		return nil
 	}
 	rec.activationRevision++
 	scope := rec.scope
@@ -530,8 +548,16 @@ func (k *Kernel) deactivatePlugin(id string) {
 	k.mu.Unlock()
 
 	if scope != nil {
-		scope.dispose()
+		if err := scope.dispose(); err != nil {
+			k.mu.Lock()
+			if cur, exists := k.records[id]; exists {
+				cur.lastError = err.Error()
+			}
+			k.mu.Unlock()
+			return err
+		}
 	}
+	return nil
 }
 
 // SetEnabled toggles a plugin on/off at runtime with full effect-scope rollback
@@ -557,7 +583,7 @@ func (k *Kernel) SetEnabled(id string, enabled bool) error {
 		err = k.activatePlugin(id)
 		k.reconcileDependents()
 	} else {
-		k.deactivatePlugin(id)
+		err = k.deactivatePlugin(id)
 		k.reconcileDependents()
 	}
 	_ = k.savePersistedConfig()

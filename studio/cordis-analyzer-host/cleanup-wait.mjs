@@ -12,6 +12,7 @@ export function attachCleanupWait(ctx) {
   if (proto.reset._pktpathCleanupWait) return proto.reset._pktpathCleanupWait;
 
   const pending = new Set();
+  const errors = [];
   const original = proto.reset;
   function reset() {
     this.isActive = false;
@@ -20,6 +21,7 @@ export function attachCleanupWait(ctx) {
       const done = Promise.resolve().then(() => dispose());
       pending.add(done);
       const tracked = done.catch((reason) => {
+        errors.push(reason instanceof Error ? reason.message : String(reason));
         this.context.emit(this.ctx, 'internal/error', reason);
         return reason;
       });
@@ -32,6 +34,7 @@ export function attachCleanupWait(ctx) {
       while (pending.size) {
         await Promise.allSettled([...pending]);
       }
+      return errors.splice(0);
     },
     size: () => pending.size,
   };

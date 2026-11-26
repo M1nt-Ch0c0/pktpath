@@ -198,7 +198,7 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 			return err
 		}
 		pluginID := ep.meta.ID
-		ctx.OnDispose(func() { _ = runtime.Unload(pluginID) })
+		ctx.OnDisposeErr(func() error { return runtime.Unload(pluginID) })
 
 		for _, an := range ep.manifest.Analyzers {
 			anID := strings.TrimSpace(an.ID)

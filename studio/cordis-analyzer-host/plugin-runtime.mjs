@@ -1,7 +1,7 @@
 // In-process JS/TS plugin runtime for the new preview.
 // Plugins are ESM modules (entrypoint.module). Analyze/export payloads
 // travel as sidecar JSON files so control frames stay small and large
-// integers are not forced through a 64KiB protocol line.
+// integers are preserved as lossless decimal text instead of truncated JS Numbers.
 import { Context } from '@cordisjs/core';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
@@ -24,10 +24,26 @@ console.log = (...args) => console.error(...args);
 
 const plugins = new Map();
 let closing = false;
+let loadSeq = 0;
 
 export function text(value, name) {
   if (typeof value !== 'string' || !value) throw new Error(`invalid ${name}`);
   return value;
+}
+
+export function parseJSONPreserveLargeInts(raw) {
+  return JSON.parse(raw, (_key, value, context) => {
+    if (
+      typeof value === 'number' &&
+      context &&
+      typeof context.source === 'string' &&
+      /^-?\d+$/.test(context.source) &&
+      !Number.isSafeInteger(value)
+    ) {
+      return context.source;
+    }
+    return value;
+  });
 }
 
 export function resolvePackageModule(packageDir, modulePath) {
@@ -53,7 +69,8 @@ async function loadPlugin(req) {
   const analyzers = Array.isArray(req.analyzers) ? req.analyzers.map(x => text(x, 'analyzer')) : [];
   const exporters = Array.isArray(req.exporters) ? req.exporters.map(x => text(x, 'exporter')) : [];
   if (!analyzers.length && !exporters.length) throw new Error('missing analyzers/exporters');
-  const url = pathToFileURL(resolvePackageModule(req.package_dir, req.module)).href;
+  const baseUrl = pathToFileURL(resolvePackageModule(req.package_dir, req.module)).href;
+  const url = `${baseUrl}?v=${++loadSeq}-${Date.now()}`;
   const mod = await import(url);
   if (analyzers.length && typeof mod.analyze !== 'function') {
     throw new Error('declared analyzers require exported analyze()');
@@ -95,7 +112,10 @@ async function unloadPlugin(id) {
   if (!ent) return { unloaded: true, plugin: id };
   plugins.delete(id);
   if (ent.fork) ent.fork.dispose();
-  await cleanupWait.wait();
+  const cleanupErrors = await cleanupWait.wait();
+  if (cleanupErrors.length) {
+    throw new Error(`plugin cleanup failed (${id}): ${cleanupErrors.join('; ')}`);
+  }
   return { unloaded: true, plugin: id };
 }
 
@@ -105,7 +125,7 @@ async function callFile(req, kind) {
   if (!ent) throw new Error('plugin not loaded');
   const inputPath = text(req.input_path, 'input_path');
   const outputPath = text(req.output_path, 'output_path');
-  const input = JSON.parse(await readFile(inputPath, 'utf8'));
+  const input = parseJSONPreserveLargeInts(await readFile(inputPath, 'utf8'));
   let result;
   if (kind === 'analyze') {
     const analyzer = text(req.analyzer_id, 'analyzer_id');
@@ -142,9 +162,20 @@ export async function dispatch(req) {
       return await unloadPlugin(text(req.plugin_id, 'plugin_id'));
     case 'shutdown': {
       closing = true;
-      for (const id of [...plugins.keys()]) await unloadPlugin(id);
+      const shutdownErrors = [];
+      for (const id of [...plugins.keys()]) {
+        try {
+          await unloadPlugin(id);
+        } catch (err) {
+          shutdownErrors.push(String(err.message || err));
+        }
+      }
       await ctx.stop();
-      await cleanupWait.wait();
+      const rest = await cleanupWait.wait();
+      shutdownErrors.push(...rest);
+      if (shutdownErrors.length) {
+        throw new Error(`shutdown cleanup failed: ${shutdownErrors.join('; ')}`);
+      }
       return { closed: true };
     }
     default:
@@ -156,6 +187,13 @@ const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href =
 if (isMain) {
   let closingStdout = false;
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const finishShutdownIfNeeded = (req) => () => {
+    if (closing && req.op === 'shutdown' && !closingStdout) {
+      closingStdout = true;
+      lines.close();
+      process.stdin.destroy();
+    }
+  };
   lines.on('line', line => {
     Promise.resolve().then(async () => {
       if (Buffer.byteLength(line) > 65536) throw new Error('control line too large');
@@ -163,15 +201,9 @@ if (isMain) {
       text(req.id, 'request id');
       try {
         const data = await dispatch(req);
-        process.stdout.write(JSON.stringify({ id: req.id, protocol, ok: true, ...data }) + '\n', () => {
-          if (closing && req.op === 'shutdown' && !closingStdout) {
-            closingStdout = true;
-            lines.close();
-            process.stdin.destroy();
-          }
-        });
+        process.stdout.write(JSON.stringify({ id: req.id, protocol, ok: true, ...data }) + '\n', finishShutdownIfNeeded(req));
       } catch (error) {
-        process.stdout.write(JSON.stringify({ id: req.id, protocol, ok: false, error: String(error.message || error) }) + '\n');
+        process.stdout.write(JSON.stringify({ id: req.id, protocol, ok: false, error: String(error.message || error) }) + '\n', finishShutdownIfNeeded(req));
       }
     }).catch(error => { console.error(error); process.exitCode = 1; lines.close(); process.stdin.destroy(); });
   });

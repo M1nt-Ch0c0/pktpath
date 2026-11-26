@@ -221,3 +221,167 @@ func TestResolvePluginRuntimeNodePrecedence(t *testing.T) {
 		t.Fatalf("empty explicit + unset env should pick bundled linux node (%s), got %q err=%v", linBundled, got, err)
 	}
 }
+
+func TestLargeSampleIDRoundTrip(t *testing.T) {
+	rt := testPluginRuntime(t)
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "bigint-plugin")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "manifest.json"), []byte(`{
+		"id": "reg.bigint",
+		"name": "BigInt",
+		"version": "1.0.0",
+		"entrypoint": {"module": "plugin.mjs"},
+		"analyzers": [{"id": "reg.bigint.a", "name": "BigInt"}]
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "plugin.mjs"), []byte(`
+		export async function analyze(input) {
+			const sid = input.overview.samples[0].sample_id;
+			return {
+				insights: [{
+					id: "big-1",
+					plugin_id: "reg.bigint",
+					plugin_name: "BigInt",
+					severity: "info",
+					title: "big",
+					summary: String(sid),
+					sample_ids: [sid]
+				}]
+			};
+		}
+	`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(HostServices{AppDir: filepath.Join(dir, "app"), PluginRuntime: rt})
+	if _, err := k.InstallExternal(pkgDir, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	const want uint64 = 9007199254740993
+	out := k.AnalyzeSession(context.Background(), &AnalyzeInput{
+		SessionID:  "s1",
+		SessionDir: dir,
+		Overview: &reconstruct.SessionOverview{
+			Samples: []reconstruct.SampleRow{{SampleID: want, Comm: "demo"}},
+		},
+	})
+	if len(out.Insights) != 1 || out.Insights[0].Summary != "9007199254740993" {
+		t.Fatalf("unexpected insights: %+v (notes=%v)", out.Insights, out.Notes)
+	}
+	if len(out.Insights[0].SampleIDs) != 1 || out.Insights[0].SampleIDs[0] != want {
+		t.Fatalf("expected lossless uint64 %d, got %+v", want, out.Insights[0].SampleIDs)
+	}
+}
+
+func TestAsyncCleanupFailureReportedOnDisable(t *testing.T) {
+	rt := testPluginRuntime(t)
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "failclean-plugin")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "manifest.json"), []byte(`{
+		"id": "reg.failclean",
+		"name": "FailClean",
+		"version": "1.0.0",
+		"entrypoint": {"module": "plugin.mjs"},
+		"analyzers": [{"id": "reg.failclean.a", "name": "FailClean"}]
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "plugin.mjs"), []byte(`
+		export async function setup(ctx) {
+			ctx.effect(() => async () => {
+				await new Promise(r => setTimeout(r, 20));
+				throw new Error("cleanup_boom");
+			});
+		}
+		export async function analyze() { return { insights: [], kpis: [], notes: [] }; }
+	`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(HostServices{AppDir: filepath.Join(dir, "app"), PluginRuntime: rt})
+	if _, err := k.InstallExternal(pkgDir, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	err := k.SetEnabled("reg.failclean", false)
+	if err == nil || !strings.Contains(err.Error(), "cleanup_boom") {
+		t.Fatalf("expected cleanup_boom error on disable, got %v", err)
+	}
+	snap := k.Snapshot("test")
+	var foundErr string
+	for _, p := range snap.Plugins {
+		if p.Meta.ID == "reg.failclean" {
+			foundErr = p.Error
+		}
+	}
+	if !strings.Contains(foundErr, "cleanup_boom") {
+		t.Fatalf("expected snapshot LastError to record cleanup_boom, got %q", foundErr)
+	}
+}
+
+func TestReinstallSamePluginReloadsFreshModule(t *testing.T) {
+	rt := testPluginRuntime(t)
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "reload-plugin")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{
+		"id": "reg.reload",
+		"name": "Reload",
+		"version": "1.0.0",
+		"entrypoint": {"module": "plugin.mjs"},
+		"analyzers": [{"id": "reg.reload.a", "name": "Reload"}]
+	}`
+	if err := os.WriteFile(filepath.Join(pkgDir, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "plugin.mjs"), []byte(`export async function analyze() { return { notes: ["v1"] }; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	k := New(HostServices{AppDir: filepath.Join(dir, "app"), PluginRuntime: rt})
+	if _, err := k.InstallExternal(pkgDir, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	out1 := k.AnalyzeSession(context.Background(), &AnalyzeInput{SessionID: "s1", SessionDir: dir, Overview: &reconstruct.SessionOverview{}})
+	if len(out1.Notes) != 1 || out1.Notes[0] != "v1" {
+		t.Fatalf("expected v1 note, got %v", out1.Notes)
+	}
+
+	if err := os.WriteFile(filepath.Join(pkgDir, "plugin.mjs"), []byte(`export async function analyze() { return { notes: ["v2"] }; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.InstallExternal(pkgDir, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	out2 := k.AnalyzeSession(context.Background(), &AnalyzeInput{SessionID: "s1", SessionDir: dir, Overview: &reconstruct.SessionOverview{}})
+	if len(out2.Notes) != 1 || out2.Notes[0] != "v2" {
+		t.Fatalf("expected v2 note after reinstall, got %v", out2.Notes)
+	}
+}
+
+func TestResolvePluginRuntimeHostPrefersExeDir(t *testing.T) {
+	t.Setenv("PKTPATH_CORDIS_PLUGIN_RUNTIME", "")
+	exeDir := t.TempDir()
+	want := filepath.Join(exeDir, "cordis-analyzer-host", "plugin-runtime.mjs")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("// bundled stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePluginRuntimeHostWithExeDir("", exeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("expected exeDir host %s to win over source/cwd, got %s", want, got)
+	}
+}
