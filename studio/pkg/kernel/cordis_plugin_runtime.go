@@ -122,8 +122,17 @@ func resolvePluginRuntimeNode(explicit string) (string, error) {
 		}
 		return "", fmt.Errorf("node runtime not found: %s", s)
 	}
+	if p, ok := try(os.Getenv("PKTPATH_CORDIS_NODE")); ok {
+		return p, nil
+	}
+	if exe, err := os.Executable(); err == nil {
+		for _, c := range bundledNodeCandidates(filepath.Dir(exe), runtime.GOOS) {
+			if p, ok := try(c); ok {
+				return p, nil
+			}
+		}
+	}
 	for _, s := range []string{
-		os.Getenv("PKTPATH_CORDIS_NODE"),
 		os.Getenv("PKTPATH_TEST_CORDIS_NODE"),
 		"node",
 	} {
@@ -132,6 +141,21 @@ func resolvePluginRuntimeNode(explicit string) (string, error) {
 		}
 	}
 	return "", errors.New("Node >=22 executable not found for Cordis plugin runtime")
+}
+
+func bundledNodeCandidates(exeDir, goos string) []string {
+	if goos == "windows" {
+		return []string{
+			filepath.Join(exeDir, "node", "node.exe"),
+			filepath.Join(exeDir, "runtime", "node", "node.exe"),
+			filepath.Join(exeDir, "node.exe"),
+		}
+	}
+	return []string{
+		filepath.Join(exeDir, "node", "bin", "node"),
+		filepath.Join(exeDir, "runtime", "node", "bin", "node"),
+		filepath.Join(exeDir, "node", "node"),
+	}
 }
 
 func mustExistingFile(path, what string) (string, error) {

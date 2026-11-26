@@ -172,3 +172,14 @@ func TestValidateRelativeModuleRejectsEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBundledNodeCandidates(t *testing.T) {
+	win := bundledNodeCandidates("/app", "windows")
+	if len(win) < 3 || !strings.HasSuffix(win[0], filepath.Join("node", "node.exe")) {
+		t.Fatalf("unexpected windows bundled node candidates: %v", win)
+	}
+	lin := bundledNodeCandidates("/app", "linux")
+	if len(lin) < 3 || !strings.HasSuffix(lin[0], filepath.Join("node", "bin", "node")) {
+		t.Fatalf("unexpected linux bundled node candidates: %v", lin)
+	}
+}
