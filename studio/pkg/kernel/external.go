@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,9 +42,11 @@ type ExternalManifest struct {
 	LegacySockFields []KernelSockField `json:"sock_fields,omitempty"`
 	LegacyQdiscs     []KernelQdisc     `json:"qdiscs,omitempty"`
 
-	// Mode 2: Out-of-process JSON-over-stdio hook entrypoint (invoked via HideConsole).
+	// Mode 2: plugin entry. New preview uses entrypoint.module (in-process ESM).
+	// entrypoint.command (JSON-over-stdio) is not loaded and has no Go fallback.
 	Entrypoint *struct {
-		Command []string `json:"command"`
+		Command []string `json:"command,omitempty"`
+		Module  string   `json:"module,omitempty"`
 	} `json:"entrypoint,omitempty"`
 	Analyzers []struct {
 		ID          string `json:"id"`
@@ -160,29 +161,44 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 		})
 	}
 
-	// 3. Register out-of-process analyzers & exporters if entrypoint is defined
-	if ep.manifest.Entrypoint != nil && len(ep.manifest.Entrypoint.Command) > 0 {
-		cmdSpec := append([]string(nil), ep.manifest.Entrypoint.Command...)
-		cfgCopy, _ := DeepCloneValue(cfg).(map[string]any)
-
-		var candidate *cordisActivation
-		if ctx.kernel.host.AnalyzerHost != nil && len(ep.manifest.Analyzers) > 0 {
-			ids := make([]string, 0, len(ep.manifest.Analyzers))
-			for _, an := range ep.manifest.Analyzers {
-				id := strings.TrimSpace(an.ID)
-				if id == "" {
-					id = ep.meta.ID + ".analyzer"
-				}
-				ids = append(ids, id)
-			}
-			identity := ep.bundleDir + ":manifest-sha256:" + digestJSON(ep.manifest)
-			var err error
-			candidate, err = ctx.kernel.host.AnalyzerHost.activate(ep.meta.ID, identity, cfgCopy, ids)
-			if err != nil {
-				return err
-			}
-			ctx.OnDispose(candidate.revoke)
+	// 3. Register in-process Cordis module analyzers & exporters.
+	if commandOnlyEntrypoint(ep.manifest) {
+		return fmt.Errorf("%w（插件 %s）", ErrCommandEntrypoint, ep.meta.ID)
+	}
+	mod := entrypointModule(ep.manifest)
+	if len(ep.manifest.Analyzers) > 0 || len(ep.manifest.Exporters) > 0 {
+		if mod == "" {
+			return fmt.Errorf("插件 %s 声明了 analyzers/exporters，但缺少 entrypoint.module", ep.meta.ID)
 		}
+		if err := validateRelativeModule(mod); err != nil {
+			return err
+		}
+		runtime := ctx.kernel.host.PluginRuntime
+		if runtime == nil {
+			return fmt.Errorf("插件 %s 需要 Cordis 插件运行时宿主，当前未配置", ep.meta.ID)
+		}
+		cfgCopy, _ := DeepCloneValue(cfg).(map[string]any)
+		analyzerIDs := make([]string, 0, len(ep.manifest.Analyzers))
+		for _, an := range ep.manifest.Analyzers {
+			id := strings.TrimSpace(an.ID)
+			if id == "" {
+				id = ep.meta.ID + ".analyzer"
+			}
+			analyzerIDs = append(analyzerIDs, id)
+		}
+		exporterIDs := make([]string, 0, len(ep.manifest.Exporters))
+		for _, ex := range ep.manifest.Exporters {
+			id := strings.TrimSpace(ex.ID)
+			if id == "" {
+				id = ep.meta.ID + ".exporter"
+			}
+			exporterIDs = append(exporterIDs, id)
+		}
+		if err := runtime.Load(context.Background(), ep.meta.ID, ep.bundleDir, mod, analyzerIDs, exporterIDs); err != nil {
+			return err
+		}
+		pluginID := ep.meta.ID
+		ctx.OnDispose(func() { _ = runtime.Unload(pluginID) })
 
 		for _, an := range ep.manifest.Analyzers {
 			anID := strings.TrimSpace(an.ID)
@@ -205,19 +221,16 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 				Description: an.Description,
 				Priority:    prio,
 				Run: func(rctx context.Context, in *AnalyzeInput) (*AnalyzeOutput, error) {
-					if candidate == nil {
-						return ep.invokeExternalAnalyzer(rctx, cmdSpec, cfgCopy, localID, in)
+					payload := map[string]any{
+						"action":      "analyze",
+						"plugin_id":   ep.meta.ID,
+						"analyzer_id": localID,
+						"config":      cfgCopy,
+						"session_id":  in.SessionID,
+						"session_dir": in.SessionDir,
+						"overview":    in.Overview,
 					}
-					return candidate.run(rctx, localID, in.SessionID, ctx.currentAnalyzerScope, func() (*AnalyzeOutput, error) {
-						// Preserve the original diagnostic while exposing the timeout category.
-						deadlineCtx, cancel := context.WithTimeout(rctx, 15*time.Second)
-						defer cancel()
-						out, err := ep.invokeExternalAnalyzer(deadlineCtx, cmdSpec, cfgCopy, localID, in)
-						if deadlineCtx.Err() != nil {
-							err = errors.Join(err, deadlineCtx.Err())
-						}
-						return out, err
-					})
+					return runtime.Analyze(rctx, ep.meta.ID, localID, payload)
 				},
 			})
 		}
@@ -256,11 +269,23 @@ func (ep *externalPlugin) Apply(ctx *PluginContext, cfg map[string]any) error {
 				IsDirectory: ex.IsDirectory,
 				Priority:    prio,
 				Run: func(rctx context.Context, in *ExportInput) (*ExportOutput, error) {
-					return ep.invokeExternalExporter(rctx, cmdSpec, cfgCopy, localID, in)
+					payload := map[string]any{
+						"action":      "export",
+						"plugin_id":   ep.meta.ID,
+						"exporter_id": localID,
+						"config":      cfgCopy,
+						"session_id":  in.SessionID,
+						"session_dir": in.SessionDir,
+						"out_path":    in.OutPath,
+						"params":      in.Params,
+						"overview":    in.Overview,
+					}
+					return runtime.Export(rctx, ep.meta.ID, localID, payload, in.OutPath)
 				},
 			})
 		}
 	}
+
 	return nil
 }
 
@@ -594,7 +619,17 @@ func (k *Kernel) PreviewExternal(srcPath string, rawContent []byte, fileName str
 	prev.Capabilities = meta.Capabilities
 	prev.SockFields = sfs
 	prev.Qdiscs = qds
-	prev.HasEntry = m.Entrypoint != nil && len(m.Entrypoint.Command) > 0
+	if commandOnlyEntrypoint(m) {
+		prev.OK = false
+		prev.ID = meta.ID
+		prev.Name = meta.Name
+		prev.Error = fmt.Sprintf("%s（插件 %s）", ErrCommandEntrypoint.Error(), meta.ID)
+		prev.HasEntry = true
+		prev.AnalyzerCnt = len(m.Analyzers)
+		prev.ExporterCnt = len(m.Exporters)
+		return prev
+	}
+	prev.HasEntry = m.Entrypoint != nil && (len(m.Entrypoint.Command) > 0 || strings.TrimSpace(m.Entrypoint.Module) != "")
 	prev.AnalyzerCnt = len(m.Analyzers)
 	prev.ExporterCnt = len(m.Exporters)
 	prev.UISlotCnt = len(m.UISlots)
@@ -873,4 +908,21 @@ func copyDirRecursive(src, dst string) error {
 		}
 		return os.WriteFile(target, b, 0o644)
 	})
+}
+
+func entrypointModule(m ExternalManifest) string {
+	if m.Entrypoint == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.Entrypoint.Module)
+}
+
+func commandOnlyEntrypoint(m ExternalManifest) bool {
+	if m.Entrypoint == nil {
+		return false
+	}
+	if strings.TrimSpace(m.Entrypoint.Module) != "" {
+		return false
+	}
+	return len(m.Entrypoint.Command) > 0
 }

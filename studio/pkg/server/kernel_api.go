@@ -26,6 +26,25 @@ func (s *Server) initKernel() {
 	if s.opts.CordisAnalyzerHost != "" {
 		host.AnalyzerHost = kernel.NewCordisAnalyzerHost(kernel.CordisAnalyzerOptions{NodePath: s.opts.CordisAnalyzerNode, HostPath: s.opts.CordisAnalyzerHost})
 	}
+	if s.opts.CordisPluginRuntime != "-" {
+		runtimeHost := strings.TrimSpace(s.opts.CordisPluginRuntime)
+		runtimeNode := strings.TrimSpace(s.opts.CordisPluginRuntimeNode)
+		if runtimeHost == "" {
+			if h, n, err := kernel.ResolveDefaultPluginRuntime("", runtimeNode); err == nil {
+				runtimeHost, runtimeNode = h, n
+				s.opts.CordisPluginRuntime = runtimeHost
+				if s.opts.CordisPluginRuntimeNode == "" {
+					s.opts.CordisPluginRuntimeNode = runtimeNode
+				}
+			}
+		}
+		if runtimeHost != "" {
+			if runtimeNode == "" {
+				runtimeNode = s.opts.CordisAnalyzerNode
+			}
+			host.PluginRuntime = kernel.NewCordisPluginRuntime(kernel.CordisPluginRuntimeOptions{NodePath: runtimeNode, HostPath: runtimeHost})
+		}
+	}
 	if s.opts.CordisPluginHost != "" {
 		host.LifecycleHost = kernel.NewCordisLifecycleHost(kernel.CordisLifecycleOptions{NodePath: s.opts.CordisPluginNode, HostPath: s.opts.CordisPluginHost, ConfigTransactions: s.opts.CordisConfigTransactions})
 	}
@@ -71,7 +90,7 @@ func (s *Server) activeKernelPluginFiles() []string {
 	return paths
 }
 
-// enrichOverview runs all active analyzer plugins (built-in + external stdio hooks)
+// enrichOverview runs all active analyzer plugins (built-in + in-process Cordis modules)
 // on the loaded session and attaches `plugin_insights`, `plugin_kpis`, and `plugin_notes`
 // onto the returned overview JSON without mutating the cached base reconstruction.
 func (s *Server) enrichOverview(ctx context.Context, id, dir string, ls *loadedSession) json.RawMessage {

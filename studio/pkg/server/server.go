@@ -34,12 +34,16 @@ type Options struct {
 	PluginsDir string // %LOCALAPPDATA%\PktPathStudio\plugins
 	Logger     *log.Logger
 	Version    string
-	// F01 development candidate; empty Host keeps the original Go path.
+	// F01 development candidate; empty keeps that legacy host off.
 	CordisAnalyzerHost       string
 	CordisAnalyzerNode       string
 	CordisPluginHost         string // experimental shared F02 metadata scheduler
 	CordisConfigTransactions bool   // explicit F03.0 candidate, Go default unaffected
 	CordisPluginNode         string
+	// New-preview default: in-process JS/TS plugin runtime (plugin-runtime.mjs).
+	// Product entry points fill these from ResolveDefaultPluginRuntime when flags are empty.
+	CordisPluginRuntime     string
+	CordisPluginRuntimeNode string
 }
 
 // Server is the Studio HTTP backend.

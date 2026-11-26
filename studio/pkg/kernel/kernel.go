@@ -17,7 +17,8 @@ type HostServices struct {
 	AppDir        string
 	PluginsDir    string
 	SessionsRoot  string
-	AnalyzerHost  *CordisAnalyzerHost  // nil preserves the original Go-only path
+	AnalyzerHost  *CordisAnalyzerHost  // nil preserves the original Go-only path (legacy F01)
+	PluginRuntime *CordisPluginRuntime // new-preview in-process module host; nil rejects entrypoint.module
 	LifecycleHost *CordisLifecycleHost // F02 optional shared metadata graph; nil = no Node
 	Extra         map[string]any
 }
@@ -415,6 +416,11 @@ func (k *Kernel) Shutdown() {
 		if !k.host.LifecycleHost.manages(ids[i]) {
 			k.deactivatePlugin(ids[i])
 		}
+	}
+	if r := k.host.PluginRuntime; r != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = r.Close(ctx)
+		cancel()
 	}
 }
 

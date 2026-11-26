@@ -23,6 +23,7 @@ import (
 
 	"pktpath/studio"
 	"pktpath/studio/pkg/adb"
+	"pktpath/studio/pkg/kernel"
 	"pktpath/studio/pkg/server"
 )
 
@@ -38,24 +39,25 @@ func main() {
 	enableHighDPI()
 
 	var (
-		flagHeadless    = flag.Bool("headless", false, "Run localhost HTTP server without opening a browser or window")
-		flagWindow      = flag.Bool("window", false, "Open inside native Win32 WebView2 window instead of system default browser")
-		flagPort        = flag.Int("port", 0, "TCP port on 127.0.0.1 (0 = ephemeral)")
-		flagSelftest    = flag.Bool("selftest", false, "Run automated runtime + live-device E2E self-test and exit")
-		flagSerial      = flag.String("serial", "", "Target Android device serial for --selftest")
-		flagDev         = flag.String("dev", "wlan0", "Target network interface for --selftest")
-		flagReport      = flag.String("report", "", "Write --selftest JSON report to this path")
-		flagOut         = flag.String("out", "", "Alias for --report")
-		flagKeepSession = flag.Bool("keep-session", false, "Keep pulled session directory after --selftest")
-		flagAppDir      = flag.String("app-dir", "", "Override %LOCALAPPDATA%\\PktPathStudio directory")
-		flagAdb         = flag.String("adb", "", "Override path to system adb executable")
-		flagPluginDir   = flag.String("plugin-dir", "", "Override runtime plugin JSON directory (default <app-dir>\\plugins)")
-		flagConfigTxn   = flag.Bool("cordis-config-transactions", false, "EXPERIMENTAL F03.0 metadata config compensation; requires cordis-plugin-host")
-		flagPluginHost  = flag.String("cordis-plugin-host", "", "EXPERIMENTAL F02: Cordis3 host.mjs metadata scheduler; empty keeps Go default")
-		flagPluginNode  = flag.String("cordis-plugin-node", "node", "EXPERIMENTAL F02: explicit candidate Node runtime; no auto install")
-		flagCordisHost  = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL: absolute Cordis3 offline analyzer host.mjs path; empty keeps Go default")
-		flagCordisNode  = flag.String("cordis-analyzer-node", "node", "EXPERIMENTAL: external Node executable for optional analyzer host")
-		flagDebug       = flag.Bool("debug", true, "Enable WebView2 context menu & DevTools")
+		flagHeadless      = flag.Bool("headless", false, "Run localhost HTTP server without opening a browser or window")
+		flagWindow        = flag.Bool("window", false, "Open inside native Win32 WebView2 window instead of system default browser")
+		flagPort          = flag.Int("port", 0, "TCP port on 127.0.0.1 (0 = ephemeral)")
+		flagSelftest      = flag.Bool("selftest", false, "Run automated runtime + live-device E2E self-test and exit")
+		flagSerial        = flag.String("serial", "", "Target Android device serial for --selftest")
+		flagDev           = flag.String("dev", "wlan0", "Target network interface for --selftest")
+		flagReport        = flag.String("report", "", "Write --selftest JSON report to this path")
+		flagOut           = flag.String("out", "", "Alias for --report")
+		flagKeepSession   = flag.Bool("keep-session", false, "Keep pulled session directory after --selftest")
+		flagAppDir        = flag.String("app-dir", "", "Override %LOCALAPPDATA%\\PktPathStudio directory")
+		flagAdb           = flag.String("adb", "", "Override path to system adb executable")
+		flagPluginDir     = flag.String("plugin-dir", "", "Override runtime plugin JSON directory (default <app-dir>\\plugins)")
+		flagConfigTxn     = flag.Bool("cordis-config-transactions", false, "EXPERIMENTAL F03.0 metadata config compensation; requires cordis-plugin-host")
+		flagPluginHost    = flag.String("cordis-plugin-host", "", "EXPERIMENTAL F02: Cordis3 lifecycle.mjs metadata scheduler; empty leaves F02 off")
+		flagPluginNode    = flag.String("cordis-plugin-node", "node", "EXPERIMENTAL F02: explicit candidate Node runtime; no auto install")
+		flagCordisHost    = flag.String("cordis-analyzer-host", "", "EXPERIMENTAL F01: absolute legacy host.mjs path; empty leaves F01 off")
+		flagCordisNode    = flag.String("cordis-analyzer-node", "node", "Node executable for optional F01 analyzer host or plugin runtime")
+		flagPluginRuntime = flag.String("cordis-plugin-runtime", "", "Cordis in-process plugin runtime (plugin-runtime.mjs); empty uses the bundled new-preview default")
+		flagDebug         = flag.Bool("debug", true, "Enable WebView2 context menu & DevTools")
 	)
 
 	// Attach to parent console ONLY for CLI modes when stdout isn't already piped.
@@ -106,6 +108,17 @@ func main() {
 	logger.Printf("PktPath Studio v%s runtime ready in %.2fms (adb=%s embedded=%v agent_sha=%s)",
 		studioVersion, rt.ExtractMs, rt.AdbPath, rt.AdbEmbedded, adb.ShortSHA(rt.AgentSHA256, 12))
 
+	runtimeHost, runtimeNode, runtimeErr := kernel.ResolveDefaultPluginRuntime(strings.TrimSpace(*flagPluginRuntime), strings.TrimSpace(*flagCordisNode))
+	if strings.TrimSpace(*flagPluginRuntime) != "" && runtimeErr != nil {
+		logger.Printf("fatal: cordis plugin runtime: %v", runtimeErr)
+		os.Exit(1)
+	}
+	if runtimeErr != nil {
+		logger.Printf("warning: new preview default Cordis plugin runtime not resolved (%v); entrypoint.module plugins will not load", runtimeErr)
+	} else {
+		logger.Printf("Cordis plugin runtime default host=%s node=%s", runtimeHost, runtimeNode)
+	}
+
 	srv := server.New(server.Options{
 		Runtime:                  rt,
 		Web:                      webFS,
@@ -118,6 +131,8 @@ func main() {
 		CordisPluginHost:         strings.TrimSpace(*flagPluginHost),
 		CordisPluginNode:         *flagPluginNode,
 		CordisConfigTransactions: *flagConfigTxn,
+		CordisPluginRuntime:      runtimeHost,
+		CordisPluginRuntimeNode:  runtimeNode,
 	})
 
 	if *flagSelftest {

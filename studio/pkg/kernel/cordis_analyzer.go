@@ -546,6 +546,10 @@ func (w *cordisWorker) read(reader io.Reader) {
 func (w *cordisWorker) control(op string, fields map[string]any, out *cordisReply) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	return w.controlWithTimeout(ctx, op, fields, out)
+}
+
+func (w *cordisWorker) controlWithTimeout(ctx context.Context, op string, fields map[string]any, out *cordisReply) error {
 	w.mu.Lock()
 	w.next++
 	id := strconv.FormatUint(w.next, 10)

@@ -29,10 +29,11 @@ func run() error {
 	app := flag.String("app-dir", "", "required absolute isolated runtime directory")
 	port := flag.Int("port", 0, "127.0.0.1 port, 0 chooses a free port")
 	_ = flag.Bool("headless", true, "always headless; no browser is opened")
-	lifecycle := flag.String("cordis-plugin-host", "", "explicit experimental lifecycle host; empty keeps Go default")
+	lifecycle := flag.String("cordis-plugin-host", "", "explicit experimental F02 lifecycle host; empty leaves F02 off")
 	pluginNode := flag.String("cordis-plugin-node", "node", "Node executable for explicit lifecycle host")
 	analyzerNode := flag.String("cordis-analyzer-node", "node", "Node executable for explicit external-analyzer host")
-	analyzer := flag.String("cordis-analyzer-host", "", "explicit experimental external-analyzer host")
+	analyzer := flag.String("cordis-analyzer-host", "", "explicit experimental F01 analyzer host; empty leaves F01 off")
+	runtimeHost := flag.String("cordis-plugin-runtime", "", "in-process plugin runtime; empty uses the bundled new-preview default")
 	collectorManifest := flag.String("collector-manifest", "", "explicit absolute collector manifest; no disk/PATH fallback")
 	flag.Parse()
 	if !filepath.IsAbs(*app) {
@@ -63,7 +64,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Options{Runtime: rt, AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: *analyzerNode})
+	srv := server.New(server.Options{Runtime: rt, AppDir: *app, Web: web, Logger: log.New(os.Stderr, "bo-offline ", log.LstdFlags), Version: "bo-offline-0a265193", CordisPluginHost: *lifecycle, CordisPluginNode: *pluginNode, CordisAnalyzerHost: *analyzer, CordisAnalyzerNode: *analyzerNode, CordisPluginRuntime: *runtimeHost})
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

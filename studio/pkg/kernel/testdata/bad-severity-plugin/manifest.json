@@ -1,0 +1,7 @@
+{
+  "id": "community.analyzer.bad-severity",
+  "name": "Bad severity fixture",
+  "version": "0.1.0",
+  "entrypoint": { "module": "plugin.mjs" },
+  "analyzers": [ { "id": "community.analyzer.bad-severity.analyze", "name": "Bad", "priority": 50 } ]
+}

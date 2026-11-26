@@ -1,0 +1,7 @@
+{
+  "id": "community.analyzer.command-only",
+  "name": "Command-only fixture",
+  "version": "0.1.0",
+  "entrypoint": { "command": ["node", "analyze.mjs"] },
+  "analyzers": [ { "id": "community.analyzer.command-only.analyze", "name": "Cmd", "priority": 50 } ]
+}

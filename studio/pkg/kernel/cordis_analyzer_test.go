@@ -378,18 +378,27 @@ func TestF01DefaultNoNodeAndMissingCandidate(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // hook executable is absolute; no node/npm available.
 	old := f01Kernel(t, ep, map[string]any{"label": "old"}, nil)
 	before, _ := os.ReadFile(old.configPath)
+	// New preview: entrypoint.command is not loaded and does not fall back to Go stdio.
+	if old.IsPluginActive(ep.meta.ID) || len(old.Analyzers()) != 0 {
+		t.Fatal("new preview still loaded entrypoint.command as Go stdio default")
+	}
 	out := old.AnalyzeSession(context.Background(), f01Input())
 	after, _ := os.ReadFile(old.configPath)
-	if len(out.Insights) != 1 || !bytes.Equal(before, after) {
-		t.Fatalf("Go default changed or wrote config: %+v", out)
+	if len(out.Insights) != 0 || !bytes.Equal(before, after) {
+		t.Fatalf("command-only plugin still produced insights or wrote config: %+v", out)
 	}
 	h := NewCordisAnalyzerHost(CordisAnalyzerOptions{NodePath: filepath.Join(t.TempDir(), "missing-node"), HostPath: "unused.mjs"})
 	candidate := f01Kernel(t, ep, nil, h)
 	if candidate.IsPluginActive(ep.meta.ID) || len(candidate.Analyzers()) != 0 || len(h.Tasks()) != 0 {
-		t.Fatal("missing Node silently fell back")
+		t.Fatal("command-only plugin or missing Node silently fell back")
 	}
-	if snap := candidate.Snapshot("test"); len(snap.Plugins) != 1 || !strings.Contains(snap.Plugins[0].Error, "Cordis analyzer activation") {
-		t.Fatalf("missing runtime not diagnosable: %+v", snap)
+	snap := candidate.Snapshot("test")
+	if len(snap.Plugins) != 1 {
+		t.Fatalf("missing plugin diagnosis: %+v", snap)
+	}
+	errText := snap.Plugins[0].Error
+	if !strings.Contains(errText, "entrypoint.command") && !strings.Contains(errText, "Cordis analyzer activation") {
+		t.Fatalf("command-only/missing runtime not diagnosable: %+v", snap)
 	}
 }
 

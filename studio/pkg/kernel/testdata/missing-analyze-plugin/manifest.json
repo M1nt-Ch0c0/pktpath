@@ -1,0 +1,7 @@
+{
+  "id": "community.analyzer.missing-analyze",
+  "name": "Missing analyze fixture",
+  "version": "0.1.0",
+  "entrypoint": { "module": "plugin.mjs" },
+  "analyzers": [ { "id": "community.analyzer.missing-analyze.analyze", "name": "Missing", "priority": 50 } ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "community.analyzer.fixture-module",
+  "name": "Fixture module plugin",
+  "version": "0.1.0",
+  "category": "external",
+  "description": "Synthetic in-process module plugin for the new preview host path. Not a production analyzer.",
+  "entrypoint": { "module": "plugin.mjs" },
+  "analyzers": [
+    { "id": "community.analyzer.fixture-module.analyze", "name": "Fixture analyze", "priority": 50 }
+  ],
+  "exporters": [
+    { "id": "community.analyzer.fixture-module.export", "name": "Fixture export", "button_label": "Export fixture", "priority": 50 }
+  ]
+}
