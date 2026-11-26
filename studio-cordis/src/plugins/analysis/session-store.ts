@@ -220,32 +220,86 @@ export class SessionStore implements SessionProvider {
     }
   }
 
+  private formatLocalTimestamp(ms: number): string {
+    const d = new Date(ms)
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    return (
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+      `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    )
+  }
+
   private readSessionSummary(id: string, dir: string, source: 'managed' | 'opened'): SessionSummary {
     const summary: SessionSummary = {
       id,
       name: path.basename(dir),
       path: dir,
       source,
+      external: source === 'opened',
+      created_at: '',
+      created_unix_ms: 0,
+      scope: '',
+      dev: '',
+      mode: '',
+      sample_count: 0,
     }
     const manifestPath = path.join(dir, 'manifest.json')
+    let fallbackMs = 0
+    try {
+      const st = fs.statSync(isRegularFile(manifestPath) ? manifestPath : dir)
+      fallbackMs = Math.trunc(st.mtimeMs)
+      summary['created_unix_ms'] = fallbackMs
+      summary.created_at = this.formatLocalTimestamp(fallbackMs)
+      summary['mtime_ms'] = st.mtimeMs
+    } catch {
+      // ignore
+    }
     if (isRegularFile(manifestPath)) {
       try {
         const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
-        if (typeof m['created_at'] === 'string') summary.created_at = m['created_at']
+        if (typeof m['created_at'] === 'string' && m['created_at'].trim() !== '') {
+          summary.created_at = m['created_at']
+        }
         if (typeof m['scope'] === 'string') summary['scope'] = m['scope']
         if (typeof m['mode'] === 'string') summary['mode'] = m['mode']
+        if (typeof m['dev'] === 'string' && m['dev'].trim() !== '') {
+          summary['dev'] = m['dev']
+        } else if (typeof m['device'] === 'string' && m['device'].trim() !== '') {
+          summary['dev'] = m['device']
+        }
         if (typeof m['device'] === 'string') summary['device'] = m['device']
+        if (typeof m['kernel_release'] === 'string' && m['kernel_release'].trim() !== '') {
+          summary['kernel_release'] = m['kernel_release']
+        }
         if (typeof m['session_uuid'] === 'string') summary['session_uuid'] = m['session_uuid']
+        const admissions = m['admissions']
+        if (typeof admissions === 'object' && admissions !== null) {
+          const adm = admissions as Record<string, unknown>
+          const created = typeof adm['created'] === 'number' ? Math.trunc(adm['created']) : 0
+          const selected = typeof adm['selected'] === 'number' ? Math.trunc(adm['selected']) : 0
+          if (created > 0) summary.sample_count = created
+          else if (selected > 0) summary.sample_count = selected
+        }
+        // Match Go sessions.go:375-382: prefer calibration realtime_ns when in sane epoch range (2020..2035)
+        const cals = m['calibrations']
+        if (Array.isArray(cals) && cals.length > 0 && typeof cals[0] === 'object' && cals[0] !== null) {
+          const rawRt = (cals[0] as Record<string, unknown>)['realtime_ns']
+          let rtNs: bigint | null = null
+          if (typeof rawRt === 'number' && Number.isFinite(rawRt)) rtNs = BigInt(Math.trunc(rawRt))
+          else if (typeof rawRt === 'string' && /^\d+$/.test(rawRt.trim())) rtNs = BigInt(rawRt.trim())
+          if (rtNs !== null && rtNs > 1577836800_000000000n && rtNs < 2051222400_000000000n) {
+            const ms = Number(rtNs / 1_000_000n)
+            summary['created_unix_ms'] = ms
+            summary.created_at = this.formatLocalTimestamp(ms)
+          }
+        }
       } catch {
         // ignore invalid manifest preview
       }
     }
-    try {
-      const st = fs.statSync(dir)
-      if (!summary.created_at) summary.created_at = st.mtime.toISOString()
-      summary['mtime_ms'] = st.mtimeMs
-    } catch {
-      // ignore
+    const cached = this.baseCache.get(dir)
+    if (cached) {
+      summary.sample_count = cached.overview.samples.length
     }
     return summary
   }
@@ -264,7 +318,25 @@ export class SessionStore implements SessionProvider {
         return candidate
       }
     }
+    // Allow passing an existing valid session directory path directly (matches Go resolveDir)
+    if (path.isAbsolute(id) && isValidSessionDir(id)) {
+      this.registerSessionDir(id)
+      return path.resolve(id)
+    }
     throw new Error(`session not found: ${sessionId}`)
+  }
+
+  registerSessionDir(dirPath: string): string {
+    const abs = path.resolve(dirPath)
+    const rootResolved = path.resolve(this.paths.sessionsRoot)
+    const rel = path.relative(rootResolved, abs)
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep)) {
+      return rel
+    }
+    const id = this.sessionIdForExternalDir(abs)
+    this.openedDirs.set(id, abs)
+    this.saveOpenedSessionsToDisk()
+    return id
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -276,7 +348,7 @@ export class SessionStore implements SessionProvider {
       if (fs.existsSync(this.paths.sessionsRoot) && fs.statSync(this.paths.sessionsRoot).isDirectory()) {
         const entries = fs.readdirSync(this.paths.sessionsRoot, { withFileTypes: true })
         for (const e of entries) {
-          if (!e.isDirectory()) continue
+          if (!e.isDirectory() || e.name.startsWith('.')) continue
           const full = path.resolve(this.paths.sessionsRoot, e.name)
           if (!isValidSessionDir(full)) continue
           seenPaths.add(full)
@@ -296,10 +368,10 @@ export class SessionStore implements SessionProvider {
     }
 
     items.sort((a, b) => {
-      const ma = typeof a['mtime_ms'] === 'number' ? (a['mtime_ms'] as number) : 0
-      const mb = typeof b['mtime_ms'] === 'number' ? (b['mtime_ms'] as number) : 0
-      if (ma !== mb) return mb - ma
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      const ca = typeof a['created_unix_ms'] === 'number' ? (a['created_unix_ms'] as number) : 0
+      const cb = typeof b['created_unix_ms'] === 'number' ? (b['created_unix_ms'] as number) : 0
+      if (ca !== cb) return cb - ca
+      return a.id > b.id ? -1 : a.id < b.id ? 1 : 0
     })
     return items
   }
@@ -307,26 +379,24 @@ export class SessionStore implements SessionProvider {
   async openSession(dirPath: string): Promise<OpenedSessionMeta> {
     const raw = dirPath.trim()
     if (!raw) throw new Error('path is required')
-    const abs = path.resolve(raw)
+    let abs = path.resolve(raw)
+    if (!fs.existsSync(abs)) {
+      throw new Error(`path does not exist: ${abs}`)
+    }
+    if (!fs.statSync(abs).isDirectory()) {
+      abs = path.dirname(abs)
+    }
     if (!isValidSessionDir(abs)) {
-      throw new Error(`not a valid PktPath session directory (missing manifest.json or .pktb): ${abs}`)
+      throw new Error(`not a PktPath session folder (manifest.json or .pktb missing): ${abs}`)
     }
-    // If already inside sessionsRoot, reuse its managed id
-    const rootResolved = path.resolve(this.paths.sessionsRoot)
-    const rel = path.relative(rootResolved, abs)
-    let id: string
-    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep)) {
-      id = rel
-    } else {
-      id = this.sessionIdForExternalDir(abs)
-      this.openedDirs.set(id, abs)
-      this.saveOpenedSessionsToDisk()
-    }
+    const id = this.registerSessionDir(abs)
     const overview = await this.getOverview(id)
     return {
       id,
+      session_id: id,
       name: path.basename(abs),
       path: abs,
+      session_path: abs,
       overview,
     }
   }
