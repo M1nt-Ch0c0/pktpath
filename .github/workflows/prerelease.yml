@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Pre-release tag (e.g. preview-dd5ee9fb-r1)"
+        description: "Pre-release tag (e.g. preview-cordis-r1)"
         required: true
 
 permissions:
@@ -59,35 +59,63 @@ jobs:
             bin/pktpath-linux-arm64
 
   build-studio-windows:
-    name: Build PktPath Studio (Windows x64 GUI)
+    name: Build PktPath Studio Bundle (Windows x64 + Bundled Node & Cordis Host)
     needs: build-collectors
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache-dependency-path: studio/go.sum
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: studio/cordis-analyzer-host/package-lock.json
+
       - uses: actions/download-artifact@v4
         with:
           name: collectors
           path: bin
 
+      - name: Install Cordis host production dependencies
+        working-directory: studio/cordis-analyzer-host
+        run: npm ci --ignore-scripts --omit=dev
+
       - name: Build single-file pktpath-studio.exe
         run: python studio/scripts/build_studio.py
 
-      - name: Package example external plugin bundles (.pktplugin)
+      - name: Cache official Windows Node v24.22.1
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/pktpath-node-cache
+          key: node-v24.22.1-win-x64-d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5
+
+      - name: Package unified Windows x64 Cordis client bundle & standalone collectors
         shell: pwsh
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           New-Item -ItemType Directory -Force release_assets | Out-Null
-          Copy-Item bin/pktpath-studio.exe release_assets/
+          python scripts/package_preview_bundle.py `
+            --os windows `
+            --studio-bin bin/pktpath-studio.exe `
+            --collectors-dir bin `
+            --host-dir studio/cordis-analyzer-host `
+            --download-node `
+            --cache-dir "$env:RUNNER_TEMP/pktpath-node-cache" `
+            --out-dir release_assets `
+            --bundle-name "pktpath-windows-x64-$env:TAG"
           Copy-Item bin/pktpath-android-arm64 release_assets/
           Copy-Item bin/pktpath-linux-x86_64 release_assets/
           Copy-Item bin/pktpath-linux-arm64 release_assets/
-          Compress-Archive -Path plugins/examples/hello-ext-bundle/* -DestinationPath release_assets/example-sla-auditor.pktplugin -Force
-          Compress-Archive -Path plugins/examples/kernel-ext-bundle/* -DestinationPath release_assets/example-multi-qdisc.pktplugin -Force
 
       - name: Generate SHA256SUMS.txt
         shell: pwsh
@@ -125,9 +153,5 @@ jobs:
             echo "Release $TAG already exists; uploading assets only."
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* \
-              --title "PktPath $TAG (pre-release, not a first version)" \
-              --notes-file PREVIEW-NOTES.md \
-              --prerelease \
-              --target "${GITHUB_SHA}"
+            gh release create "$TAG" dist/*               --title "PktPath $TAG (pre-release, not a first version)"               --notes-file PREVIEW-NOTES.md               --prerelease               --target "${GITHUB_SHA}"
           fi

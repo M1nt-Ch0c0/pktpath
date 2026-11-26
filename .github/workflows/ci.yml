@@ -85,7 +85,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   go-studio:
-    name: Go Studio Unit Tests & Cross-Build
+    name: Go Studio & Cordis Host Unit Tests + Windows Cross-Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +93,17 @@ jobs:
         with:
           go-version: "1.24"
           cache-dependency-path: studio/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: studio/cordis-analyzer-host/package-lock.json
+
+      - name: Install Cordis host dependencies & run Node tests
+        working-directory: studio/cordis-analyzer-host
+        run: |
+          npm ci --ignore-scripts
+          node --test plugin-runtime.test.mjs cleanup-wait.test.mjs cleanup-wait.upstream.test.mjs
 
       - name: Go vet & unit tests (race detector)
         working-directory: studio
@@ -111,18 +122,27 @@ jobs:
           ls -lh ../bin/pktpath-studio-ci.exe
 
   web-syntax:
-    name: Frontend JS & Plugin Manifest Check
+    name: Frontend JS, Cordis Host & Packaging Script Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-      - name: Check JS syntax
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check JS & MJS syntax
         run: |
           node --check studio/web/app.js
           node --check studio/web/plugin-center.js
           node --check plugins/examples/hello-ext-bundle/ui/widget.js
+          node --check studio/cordis-analyzer-host/plugin-runtime.mjs
+          node --check studio/cordis-analyzer-host/cleanup-wait.mjs
+          node --check studio/cordis-analyzer-host/host.mjs
+          node --check studio/cordis-analyzer-host/lifecycle.mjs
+      - name: Check packaging script syntax
+        run: python3 -m py_compile scripts/package_preview_bundle.py studio/scripts/build_studio.py
       - name: Validate SVG & JSON assets
         run: |
           python3 -c '
