@@ -1,0 +1,17 @@
+{
+  "name": "pktpath-studio-cordis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "node -e \"import('node:fs').then(async fs => { const files = fs.globSync('src/**/*.ts'); for (const f of files) { await import('node:url').then(u => import(u.pathToFileURL(f).href)); } console.log('checked', files.length, 'files'); })\""
+  },
+  "dependencies": {
+    "@cordisjs/core": "3.18.1"
+  }
+}

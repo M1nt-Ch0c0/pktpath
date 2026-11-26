@@ -42,11 +42,8 @@ jobs:
           file bin/pktpath-linux-x86_64 bin/pktpath-linux-arm64
 
   android-arm64-ndk:
-    # Independent compile-only check. ubuntu-latest does not ship the NDK,
-    # and `if: env.ANDROID_NDK_HOME != ''` cannot see values written to
-    # $GITHUB_ENV, so the previous step was silently skipped. This job
-    # always installs official NDK r28b and compiles the collector.
-    # Success here is not on-device or kernel-version evidence.
+    # Independent compile-only check. Installs official NDK r28b and compiles
+    # the Android arm64 collector. Success here is not on-device or kernel evidence.
     name: Android arm64 collector (NDK compile)
     runs-on: ubuntu-latest
     steps:
@@ -84,72 +81,85 @@ jobs:
       - name: Run unittest suite
         run: python -m unittest discover -s tests -v
 
-  go-studio:
-    name: Go Studio & Cordis Host Unit Tests + Windows Cross-Build
+  cordis-studio:
+    name: Pure Cordis Studio (Node v24.22.1 TS & Unit Tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-          cache-dependency-path: studio/go.sum
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: "npm"
-          cache-dependency-path: studio/cordis-analyzer-host/package-lock.json
+          cache-dependency-path: studio-cordis/package-lock.json
 
-      - name: Install Cordis host dependencies & run Node tests
-        working-directory: studio/cordis-analyzer-host
+      - name: Install pure Cordis dependencies
+        working-directory: studio-cordis
+        run: npm ci --ignore-scripts
+
+      - name: Check Node 24 TypeScript type-stripping syntax (erasableSyntaxOnly)
+        working-directory: studio-cordis
         run: |
-          npm ci --ignore-scripts
-          node --test plugin-runtime.test.mjs cleanup-wait.test.mjs cleanup-wait.upstream.test.mjs
+          node -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            import { execFileSync } from "node:child_process";
+            function walk(dir, out = []) {
+              if (!fs.existsSync(dir)) return out;
+              for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, ent.name);
+                if (ent.isDirectory()) walk(full, out);
+                else if (ent.name.endsWith(".ts") || ent.name.endsWith(".mjs") || ent.name.endsWith(".js")) out.push(full);
+              }
+              return out;
+            }
+            const files = [...walk("src"), ...walk("web"), ...walk("test")];
+            for (const f of files) {
+              execFileSync(process.execPath, ["--check", f], { stdio: "inherit" });
+            }
+            console.log(`SYNTAX_OK ${files.length} files`);
+          '
 
-      - name: Go vet & unit tests (race detector)
-        working-directory: studio
+      - name: Run Cordis check script (npm run check)
+        working-directory: studio-cordis
         run: |
-          go vet ./pkg/...
-          go test -race -count=1 -v ./pkg/...
+          if node -e 'const p = JSON.parse(require("node:fs").readFileSync("package.json","utf8")); process.exit(p.scripts && p.scripts.check ? 0 : 1)'; then
+            npm run check
+          elif node -e 'const p = JSON.parse(require("node:fs").readFileSync("package.json","utf8")); process.exit(p.scripts && p.scripts.typecheck ? 0 : 1)'; then
+            npm run typecheck
+          else
+            echo "ERROR: studio-cordis/package.json must define scripts.check (or scripts.typecheck)" >&2
+            exit 1
+          fi
 
-      - name: Cross-compile Windows GUI binary (CGO_ENABLED=0)
-        working-directory: studio
-        env:
-          GOOS: windows
-          GOARCH: amd64
-          CGO_ENABLED: "0"
+      - name: Run Cordis Studio test suite
+        working-directory: studio-cordis
         run: |
-          go build -trimpath -ldflags="-H=windowsgui -s -w" -o ../bin/pktpath-studio-ci.exe ./cmd/pktpath-studio
-          ls -lh ../bin/pktpath-studio-ci.exe
+          if node -e 'const p = JSON.parse(require("node:fs").readFileSync("package.json","utf8")); process.exit(p.scripts && p.scripts.test ? 0 : 1)'; then
+            npm test
+          else
+            node --test "test/**/*.test.ts"
+          fi
 
-  web-syntax:
-    name: Frontend JS, Cordis Host & Packaging Script Check
+  packaging-and-assets:
+    name: Packaging Scripts, Licenses & Asset Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check JS & MJS syntax
+      - name: Check packaging and collector build scripts
+        run: python3 -W error -m py_compile scripts/package_preview_bundle.py scripts/build_bpf.py scripts/build_device.py
+      - name: Verify root LICENSE, SVG & JSON assets
         run: |
-          node --check studio/web/app.js
-          node --check studio/web/plugin-center.js
-          node --check plugins/examples/hello-ext-bundle/ui/widget.js
-          node --check studio/cordis-analyzer-host/plugin-runtime.mjs
-          node --check studio/cordis-analyzer-host/cleanup-wait.mjs
-          node --check studio/cordis-analyzer-host/host.mjs
-          node --check studio/cordis-analyzer-host/lifecycle.mjs
-      - name: Check packaging script syntax
-        run: python3 -m py_compile scripts/package_preview_bundle.py studio/scripts/build_studio.py
-      - name: Validate SVG & JSON assets
-        run: |
+          test -f LICENSE
           python3 -c '
           import json, pathlib, xml.etree.ElementTree as ET
           for p in pathlib.Path("assets").glob("*.svg"):
               ET.parse(p)
-          ET.parse("studio/web/favicon.svg")
+          web_favicon = pathlib.Path("studio-cordis/web/favicon.svg")
+          if web_favicon.is_file():
+              ET.parse(web_favicon)
           for p in pathlib.Path("plugins").rglob("*.json"):
               json.loads(p.read_text(encoding="utf-8"))
           print("ASSETS_AND_MANIFESTS_OK")

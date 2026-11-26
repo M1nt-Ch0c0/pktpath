@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Pre-release tag (e.g. preview-cordis-r1)"
+        description: "Pre-release tag (e.g. preview-cordis-wave1-r1)"
         required: true
 
 permissions:
@@ -58,8 +58,8 @@ jobs:
             bin/pktpath-linux-x86_64
             bin/pktpath-linux-arm64
 
-  build-studio-windows:
-    name: Build PktPath Studio Bundle (Windows x64 + Bundled Node & Cordis Host)
+  package-studio-windows:
+    name: Package Pure-Cordis Studio Bundle (Windows x64 + Bundled Node v24.22.1)
     needs: build-collectors
     runs-on: windows-latest
     steps:
@@ -69,28 +69,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-          cache-dependency-path: studio/go.sum
-
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: "npm"
-          cache-dependency-path: studio/cordis-analyzer-host/package-lock.json
+          cache-dependency-path: studio-cordis/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
           name: collectors
           path: bin
 
-      - name: Install Cordis host production dependencies
-        working-directory: studio/cordis-analyzer-host
-        run: npm ci --ignore-scripts --omit=dev
-
-      - name: Build single-file pktpath-studio.exe
-        run: python studio/scripts/build_studio.py
+      - name: Install pure Cordis production dependencies
+        working-directory: studio-cordis
+        run: |
+          npm ci --ignore-scripts --omit=dev
+          node --input-type=module -e "await import('@cordisjs/core')"
 
       - name: Cache official Windows Node v24.22.1
         uses: actions/cache@v4
@@ -98,21 +92,29 @@ jobs:
           path: ${{ runner.temp }}/pktpath-node-cache
           key: node-v24.22.1-win-x64-d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5
 
-      - name: Package unified Windows x64 Cordis client bundle & standalone collectors
+      - name: Package unified Windows x64 pure-Cordis bundle & standalone collectors
         shell: pwsh
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           New-Item -ItemType Directory -Force release_assets | Out-Null
-          python scripts/package_preview_bundle.py `
-            --os windows `
-            --studio-bin bin/pktpath-studio.exe `
-            --collectors-dir bin `
-            --host-dir studio/cordis-analyzer-host `
-            --download-node `
-            --cache-dir "$env:RUNNER_TEMP/pktpath-node-cache" `
-            --out-dir release_assets `
-            --bundle-name "pktpath-windows-x64-$env:TAG"
+          $bundleArgs = @(
+            "scripts/package_preview_bundle.py",
+            "--os", "windows",
+            "--studio-dir", "studio-cordis",
+            "--collectors-dir", "bin",
+            "--repo-license", "LICENSE",
+            "--download-node",
+            "--cache-dir", "$env:RUNNER_TEMP/pktpath-node-cache",
+            "--out-dir", "release_assets",
+            "--bundle-name", "pktpath-windows-x64-$env:TAG"
+          )
+          if (-not (Test-Path -LiteralPath "studio-cordis/scripts/start-studio.cmd" -PathType Leaf) -or
+              -not (Test-Path -LiteralPath "studio-cordis/scripts/start-studio.ps1" -PathType Leaf)) {
+            throw "Missing required launchers in studio-cordis/scripts (start-studio.cmd / start-studio.ps1)"
+          }
+          $bundleArgs += @("--launchers-dir", "studio-cordis/scripts")
+          python -W error @bundleArgs
           Copy-Item bin/pktpath-android-arm64 release_assets/
           Copy-Item bin/pktpath-linux-x86_64 release_assets/
           Copy-Item bin/pktpath-linux-arm64 release_assets/
@@ -134,7 +136,7 @@ jobs:
 
   publish-prerelease:
     name: Publish GitHub Pre-release
-    needs: build-studio-windows
+    needs: package-studio-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -153,5 +155,9 @@ jobs:
             echo "Release $TAG already exists; uploading assets only."
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/*               --title "PktPath $TAG (pre-release, not a first version)"               --notes-file PREVIEW-NOTES.md               --prerelease               --target "${GITHUB_SHA}"
+            gh release create "$TAG" dist/* \
+              --title "PktPath $TAG (pre-release)" \
+              --notes-file PREVIEW-NOTES.md \
+              --prerelease \
+              --target "${GITHUB_SHA}"
           fi

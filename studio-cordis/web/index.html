@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PktPath Studio · 单包路径跟踪工作台</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="workbench-layout.css">
+  <link rel="stylesheet" href="studio-presentation.css">
+</head>
+<body>
+<div id="app" class="app">
+
+  <!-- ===================== Top App Bar ===================== -->
+  <header class="appbar">
+    <button class="icon-btn" id="btnRailToggle" title="折叠/展开左侧控制栏" aria-label="折叠控制栏">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+    </button>
+    <div class="brand">
+      <img class="brand-logo" src="favicon.svg" width="28" height="28" alt="PktPath">
+      <div class="brand-text">
+        <span class="brand-name">PktPath Studio</span>
+        <span class="brand-sub">单包路径跟踪</span>
+      </div>
+    </div>
+
+    <nav class="main-nav" id="mainNav" role="tablist" aria-label="主视图切换">
+      <button class="main-nav-tab active" data-view="workbench" role="tab" aria-selected="true">分析工作台</button>
+      <button class="main-nav-tab" data-view="plugins" id="btnOpenPlugins" role="tab" aria-selected="false">
+        扩展插件
+        <span class="badge badge-ok" id="navPluginCount">0/0</span>
+      </button>
+    </nav>
+
+    <div class="appbar-center" id="appbarDeviceWrap">
+      <div class="device-pill" id="devicePill" title="当前设备">
+        <span class="dot" id="devicePillDot"></span>
+        <span class="device-pill-text" id="devicePillText">未连接设备</span>
+        <span class="badge badge-muted" id="devicePillBadge" hidden></span>
+      </div>
+      <button class="icon-btn" id="btnRefreshDevices" title="刷新设备列表" aria-label="刷新设备">
+        <svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+
+    <div class="appbar-actions">
+      <button class="btn btn-ghost" id="btnOpenFolder" title="选择本地 pktpath 会话目录 (含 manifest.json / block_*.pktb)">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+        打开历史会话文件夹
+      </button>
+      <div class="dropdown" id="historyDropdown">
+        <button class="btn btn-ghost" id="btnHistory" aria-haspopup="true" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 7v5l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/><path d="M3 4v4h4" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+          历史记录
+          <svg viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+        </button>
+        <div class="dropdown-menu" id="historyMenu" role="menu" hidden>
+          <div class="dropdown-head">
+            <span>最近采集会话</span>
+            <button class="link-btn" id="btnHistoryReload">刷新</button>
+          </div>
+          <div class="dropdown-list" id="historyList"><div class="empty-mini">暂无会话</div></div>
+        </div>
+      </div>
+      <button class="icon-btn" id="btnTheme" title="切换浅色/深色主题" aria-label="切换主题" hidden>
+        <svg class="ico-sun" viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <svg class="ico-moon" viewBox="0 0 24 24" width="18" height="18"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="btn btn-ghost btn-quit" id="btnQuitApp" title="安全停止采集并退出本地后台服务">⏻ 退出服务</button>
+    </div>
+  </header>
+
+  <section class="studio-context" aria-label="工作空间与数据来源">
+    <div class="studio-context-title"><span class="studio-eyebrow">PACKET OBSERVABILITY</span><strong>从路径到证据，一处看清</strong></div>
+    <div class="studio-source-controls">
+      <label for="studioDataSource">数据来源</label>
+      <select id="studioDataSource" aria-describedby="studioSourceStatus">
+        <option value="api">本地 Cordis 服务</option>
+        <option value="demo">离线示例 · 不连接设备</option>
+      </select>
+      <button type="button" class="btn btn-ghost btn-sm" id="studioCheckBackend">检查连接</button>
+    </div>
+    <div class="studio-source-feedback" id="studioSourceStatus" role="status" aria-live="polite">正在确认当前数据来源…</div>
+    <details class="studio-capabilities"><summary>当前能力与限制</summary><div>
+      <p>默认连接本页同源的本地 Cordis 服务；只有明确选择示例才使用内置数据，连接失败不会自动换成示例。</p>
+      <p>界面可调控制栏宽度、图表宽高、表格高度，可单面板最大化与还原。换位和自由浮动窗口尚未提供。</p>
+      <p>本页由随包官方 Node 启动的纯 Cordis 本地服务提供。扩展插件、采集与导出能力以当前服务已启用的插件清单为准；未启用的功能不会显示入口。</p>
+    </div></details>
+  </section>
+
+  <div class="layout wb-layout" id="workbenchView">
+    <!-- ===================== Left Control Rail ===================== -->
+    <aside class="rail" id="rail">
+      <section class="card step" id="railEmptyNotice" hidden>
+        <div class="empty-mini" style="padding:16px 8px">
+          <div style="margin-bottom:8px;color:var(--text-2);font-weight:500">未启用数据源插件</div>
+          <button type="button" class="btn btn-primary btn-sm" id="btnRailOpenPlugins">前往插件中心启用</button>
+        </div>
+      </section>
+
+      <!-- ① target source & interface -->
+      <section class="card step" id="stepTarget">
+        <div class="step-head"><span class="step-no">①</span><h2>数据源与设备</h2><span class="spacer"></span><span class="badge" id="prepBadge" hidden></span></div>
+        <div class="seg target-tabs" id="segTransport" role="radiogroup">
+          <button data-v="adb" class="active">📱 Android</button>
+          <button data-v="offline">📂 离线</button>
+        </div>
+        <div id="paneADB">
+          <label class="field">
+            <span class="field-label">Android 设备 (USB / ADB)</span>
+            <select id="selDevice"><option value="">正在扫描 USB 设备…</option></select>
+          </label>
+        </div>
+        <div id="paneOffline" class="offline-pane" hidden>
+          <p class="muted" style="margin:6px 0 8px;font-size:12px">打开本机历史或他人分享的会话目录。</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button type="button" class="btn btn-primary btn-sm" id="btnOfflinePick">📂 选择目录…</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btnOfflineLatest">⏱ 最近一次</button>
+          </div>
+        </div>
+        <div id="collectorOffHint" class="muted" style="margin-top:8px;font-size:12px" hidden>未启用「eBPF 队列采集」插件，网卡探测与在线采集已停用。</div>
+        <div id="liveIfaceBlock">
+          <div class="prep-status" id="prepStatus" hidden></div>
+          <label class="field">
+            <span class="field-label">网卡 (出口)</span>
+            <select id="selIface" disabled><option value="">请先选择目标设备</option></select>
+          </label>
+          <details class="topo" id="topoDetails" open>
+            <summary>
+              <span>当前网卡 TC 队列拓扑</span>
+              <span class="spacer"></span>
+              <span class="badge badge-muted" id="capBadge">未检测</span>
+            </summary>
+            <div class="topo-body">
+              <div class="topo-tree" id="topoTree"><div class="empty-mini">选择设备后自动检测</div></div>
+              <div class="cap-list" id="capList"></div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ② traffic filter -->
+      <section class="card step" id="stepFilter">
+        <div class="step-head"><span class="step-no">②</span><h2>筛选谁的流量</h2><span class="hint">零手查 UID</span></div>
+        <div class="field">
+          <span class="field-label">应用 / 进程 / UID</span>
+          <div class="combo" id="appCombo">
+            <input type="text" id="appSearch" placeholder="输入进程名 / 包名 / 用户名 / UID 搜索…" autocomplete="off" spellcheck="false">
+            <div class="combo-list" id="appList" hidden></div>
+          </div>
+          <div class="app-chosen" id="appChosen">
+            <span class="chip chip-accent" id="appChosenText">全部进程 / 应用 (不限 UID)</span>
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label">协议</span>
+          <div class="seg" id="segProto" role="radiogroup">
+            <button data-v="" class="active">全部</button>
+            <button data-v="tcp">TCP</button>
+            <button data-v="udp">UDP</button>
+            <button data-v="icmp">ICMP</button>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">端口 (源或目的，可选)</span>
+          <input type="number" id="inpPort" min="0" max="65535" placeholder="例如 443，留空 = 不限">
+        </label>
+        <details class="adv">
+          <summary>高级筛选</summary>
+          <div class="adv-grid">
+            <label class="field"><span class="field-label">源 IP</span><input type="text" id="inpSrcIp" placeholder="不限"></label>
+            <label class="field"><span class="field-label">目的 IP</span><input type="text" id="inpDstIp" placeholder="不限"></label>
+            <label class="field"><span class="field-label">端口方向</span>
+              <select id="selPortDir"><option value="dst">目的端口</option><option value="src">源端口</option></select></label>
+            <label class="field"><span class="field-label">skb mark</span><input type="text" id="inpMark" placeholder="如 0x10/0xff"></label>
+            <label class="field"><span class="field-label">跟踪范围</span>
+              <select id="selScope">
+                <option value="tc-egress">tc-egress（TC 出口队列）</option>
+                <option value="ip-tx">ip-tx</option>
+                <option value="sock-tx">sock-tx</option>
+                <option value="rx-sock">rx-sock</option>
+                <option value="fwd">fwd</option>
+              </select></label>
+            <label class="field"><span class="field-label">抽样依据</span>
+              <select id="selSampleBy"><option value="pkt">按包</option><option value="flow">按流 (5 元组)</option></select></label>
+          </div>
+          <div class="plugin-row" style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
+            <span class="badge badge-muted" id="pluginCountBadge">0 个已启用</span>
+            <button type="button" class="link-btn" id="btnManagePluginsInline">🔌 管理插件</button>
+          </div>
+          <label class="check"><input type="checkbox" id="chkPartial" checked><span>允许部分探针缺失 (allow partial)</span></label>
+        </details>
+      </section>
+
+      <!-- ③ capture mode -->
+      <section class="card step" id="stepCaptureMode">
+        <div class="step-head"><span class="step-no">③</span><h2>采集模式</h2></div>
+        <div class="tabs" id="modeTabs" role="tablist">
+          <button class="tab active" data-mode="oneshot" role="tab">复现抓包（短时）</button>
+        </div>
+        <div class="tab-pane" data-pane="oneshot">
+          <div class="field">
+            <span class="field-label">抽样比例</span>
+            <div class="seg" id="segSample">
+              <button data-v="1/1" class="active">全选 1/1</button>
+              <button data-v="1/10">1/10</button>
+              <button data-v="1/100">1/100</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">采集时长</span>
+            <div class="seg" id="segDuration">
+              <button data-v="10" class="active">10s</button>
+              <button data-v="30">30s</button>
+              <button data-v="60">60s</button>
+            </div>
+          </div>
+          <label class="check"><input type="checkbox" id="chkCapHdr" checked><span>捕获包头 <em class="muted">96B</em></span></label>
+          <label class="check"><input type="checkbox" id="chkSendmsg"><span>精准发包线程与创建时间 (sendmsg)</span></label>
+        </div>
+        <div class="tab-pane" data-pane="daemon" hidden>
+          <p class="pane-tip">内存环形缓冲常驻，平时 <b>零落盘</b>；队列卡顿超过阈值时自动保存前后窗口。</p>
+          <div class="field">
+            <span class="field-label">抽样比例</span>
+            <div class="seg" id="segDSample">
+              <button data-v="1/1">1/1</button>
+              <button data-v="1/10">1/10</button>
+              <button data-v="1/100" class="active">1/100</button>
+            </div>
+          </div>
+          <label class="field">
+            <span class="field-label">队列卡顿 &gt; <b id="thrLabel">20</b> ms 自动落盘</span>
+            <input type="range" id="inpThreshold" min="1" max="200" step="1" value="20">
+          </label>
+          <div class="row2">
+            <label class="field"><span class="field-label">触发前窗口 (s)</span><input type="number" id="inpPre" min="0" max="60" value="5"></label>
+            <label class="field"><span class="field-label">触发后窗口 (s)</span><input type="number" id="inpPost" min="0" max="60" value="2"></label>
+          </div>
+          <label class="check"><input type="checkbox" id="chkDCapHdr" checked><span>捕获包头 <em class="muted">96B</em></span></label>
+        </div>
+
+        <button class="btn btn-primary btn-xl" id="btnStart" disabled>
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M7 5l12 7-12 7z" fill="currentColor"/></svg>
+          <span>开始一键采集</span>
+        </button>
+        <div class="start-hint" id="startHint">请先连接并选择 Android 设备</div>
+
+        <div class="run-panel" id="runPanel" hidden>
+          <div class="run-head">
+            <span class="pulse"></span>
+            <span class="run-title" id="runTitle">采集中</span>
+            <span class="spacer"></span>
+            <span class="run-timer num" id="runTimer">00:00</span>
+          </div>
+          <div class="run-progress"><div class="run-progress-bar" id="runProgress"></div></div>
+          <pre class="run-log" id="runLog">等待设备端日志…</pre>
+          <button class="btn btn-warn" id="btnFlush" hidden>
+            <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+            立即落盘快照 (SIGUSR1)
+          </button>
+          <button class="btn btn-danger btn-xl" id="btnStop">
+            <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+            <span>停止并拉回分析</span>
+          </button>
+        </div>
+      </section>
+      <div id="slotSidebarExtra" class="ui-slot-host" data-slot="sidebar.extra"></div>
+      <div class="rail-foot muted">数据保存在本机 · 采集结束自动清理设备临时文件</div>
+    </aside>
+
+    <div id="railSplitter" class="wb-splitter wb-splitter-x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整控制栏宽度" aria-controls="rail"></div>
+
+    <!-- ===================== Right Diagnostic Canvas ===================== -->
+    <main class="canvas" id="canvas">
+      <div class="wb-toolbar" aria-label="工作台布局">
+        <strong>分析画布</strong>
+        <span class="badge badge-muted" id="layoutDemoBadge" hidden>离线示例数据 · 不连接设备</span>
+        <span class="muted">拖拽分隔线调整布局 · 图表支持专注查看</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnResetLayout">重置布局</button>
+        <span class="wb-layout-status muted" id="layoutStatus" role="status" aria-live="polite"></span>
+      </div>
+      <div class="empty-state" id="emptyState">
+        <svg viewBox="0 0 120 80" width="144" height="96" aria-hidden="true">
+          <rect x="4" y="30" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="49" y="12" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="49" y="48" width="22" height="20" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="94" y="30" width="22" height="20" rx="5" fill="var(--ok-soft)" stroke="var(--ok)"/>
+          <path d="M26 40 C38 40 38 22 49 22 M26 40 C38 40 38 58 49 58 M71 22 C82 22 82 40 94 40 M71 58 C82 58 82 40 94 40" stroke="var(--accent)" stroke-width="2" fill="none"/>
+        </svg>
+        <h1>看清每一个包在内核里排了多久队</h1>
+        <p class="muted" id="emptyDesc" style="max-width:440px;margin:0">在左侧选择设备开始采集，或打开本地历史会话。</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:8px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="btnEmptyOpenFolder">📂 打开本地会话</button>
+          <button class="btn btn-ghost" id="btnEmptyOpenPlugins">🧩 插件中心</button>
+        </div>
+      </div>
+
+      <div class="session" id="sessionView" hidden>
+        <div class="session-bar">
+          <div class="session-title">
+            <h1 id="sessTitle">会话</h1>
+            <div class="session-meta" id="sessMeta"></div>
+          </div>
+          <span class="spacer"></span>
+          <div id="slotWorkbenchToolbar" class="ui-slot-inline" data-slot="workbench.toolbar"></div>
+          <button class="btn btn-ghost btn-sm" id="btnRevealSession" title="在资源管理器中打开当前会话目录">📂 目录</button>
+          <div id="dynamicExporters" class="exporter-bar"></div>
+          <button class="btn btn-ghost btn-sm" id="btnExportPcap" hidden>导出 .pcapng</button>
+          <button class="btn btn-ghost btn-sm" id="btnExportRedact" hidden>导出脱敏包</button>
+        </div>
+
+        <div class="saved-bar" id="savedBar" hidden>
+          <span class="saved-ico">✔</span>
+          <div class="saved-text">
+            <span class="saved-lbl" id="savedLabel">已保存：</span>
+            <code class="saved-path" id="savedPath"></code>
+          </div>
+          <button class="btn btn-sm" id="btnSavedReveal">📂 打开所在文件夹</button>
+          <button class="btn btn-ghost btn-sm" id="btnSavedCopy">复制路径</button>
+          <button class="icon-btn" id="btnSavedClose" title="关闭提示" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+
+        <!-- Plugin Insights & Dynamic UI Slot: canvas.banner -->
+        <div id="pluginInsightsBar" class="insights-bar" hidden></div>
+        <div id="slotCanvasBanner" class="ui-slot-host" data-slot="canvas.banner"></div>
+
+        <!-- KPI strip -->
+        <div class="kpis" id="kpis"></div>
+
+        <!-- Visual row -->
+        <div class="visual-row wb-charts" id="chartRow">
+          <section class="card panel wb-panel" id="panelFlow">
+            <div class="panel-head">
+              <h3>队列路径流向图</h3>
+              <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelFlow" aria-pressed="false" aria-label="最大化队列路径图">最大化</button>
+              <span class="hint">线宽 = 包数 · 徽标 = p95 驻留 · 滚轮缩放 · 拖动画布平移 · 点击节点筛选下表</span>
+              <span class="spacer"></span>
+              <div class="flow-zoom-toolbar" id="flowZoomToolbar" role="group" aria-label="流向图缩放">
+                <button type="button" class="btn btn-ghost btn-sm" id="flowZoomOut" title="缩小" aria-label="缩小">−</button>
+                <span class="flow-zoom-pct num" id="flowZoomPct" aria-live="polite">100%</span>
+                <button type="button" class="btn btn-ghost btn-sm" id="flowZoomIn" title="放大" aria-label="放大">+</button>
+                <button type="button" class="link-btn" id="flowZoomReset" title="重置视图，双击画布也可重置">重置视图</button>
+              </div>
+              <button class="link-btn" id="btnClearPath" hidden>清除路径筛选</button>
+            </div>
+            <div class="svg-wrap" id="flowWrap"></div>
+            <div id="flowHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整路径图面板高度" aria-controls="panelFlow"></div>
+          </section>
+          <div id="chartSplitter" class="wb-splitter wb-splitter-x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整两个图表的宽度比例" aria-controls="panelFlow panelLatency"></div>
+          <section class="card panel wb-panel" id="panelLatency">
+            <div class="panel-head">
+              <h3>各队列驻留耗时对比</h3>
+              <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelLatency" aria-pressed="false" aria-label="最大化驻留耗时图">最大化</button>
+              <span class="legend">
+                <i class="lg lg-p50"></i>p50 <i class="lg lg-p95"></i>p95 <i class="lg lg-p99"></i>p99
+              </span>
+            </div>
+            <div class="svg-wrap" id="latWrap"></div>
+            <div id="latencyHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整耗时图面板高度" aria-controls="panelLatency"></div>
+          </section>
+        </div>
+
+        <!-- Sample table -->
+        <section class="card panel table-panel wb-panel" id="panelSamples">
+          <div class="panel-head table-tools">
+            <h3>样本明细</h3>
+            <button type="button" class="btn btn-ghost btn-sm studio-focus-btn" data-studio-focus="panelSamples" aria-pressed="false" aria-label="最大化样本明细">最大化</button>
+            <span class="count-pill num" id="tableCount">0</span>
+            <span class="chip chip-accent chip-x" id="pathChip" hidden></span>
+            <span class="spacer"></span>
+            <div class="search">
+              <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <input type="text" id="tblSearch" placeholder="搜索 进程 / IP / 路径 / 样本号">
+            </div>
+            <select id="tblUid" title="按 UID / 应用筛选"><option value="">全部 UID</option></select>
+            <input type="text" id="tblSeq" class="w-seq" placeholder="TCP seq" title="按 TCP 序号筛选">
+            <div class="seg seg-sm" id="segStatus">
+              <button data-v="all" class="active">全部</button>
+              <button data-v="slow">仅慢包</button>
+              <button data-v="bad">仅异常或不完整</button>
+            </div>
+          </div>
+          <div class="table-wrap" id="tableWrap">
+            <table class="tbl" id="sampleTable">
+              <thead>
+                <tr>
+                  <th data-k="sample_id" class="num">#</th>
+                  <th data-k="uid">应用 / UID</th>
+                  <th data-k="proto">协议</th>
+                  <th data-k="src">源 → 目的</th>
+                  <th data-k="tcp_seq" class="num">TCP seq</th>
+                  <th data-k="pkt_len" class="num">长度</th>
+                  <th data-k="max_sojourn_us" class="num sorted desc">最大排队耗时</th>
+                  <th data-k="total_us" class="num">全程耗时</th>
+                  <th data-k="branch_count" class="num">支路</th>
+                  <th data-k="endpoint">终点</th>
+                  <th data-k="completeness">状态</th>
+                </tr>
+              </thead>
+              <tbody id="sampleBody"></tbody>
+            </table>
+            <div class="table-more" id="tableMore" hidden><button class="btn btn-ghost btn-sm" id="btnMore">显示更多</button></div>
+          </div>
+          <div id="tableHeightSplitter" class="wb-splitter wb-splitter-y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整样本表面板高度" aria-controls="panelSamples"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===================== Single-packet drawer ===================== -->
+  <div class="drawer-mask" id="drawerMask" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <h2 id="drwTitle">单包快递物流时间线</h2>
+        <div class="drawer-sub" id="drwSub"></div>
+      </div>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" id="drwExportPcap" hidden>导出 tcpdump / Wireshark (.pcapng)</button>
+      <button class="btn btn-ghost btn-sm" id="drwExportRedact" hidden>导出脱敏包</button>
+      <button class="icon-btn" id="drwClose" title="关闭 (Esc)" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="saved-bar saved-bar-drw" id="drwSavedBar" hidden>
+      <span class="saved-ico">✔</span>
+      <div class="saved-text">
+        <span class="saved-lbl" id="drwSavedLabel">已保存：</span>
+        <code class="saved-path" id="drwSavedPath"></code>
+      </div>
+      <button class="btn btn-sm" id="btnDrwSavedReveal">📂 打开所在文件夹</button>
+      <button class="btn btn-ghost btn-sm" id="btnDrwSavedCopy">复制路径</button>
+      <button class="icon-btn" id="btnDrwSavedClose" title="关闭提示" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body" id="drwBody"></div>
+    <div id="slotSampleExtra" class="ui-slot-host" data-slot="sample.extra" style="padding:0 18px 14px"></div>
+  </aside>
+
+  <!-- ===================== Full-Page Plugin Center ===================== -->
+  <section class="plugin-center" id="pluginCenterView" hidden>
+    <div class="pc-topbar">
+      <div class="pc-top-left">
+        <div class="pc-title-row">
+          <h2>🧩 插件中心</h2>
+          <span class="badge badge-ok" id="pcSummaryBadge">0 / 0</span>
+          <span class="badge badge-muted" id="pcPluginRuntimeBadge">默认 Cordis 插件运行时: 检测中</span>
+        </div>
+        <div class="pc-cats" id="pcCatBar">
+          <button class="pc-cat active" data-cat="all">全部</button>
+          <button class="pc-cat" data-cat="transport">连接器</button>
+          <button class="pc-cat" data-cat="collector">采集与模式</button>
+          <button class="pc-cat" data-cat="analyzer">后分析</button>
+          <button class="pc-cat" data-cat="exporter">导出器</button>
+          <button class="pc-cat" data-cat="ui" hidden>外观</button>
+          <button class="pc-cat" data-cat="external">外部</button>
+        </div>
+      </div>
+      <div class="pc-top-right">
+        <div class="search pc-search">
+          <svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input type="text" id="pcSearch" placeholder="搜索插件…">
+        </div>
+        <button class="btn btn-primary btn-sm" id="pcBtnInstallFile">＋ 安装插件</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnInstallDir">从目录安装</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnRevealDir">打开目录</button>
+        <button class="btn btn-ghost btn-sm" id="pcBtnRefresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="pc-body">
+      <aside class="pc-master" id="pcList"></aside>
+      <main class="pc-detail" id="pcDetail">
+        <div class="empty-mini" style="padding:48px">请从左侧选择一个插件查看能力清单并进行图形化配置</div>
+      </main>
+    </div>
+  </section>
+
+  <!-- ===================== External Plugin Capability Preview Modal ===================== -->
+  <div class="modal-mask" id="installModal" hidden>
+    <div class="modal-card card">
+      <div class="modal-head">
+        <h3 id="instTitle">📦 安装外部插件 — 能力预览</h3>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="instClose" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="instBody"></div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="instCancel">取消</button>
+        <button class="btn btn-primary" id="instConfirm">确认安装并立即启用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legacy hidden placeholders kept for zero-breakage compatibility -->
+  <div id="pluginMask" hidden></div>
+  <div id="pluginDrawer" hidden>
+    <span id="plugDirHint"></span><button id="btnRevealPlugins"></button><button id="btnRefreshPlugins"></button>
+    <button id="plugClose"></button><button id="btnImportPlugin"></button><div id="plugSlots"></div>
+    <div id="plugPreview"></div><div id="plugList"></div>
+  </div>
+
+  <div class="quit-modal" id="quitModal" hidden>
+    <div class="quit-card card">
+      <div class="quit-ico">⏻</div>
+      <h2>PktPath Studio 本地服务已安全退出</h2>
+      <p>PktPath Studio 本地 Cordis 服务已安全退出，可直接关闭此网页标签；下次通过启动脚本重新打开本地服务即可继续使用。</p>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="tooltip" id="tooltip" hidden></div>
+</div>
+<script src="id64.js"></script>
+<script src="wave1-surface.js"></script>
+<script src="flow-viewport.js"></script>
+<script src="app.js"></script>
+<script src="plugin-center.js"></script>
+<script src="workbench-layout.js"></script>
+<script src="studio-presentation.js"></script>
+</body>
+</html>
