@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -91,43 +90,10 @@ func (s *Server) activeKernelPluginFiles() []string {
 }
 
 // enrichOverview runs all active analyzer plugins (built-in + in-process Cordis modules)
-// on the loaded session and attaches `plugin_insights`, `plugin_kpis`, and `plugin_notes`
-// onto the returned overview JSON without mutating the cached base reconstruction.
+// on the loaded session (backed by in-memory base cache and session-disk persistence)
+// and attaches `plugin_insights`, `plugin_kpis`, and `plugin_notes` onto the overview JSON.
 func (s *Server) enrichOverview(ctx context.Context, id, dir string, ls *loadedSession) json.RawMessage {
-	if ls == nil {
-		return json.RawMessage("null")
-	}
-	if s.kernel == nil {
-		return ls.overview
-	}
-	out := s.kernel.AnalyzeSession(ctx, &kernel.AnalyzeInput{
-		SessionID:  id,
-		SessionDir: dir,
-		Session:    ls.sess,
-		Overview:   ls.ovObj,
-	})
-	trimmed := bytes.TrimSpace(ls.overview)
-	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
-		return ls.overview
-	}
-	extra, err := json.Marshal(struct {
-		Insights []kernel.Insight  `json:"plugin_insights"`
-		KPIs     []kernel.ExtraKPI `json:"plugin_kpis"`
-		Notes    []string          `json:"plugin_notes,omitempty"`
-	}{
-		Insights: out.Insights,
-		KPIs:     out.KPIs,
-		Notes:    out.Notes,
-	})
-	if err != nil || len(extra) < 2 {
-		return ls.overview
-	}
-	var buf bytes.Buffer
-	buf.Grow(len(trimmed) + len(extra) + 2)
-	buf.Write(trimmed[:len(trimmed)-1])
-	buf.WriteByte(',')
-	buf.Write(extra[1:])
-	return json.RawMessage(buf.Bytes())
+	return s.enrichOverviewWithOptions(ctx, id, dir, ls, false)
 }
 
 // ---- Microkernel HTTP API Handlers ----

@@ -31,27 +31,79 @@ type SessionMeta struct {
 }
 
 type cachedEntry struct {
-	dir   string
-	stamp int64
-	ls    *loadedSession
+	dir      string
+	stamp    int64
+	ls       *loadedSession
+	analysis *analysisCacheEntry
 }
 
 type sessionStore struct {
-	root string
+	root       string
+	openedPath string
 
 	mu       sync.Mutex
-	external map[string]string // id -> clean dir (in-memory external sessions)
+	external map[string]string // id -> clean dir (persisted to opened_sessions.json)
 	byPath   map[string]string // clean lower path -> id
 	cache    map[string]*cachedEntry
 }
 
-func newSessionStore(root, _ string) *sessionStore {
-	return &sessionStore{
-		root:     root,
-		external: map[string]string{},
-		byPath:   map[string]string{},
-		cache:    map[string]*cachedEntry{},
+func newSessionStore(root, openedPath string) *sessionStore {
+	ss := &sessionStore{
+		root:       root,
+		openedPath: openedPath,
+		external:   map[string]string{},
+		byPath:     map[string]string{},
+		cache:      map[string]*cachedEntry{},
 	}
+	ss.loadOpened()
+	return ss
+}
+
+func (ss *sessionStore) loadOpened() {
+	if ss.openedPath == "" {
+		return
+	}
+	b, err := os.ReadFile(ss.openedPath)
+	if err != nil {
+		return
+	}
+	var rec persistedOpenedSessions
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return
+	}
+	for _, rawDir := range rec.Dirs {
+		dir := strings.TrimSpace(rawDir)
+		if dir == "" || !hasManifest(dir) {
+			continue
+		}
+		ss.registerInternal(dir, false)
+	}
+}
+
+func (ss *sessionStore) snapshotOpenedDirsLocked() []string {
+	dirs := make([]string, 0, len(ss.external))
+	for _, d := range ss.external {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func (ss *sessionStore) saveOpened(dirs []string) {
+	if ss.openedPath == "" {
+		return
+	}
+	rec := persistedOpenedSessions{
+		SchemaVersion: openedSessionsSchemaVer,
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Dirs:          dirs,
+	}
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+	_ = writeFileAtomic(ss.openedPath, b, 0o644)
 }
 
 func normPathKey(p string) string {
@@ -70,8 +122,12 @@ func isInsideDir(child, parent string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-// register assigns a stable session ID to dir and returns it.
+// register assigns a stable session ID to dir and persists external entries.
 func (ss *sessionStore) register(dir string) string {
+	return ss.registerInternal(dir, true)
+}
+
+func (ss *sessionStore) registerInternal(dir string, persist bool) string {
 	abs, err := filepath.Abs(dir)
 	if err == nil {
 		dir = abs
@@ -80,14 +136,14 @@ func (ss *sessionStore) register(dir string) string {
 	key := normPathKey(dir)
 
 	ss.mu.Lock()
-	defer ss.mu.Unlock()
-
 	if id, ok := ss.byPath[key]; ok {
+		ss.mu.Unlock()
 		return id
 	}
 	if isInsideDir(dir, ss.root) && filepath.Clean(filepath.Dir(dir)) == filepath.Clean(ss.root) {
 		id := filepath.Base(dir)
 		ss.byPath[key] = id
+		ss.mu.Unlock()
 		return id
 	}
 	base := sanitizeName(filepath.Base(dir))
@@ -98,6 +154,15 @@ func (ss *sessionStore) register(dir string) string {
 	id := "ext_" + base + "_" + hex.EncodeToString(h[:])[:8]
 	ss.external[id] = dir
 	ss.byPath[key] = id
+	var dirsToSave []string
+	if persist {
+		dirsToSave = ss.snapshotOpenedDirsLocked()
+	}
+	ss.mu.Unlock()
+
+	if persist {
+		ss.saveOpened(dirsToSave)
+	}
 	return id
 }
 
@@ -142,18 +207,49 @@ func dirStamp(dir string) int64 {
 	if st, err := os.Stat(filepath.Join(dir, "manifest.json")); err == nil {
 		stamp ^= st.ModTime().UnixNano() ^ (st.Size() << 16)
 	}
+	if st, err := os.Stat(filepath.Join(dir, "dict.json")); err == nil {
+		stamp ^= st.ModTime().UnixNano() ^ (st.Size() << 24)
+	}
 	ents, err := os.ReadDir(dir)
 	if err == nil {
-		stamp ^= int64(len(ents)) << 32
+		var pktbCount int64
 		for _, e := range ents {
-			if strings.HasSuffix(e.Name(), ".pktb") {
-				if fi, err := e.Info(); err == nil {
-					stamp += fi.Size() + fi.ModTime().UnixNano()
-				}
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".pktb") {
+				continue
+			}
+			pktbCount++
+			if fi, err := e.Info(); err == nil {
+				stamp += fi.Size() + fi.ModTime().UnixNano()
 			}
 		}
+		stamp ^= pktbCount << 32
 	}
 	return stamp
+}
+
+func (ss *sessionStore) getAnalysisCache(id, dir string, ls *loadedSession, sessionFP, analyzerFP string) (*analysisCacheEntry, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ce := ss.cache[id]
+	if ce == nil || ce.dir != dir || ce.ls != ls || ce.analysis == nil {
+		return nil, false
+	}
+	if ce.analysis.sessionFP != sessionFP || ce.analysis.analyzerFP != analyzerFP {
+		return nil, false
+	}
+	return ce.analysis, true
+}
+
+func (ss *sessionStore) putAnalysisCache(id, dir string, ls *loadedSession, entry *analysisCacheEntry) {
+	if entry == nil {
+		return
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ce := ss.cache[id]
+	if ce != nil && ce.dir == dir && ce.ls == ls {
+		ce.analysis = entry
+	}
 }
 
 func (ss *sessionStore) load(id string) (string, string, *loadedSession, error) {
@@ -465,7 +561,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.enrichOverview(r.Context(), realID, dir, ls))
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh")))
+	refresh := q == "1" || q == "true" || q == "yes"
+	writeJSON(w, http.StatusOK, s.enrichOverviewWithOptions(r.Context(), realID, dir, ls, refresh))
 }
 
 func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {

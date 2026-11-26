@@ -921,41 +921,8 @@ func (k *Kernel) MaterializeKernelPluginFiles() ([]string, error) {
 
 // AnalyzeSession runs all active analyzer plugins (built-in + external) and aggregates insights.
 func (k *Kernel) AnalyzeSession(ctx context.Context, in *AnalyzeInput) *AnalyzeOutput {
-	agg := &AnalyzeOutput{
-		Insights: []Insight{},
-		KPIs:     []ExtraKPI{},
-		Notes:    []string{},
-	}
-	for _, an := range k.Analyzers() {
-		if an.Run == nil {
-			continue
-		}
-		out, err := an.Run(ctx, in)
-		if err != nil {
-			agg.Notes = append(agg.Notes, fmt.Sprintf("[%s] %v", an.Name, err))
-			continue
-		}
-		if out == nil {
-			continue
-		}
-		for _, ins := range out.Insights {
-			if ins.PluginID == "" {
-				ins.PluginID = an.PluginID
-			}
-			if ins.Plugin == "" {
-				ins.Plugin = an.Name
-			}
-			agg.Insights = append(agg.Insights, ins)
-		}
-		for _, kpi := range out.KPIs {
-			if kpi.PluginID == "" {
-				kpi.PluginID = an.PluginID
-			}
-			agg.KPIs = append(agg.KPIs, kpi)
-		}
-		agg.Notes = append(agg.Notes, out.Notes...)
-	}
-	return agg
+	out, _ := k.AnalyzeSessionReport(ctx, in)
+	return out
 }
 
 // RunExporter invokes any active exporter extension by ID (built-in or external).
