@@ -85,7 +85,7 @@
     <details class="studio-capabilities"><summary>当前能力与限制</summary><div>
       <p>真实模式使用当前地址的 Go API，只有明确选择示例才使用内置数据；连接失败不会自动换成示例。</p>
       <p>界面可调控制栏宽度、图表宽高、表格高度，可单面板最大化与还原。换位和自由浮动窗口尚未提供。</p>
-      <p>Cordis 是否启用由启动参数与内核状态决定，本页面不切默认。扩展插件、配置迁移、平台/设备支持以对应交付清单为准。</p>
+      <p>默认在能解析到随包 <code>plugin-runtime.mjs</code> 和 Node 时启用进程内 Cordis 插件运行时；旧 F01 分析宿主与 F02 生命周期宿主仍须显式开启。本页面不会改这些默认。扩展插件、配置迁移、平台/设备支持以对应交付清单为准。</p>
     </div></details>
   </section>
 
@@ -478,6 +478,7 @@
           <h2>🧩 插件中心</h2>
           <span class="badge badge-ok" id="pcSummaryBadge">0 / 0</span>
           <span class="badge badge-muted" id="pcKernelExtBadge">内核扩展: 0 字段 · 0 队列</span>
+          <span class="badge badge-muted" id="pcPluginRuntimeBadge">默认 Cordis 插件运行时: 检测中</span>
         </div>
         <div class="pc-cats" id="pcCatBar">
           <button class="pc-cat active" data-cat="all">全部</button>

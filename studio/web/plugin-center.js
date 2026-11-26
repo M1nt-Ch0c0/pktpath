@@ -118,6 +118,19 @@
     const ke = st.kernel_ext_summary || { sock_fields: 0, sock_max: 16, qdiscs: 0, qdiscs_max: 32 };
     const keBadge = $('#pcKernelExtBadge');
     if (keBadge) keBadge.textContent = `动态内核扩展: ${ke.sock_fields}/${ke.sock_max} 字段 · ${ke.qdiscs}/${ke.qdiscs_max} 队列`;
+    const rt = st.plugin_runtime;
+    const rtBadge = $('#pcPluginRuntimeBadge');
+    if (rtBadge) {
+      if (rt && rt.enabled) {
+        rtBadge.className = 'badge badge-ok';
+        rtBadge.textContent = '默认 Cordis 插件运行时已启用';
+        rtBadge.title = [rt.backend, rt.protocol, rt.node_path, rt.host_path].filter(Boolean).join('\n');
+      } else {
+        rtBadge.className = 'badge badge-muted';
+        rtBadge.textContent = '默认 Cordis 插件运行时未启用';
+        rtBadge.removeAttribute('title');
+      }
+    }
     const inlineBadge = $('#pluginCountBadge');
     if (inlineBadge) {
       const n = (ke.sock_fields || 0) + (ke.qdiscs || 0);

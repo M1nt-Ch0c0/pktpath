@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,5 +115,51 @@ func TestServerDefaultCordisModulePluginEndToEnd(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 70*time.Millisecond {
 		t.Fatalf("disable returned too early (%v); async cleanup was not awaited", elapsed)
+	}
+}
+
+func TestKernelStateExposesDefaultPluginRuntime(t *testing.T) {
+	s := New(Options{AppDir: t.TempDir()})
+	t.Cleanup(func() { s.Shutdown(context.Background()) })
+
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/kernel/state", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"plugin_runtime"`) {
+		t.Fatalf("expected plugin_runtime in default kernel state, status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		State struct {
+			PluginRuntime *struct {
+				Enabled  bool   `json:"enabled"`
+				Backend  string `json:"backend"`
+				Protocol string `json:"protocol"`
+				HostPath string `json:"host_path"`
+				NodePath string `json:"node_path"`
+			} `json:"plugin_runtime"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode kernel state: %v", err)
+	}
+	rt := got.State.PluginRuntime
+	if rt == nil || !rt.Enabled {
+		t.Fatal("default preview should report plugin_runtime.enabled=true")
+	}
+	if rt.Backend != "cordis-plugin-runtime" || rt.Protocol != "pktpath.cordis3.plugin-runtime/1" {
+		t.Fatalf("unexpected runtime identity: %+v", rt)
+	}
+	if !strings.HasSuffix(rt.HostPath, "plugin-runtime.mjs") {
+		t.Fatalf("expected resolved plugin-runtime.mjs, got %q", rt.HostPath)
+	}
+	if strings.TrimSpace(rt.NodePath) == "" {
+		t.Fatal("expected resolved Node path for default plugin runtime")
+	}
+
+	off := New(Options{AppDir: t.TempDir(), CordisPluginRuntime: "-"})
+	t.Cleanup(func() { off.Shutdown(context.Background()) })
+	w = httptest.NewRecorder()
+	off.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/kernel/state", nil))
+	if w.Code != 200 || strings.Contains(w.Body.String(), `"plugin_runtime"`) {
+		t.Fatalf("CordisPluginRuntime=- should omit plugin_runtime, status=%d body=%s", w.Code, w.Body.String())
 	}
 }

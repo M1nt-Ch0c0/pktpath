@@ -36,6 +36,31 @@ type CordisPluginRuntime struct {
 	loaded map[string]struct{}
 }
 
+// PluginRuntimeSnapshot is the new-preview default in-process module runtime for GET /api/kernel/state.
+type PluginRuntimeSnapshot struct {
+	Enabled  bool   `json:"enabled"`
+	Backend  string `json:"backend"`
+	Protocol string `json:"protocol"`
+	HostPath string `json:"host_path,omitempty"`
+	NodePath string `json:"node_path,omitempty"`
+}
+
+// Snapshot reports whether the default Cordis plugin runtime is attached and which host/Node it resolved.
+func (h *CordisPluginRuntime) Snapshot() *PluginRuntimeSnapshot {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return &PluginRuntimeSnapshot{
+		Enabled:  true,
+		Backend:  "cordis-plugin-runtime",
+		Protocol: cordisPluginRuntimeProtocol,
+		HostPath: h.opts.HostPath,
+		NodePath: h.opts.NodePath,
+	}
+}
+
 // NewCordisPluginRuntime stores options; the Node worker starts on first Load.
 func NewCordisPluginRuntime(opts CordisPluginRuntimeOptions) *CordisPluginRuntime {
 	return &CordisPluginRuntime{opts: opts, loaded: map[string]struct{}{}}

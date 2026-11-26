@@ -250,6 +250,7 @@ type PluginStatusView struct {
 type KernelSnapshot struct {
 	LifecycleHost    *CordisLifecycleSnapshot `json:"lifecycle_host,omitempty"`
 	AnalyzerHost     *AnalyzerHostSnapshot    `json:"analyzer_host,omitempty"`
+	PluginRuntime    *PluginRuntimeSnapshot   `json:"plugin_runtime,omitempty"`
 	Version          string                   `json:"version"`
 	PluginsDir       string                   `json:"plugins_dir"`
 	ConfigPath       string                   `json:"config_path"`
@@ -1026,6 +1027,9 @@ func (k *Kernel) Snapshot(version string) KernelSnapshot {
 	}
 	if k.host.AnalyzerHost != nil {
 		snap.AnalyzerHost = k.host.AnalyzerHost.Snapshot()
+	}
+	if k.host.PluginRuntime != nil {
+		snap.PluginRuntime = k.host.PluginRuntime.Snapshot()
 	}
 	snap.KernelExtSummary.SockMax = 16
 	snap.KernelExtSummary.QdiscsMax = 32
