@@ -2,6 +2,7 @@
 import { Context } from '@cordisjs/core';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
+import { attachCleanupWait } from './cleanup-wait.mjs';
 if (process.argv.includes('--lifecycle')) {
   await import('./lifecycle.mjs');
 } else {
@@ -9,6 +10,7 @@ const require = createRequire(import.meta.url);
 const coreVersion = require('@cordisjs/core/package.json').version;
 const protocol = 'pktpath.cordis3.analyzer/1';
 const ctx = new Context();
+const cleanupWait = attachCleanupWait(ctx);
 for (const level of ['error', 'warning', 'info']) {
   ctx.on(`internal/${level}`, (...args) => console.error(...args));
 }
@@ -75,15 +77,18 @@ async function dispatch(req) {
     case 'deactivate':
       if (scope) scope.dispose();
       active = false;
-      return { revoked: true };
+      await cleanupWait.wait();
+      return { revoked: true, cleanupDone };
     case 'drain':
       if (active) throw new Error('deactivate before drain');
+      await cleanupWait.wait();
       await Promise.all(cleanup);
       if (pending.size || !cleanupDone) throw new Error('drain incomplete');
       return { drained: true, cleanupDone };
     case 'shutdown':
       if (active || pending.size || !cleanupDone) throw new Error('shutdown before drain');
       await ctx.stop();
+      await cleanupWait.wait();
       closing = true;
       return { closed: true };
     default: throw new Error('unknown operation');

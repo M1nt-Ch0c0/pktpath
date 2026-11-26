@@ -2,6 +2,7 @@
 import { Context } from '@cordisjs/core';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
+import { attachCleanupWait } from './cleanup-wait.mjs';
 // stdout is exclusively the framed protocol, including during root ctx.stop()
 // when Cordis3 removes user logging listeners and uses console.info fallback.
 console.info = (...args) => console.error(...args);
@@ -9,6 +10,7 @@ console.log = (...args) => console.error(...args);
 const core = createRequire(import.meta.url)('@cordisjs/core/package.json').version;
 const protocol = 'pktpath.cordis3.lifecycle/2';
 const ctx = new Context();
+const cleanupWait = attachCleanupWait(ctx);
 for (const level of ['error', 'warning', 'info']) ctx.on(`internal/${level}`, (...x) => console.error(...x));
 const entries = new Map(), publications = new Map(), facades = new Map();
 const pending = new Map(), retired = new Map();
@@ -73,8 +75,10 @@ function install(plan) {
         return retire(plan.plugin, attempt, plan.revision);
       });
       try {
-        // v3 does NOT await old disposers. Our application awaits the observable
-        // Go drain ACK; Go separately quarantines if actual cleanup is unfinished.
+        // Official Cordis 3.18.1 does not await old disposers. This host
+        // waits for cleanup to finish (DSH-style) before applying the next plan,
+        // and still awaits the Go drain ACK.
+        await cleanupWait.wait();
         await retired.get(plan.plugin)?.catch(() => {});
         if (!alive) return;
         const deps = Object.fromEntries(plan.requires.map(n => [n, local.get(key(n)).instance]));
@@ -122,8 +126,10 @@ async function dispatch(req) {
     case 'shutdown':
       closing = true;
       for (const e of entries.values()) e.fork?.dispose();
+      await cleanupWait.wait();
       await Promise.allSettled([...retired.values()]);
       await ctx.stop();
+      await cleanupWait.wait();
       return { drained: true };
     default: throw new Error('unknown operation');
   }
