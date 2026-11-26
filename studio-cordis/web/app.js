@@ -408,7 +408,8 @@
     const kernel = (S.prepInfo && S.prepInfo.kernel) || d.kernel || '';
     const arch = (S.prepInfo && S.prepInfo.arch) || d.arch || '';
     txt.textContent = [(d.model || d.product || d.serial), d.serial, arch, kernel ? 'Linux ' + String(kernel).split('-')[0] : ''].filter(Boolean).join(' · ');
-    $('#devicePill').title = [devLabel(d), kernel && 'kernel ' + kernel].filter(Boolean).join('\n');
+    const agents = arr(d.available_agents).filter(Boolean);
+    $('#devicePill').title = [devLabel(d), kernel && 'kernel ' + kernel, agents.length && '可用采集器：' + agents.join(', ')].filter(Boolean).join('\n');
     badge.hidden = false;
     if (S.prepState === 'ok') {
       const rm = String((S.prepInfo && S.prepInfo.root_mode) || d.root_mode || 'root');
@@ -643,7 +644,10 @@
       if (S.serial !== serial) return;
       const ifs = arr(d.ifaces || d.interfaces).filter((x) => x && x.name);
       if (ifs.length) S.interfaces = ifs;
-      S.inspect = obj(d.inspect || ((d.qdiscs || d.classes || d.adapters) ? d : {}));
+      const normIns = (Wave1 && Wave1.normalizeInspectPayload)
+        ? Wave1.normalizeInspectPayload(d, dev || S.iface)
+        : { inspect: obj(d.inspect || ((d.qdiscs || d.classes || d.adapters) ? d : {})) };
+      S.inspect = obj(normIns.inspect);
       if (!S.iface) {
         const names = S.interfaces.map((x) => x.name);
         S.iface = dev || S.inspect.dev || (names.includes('wlan0') ? 'wlan0' : (S.interfaces.find((x) => /up/i.test(x.state || '') && x.name !== 'lo') || S.interfaces[0] || {}).name || '');
@@ -750,7 +754,7 @@
     if (!ins) { tree.innerHTML = '<div class="empty-mini">选择设备后自动检测</div>'; caps.innerHTML = ''; cb.className = 'badge badge-muted'; cb.textContent = '未检测'; return; }
     const selectedDev = String(S.iface || ins.dev || '').trim();
     const qd = (Wave1 && Wave1.normalizeQdiscs)
-      ? Wave1.normalizeQdiscs(ins.qdiscs, selectedDev)
+      ? Wave1.normalizeQdiscs(ins.qdiscs, selectedDev, { unscopedRaw: !!ins._unscopedRaw })
       : arr(ins.qdiscs).filter((q) => q && (q.kind || q.handle !== undefined));
     const selectedBase = selectedDev.split('@')[0];
     const clsList = arr(ins.classes).filter((c) => {
@@ -879,15 +883,33 @@
       const kids = (childItems.length || extraLi) ? `<ul>${childItems.map((ch) => renderNode(ch, depth + 1, false)).join('')}${extraLi}</ul>` : '';
       return `<li><span class="qnode"${tipAttr(qTip)}><span class="k">${esc(qk)}</span>${esc(fmtHandle(q.handle))}${via}${gen}${pktHtml}</span>${kids}</li>`;
     };
-    tree.innerHTML = roots.length ? `<ul>${roots.map((r) => renderNode(r, 0, false)).join('')}</ul>`
+    const isDemoTopo = !!(ins.is_demo || S.demo);
+    const demoBanner = isDemoTopo
+      ? '<div class="empty-mini" data-demo-topo="1" style="margin-bottom:6px;padding:4px 8px;border:1px dashed var(--accent,#6c8cff);border-radius:6px;color:var(--accent,#6c8cff)">🧪 模拟演示拓扑数据（非真实 Android 设备）</div>'
+      : '';
+    const emptyTopoMsg = ins._unscopedRaw
+      ? `<div class="empty-mini">未获取到 ${esc(selectedDev || '当前网卡')} 的结构化 inspect（原始 tc 输出不含网卡归属，已跳过误展示）</div>`
       : '<div class="empty-mini">该网卡未配置 qdisc（或为 noqueue 直通）</div>';
+    tree.innerHTML = demoBanner + (roots.length ? `<ul>${roots.map((r) => renderNode(r, 0, false)).join('')}</ul>` : emptyTopoMsg);
 
     const ads = arr(ins.adapters);
     const enabled = ads.filter((a) => a.enabled).length;
     const partial = !!ins.partial_coverage;
-    cb.className = 'badge ' + (partial ? 'badge-warn' : 'badge-ok');
-    cb.textContent = partial ? '部分覆盖' : '能力完整';
+    const rawFallback = !!ins._rawFallback && !ads.length;
+    if (isDemoTopo) {
+      cb.className = 'badge badge-warn';
+      cb.textContent = '模拟演示 · ' + (partial ? '部分覆盖' : '能力完整');
+    } else if (rawFallback) {
+      cb.className = 'badge badge-warn';
+      cb.textContent = '基础队列模式';
+    } else {
+      cb.className = 'badge ' + (partial ? 'badge-warn' : 'badge-ok');
+      cb.textContent = partial ? '部分覆盖' : '能力完整';
+    }
     let html = '';
+    if (rawFallback) {
+      html += '<span class="badge badge-warn">仅基础 tc 队列文本（未获取结构化探针能力）</span>';
+    }
     if (ads.length) {
       html += `<div class="cap-legend">
         <span class="cap-legend-item">🟢 已启用</span>
@@ -1005,36 +1027,59 @@
   }
   function buildCaptureReq() {
     const daemon = S.mode === 'daemon' && !!(Wave1 && Wave1.shouldShowDaemon(window.__pktpathKernelState || null));
-    const port = toNum($('#inpPort').value);
-    const portDir = $('#selPortDir').value;
     const hdrEl = daemon ? $('#chkDCapHdr') : $('#chkCapHdr');
-    const req = {
+    const input = {
       serial: S.serial,
-      mode: daemon ? 'daemon' : 'oneshot',
+      daemon,
       dev: S.iface,
-      scope: $('#selScope').value || 'tc-egress',
-      uid: isNum(S.app.uid) && S.app.uid >= 0 ? S.app.uid : undefined,
-      pkg: S.app && S.app.pkg ? S.app.pkg : undefined,
+      scope: ($('#selScope') && $('#selScope').value) || 'tc-egress',
+      uid: isNum(S.app.uid) ? S.app.uid : -1,
       proto: S.proto,
-      dst_ip: $('#inpDstIp').value.trim() || undefined,
-      port: port ? Math.trunc(port) : undefined,
-      sample: (Wave1 && Wave1.sampleToNumber)
-        ? Wave1.sampleToNumber(daemon ? S.dsample : S.sample)
-        : (daemon ? S.dsample : S.sample),
-      duration_sec: daemon ? 0 : S.duration,
-      hdr_bytes: (hdrEl && hdrEl.checked) ? 96 : 0,
-      profile_sendmsg: !daemon && $('#chkSendmsg') && $('#chkSendmsg').checked,
-      allow_partial: $('#chkPartial') && $('#chkPartial').checked,
+      srcIp: ($('#inpSrcIp') && $('#inpSrcIp').value) || '',
+      dstIp: ($('#inpDstIp') && $('#inpDstIp').value) || '',
+      port: $('#inpPort') && $('#inpPort').value,
+      portDir: ($('#selPortDir') && $('#selPortDir').value) || 'dst',
+      mark: ($('#inpMark') && $('#inpMark').value) || '',
+      sample: S.sample,
+      daemonSample: S.dsample,
+      sampleBy: ($('#selSampleBy') && $('#selSampleBy').value) || 'pkt',
+      durationSec: S.duration,
+      captureHdr: !!(hdrEl && hdrEl.checked),
+      profileSendmsg: !!($('#chkSendmsg') && $('#chkSendmsg').checked),
+      enablePlugins: !!($('#chkPlugins') && $('#chkPlugins').checked),
+      allowPartial: !!($('#chkPartial') && $('#chkPartial').checked),
+      thresholdMs: $('#inpThreshold') && $('#inpThreshold').value,
+      preWindowSec: $('#inpPre') && $('#inpPre').value,
+      postWindowSec: $('#inpPost') && $('#inpPost').value,
     };
-    if (daemon) {
-      const thrMs = toNum($('#inpThreshold') && $('#inpThreshold').value) || 20;
-      req.trigger = `sojourn_us>${Math.round(thrMs * 1000)}`;
-      req.pre_window_sec = Math.max(0, Math.trunc(toNum($('#inpPre') && $('#inpPre').value) || 0));
-      req.post_window_sec = Math.max(0, Math.trunc(toNum($('#inpPost') && $('#inpPost').value) || 0));
-      req.src_ip = $('#inpSrcIp') && $('#inpSrcIp').value.trim();
-      req.sample_by = $('#selSampleBy') && ($('#selSampleBy').value || 'pkt');
+    if (Wave1 && Wave1.buildCaptureRequest) {
+      return Wave1.buildCaptureRequest(input);
     }
-    return req;
+    const port = toNum(input.port);
+    const thrMs = toNum(input.thresholdMs) || 20;
+    return {
+      serial: input.serial,
+      mode: daemon ? 'daemon' : 'oneshot',
+      dev: input.dev,
+      scope: input.scope,
+      uid: input.uid,
+      proto: input.proto,
+      src_ip: input.srcIp.trim(),
+      dst_ip: input.dstIp.trim(),
+      src_port: port && input.portDir === 'src' ? Math.trunc(port) : 0,
+      dst_port: port && input.portDir !== 'src' ? Math.trunc(port) : 0,
+      mark: input.mark.trim(),
+      sample: daemon ? S.dsample : S.sample,
+      sample_by: input.sampleBy,
+      duration_sec: daemon ? 0 : S.duration,
+      capture_hdr: input.captureHdr ? 96 : 0,
+      profile_sendmsg: !daemon && input.profileSendmsg,
+      enable_plugins: input.enablePlugins,
+      allow_partial: input.allowPartial,
+      trigger: daemon ? `sojourn_us>${Math.round(thrMs * 1000)}` : '',
+      pre_window_sec: daemon ? Math.max(0, Math.trunc(toNum(input.preWindowSec) || 0)) : 0,
+      post_window_sec: daemon ? Math.max(0, Math.trunc(toNum(input.postWindowSec) || 0)) : 0,
+    };
   }
   async function startCapture() {
     const req = buildCaptureReq();
@@ -2614,7 +2659,7 @@
         case '/api/devices': return {
           ok: true, adb_missing: false,
           devices: [
-            { serial: 'emulator-5554', transport: 'adb', model: 'Pixel 8', product: 'shiba', state: 'device' },
+            { serial: 'emulator-5554', transport: 'adb', model: 'Pixel 8（模拟演示）', product: 'shiba', state: 'device', android_ver: '14 (Demo)', root_mode: 'demo-mock', agent_ready: true, available_agents: ['arm64-demo'] },
           ],
         };
         case '/api/device/prepare': return { ok: true, root_mode: 'adbd-root', kernel: '6.1.157-android14-11', agent_sha256: '9f2c4e1ab3d7' };
@@ -2622,7 +2667,8 @@
           ok: true, serial: q.get('serial') || 'emulator-5554', scope: q.get('scope') || 'tc-egress', dev: q.get('dev') || 'wlan0',
           ifaces: [{ name: 'lo', state: 'UNKNOWN', addrs: ['127.0.0.1/8'] }, { name: 'wlan0', state: 'UP', addrs: ['192.0.2.57/24', 'fe80::1/64'] }, { name: 'p2p0', state: 'DOWN', addrs: [] }, { name: 'rmnet_data0', state: 'UP', addrs: ['198.51.100.5/30'] }],
           interfaces: [{ name: 'lo', state: 'UNKNOWN', addrs: ['127.0.0.1/8'] }, { name: 'wlan0', state: 'UP', addrs: ['192.0.2.57/24', 'fe80::1/64'] }, { name: 'p2p0', state: 'DOWN', addrs: [] }, { name: 'rmnet_data0', state: 'UP', addrs: ['198.51.100.5/30'] }],
-          inspect: { kernel_release: '6.1.157-android14-11', dev: q.get('dev') || 'wlan0', partial_coverage: false, budgets: { estimated_bpf_bytes: 7570000 },
+          is_demo: true,
+          inspect: { is_demo: true, kernel_release: '6.1.157-android14-11', dev: q.get('dev') || 'wlan0', partial_coverage: false, budgets: { estimated_bpf_bytes: 7570000 },
             qdiscs: [
               { kind: 'htb', handle: 0x10000, parent: 0xffffffff, queue_gen: 40 },
               { kind: 'pfifo', handle: 0, parent: 0x10010, queue_gen: 47 },

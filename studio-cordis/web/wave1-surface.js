@@ -159,21 +159,112 @@
     };
   }
 
-  function normalizeQdiscs(raw, dev) {
+  function normalizeQdiscs(raw, dev, opts) {
     const target = baseIfaceName(dev);
-    return arr(raw).map((q) => {
-      if (typeof q === 'string') return parseTcQdiscLine(q);
+    const list = arr(raw);
+    const unscopedRaw = !!(opts && opts.unscopedRaw);
+    const parsed = list.map((q) => {
+      if (typeof q === 'string') {
+        const item = parseTcQdiscLine(q);
+        return item ? Object.assign(item, { _fromRawLine: true }) : null;
+      }
       if (q && typeof q === 'object' && q.root === true && (q.parent === undefined || q.parent === null || q.parent === '')) {
         return Object.assign({}, q, { parent: 'root' });
       }
       return q;
-    }).filter((q) => {
+    });
+    const hasAttributedRawLine = parsed.some((q) => q && q._fromRawLine && q.dev);
+    return parsed.filter((q) => {
       if (!q || !(q.kind || q.handle !== undefined)) return false;
       if (target && q.dev) {
         return baseIfaceName(q.dev) === target;
       }
+      if (target && q._fromRawLine && !q.dev && (hasAttributedRawLine || unscopedRaw)) {
+        return false;
+      }
       return true;
+    }).map((q) => {
+      if (q && q._fromRawLine) {
+        const clean = Object.assign({}, q);
+        delete clean._fromRawLine;
+        return clean;
+      }
+      return q;
     });
+  }
+
+  function normalizeInspectPayload(resp, selectedDev) {
+    const d = resp && typeof resp === 'object' ? resp : {};
+    const hasNested = !!(d.inspect && typeof d.inspect === 'object');
+    const rawIns = hasNested
+      ? Object.assign({}, d.inspect)
+      : ((d.qdiscs || d.classes || d.adapters) ? Object.assign({}, d) : {});
+    const qList = arr(rawIns.qdiscs);
+    const hasRawStrings = qList.some((q) => typeof q === 'string');
+    const hasStructuredQdiscs = qList.some((q) => q && typeof q === 'object' && (q.kind || q.handle !== undefined));
+    const hasAdapters = arr(rawIns.adapters).length > 0;
+    const hasClasses = arr(rawIns.classes).length > 0;
+    const structured = hasNested || hasAdapters || hasClasses || hasStructuredQdiscs;
+    const rawFallback = !structured && hasRawStrings;
+    const explicitDev = String(rawIns.dev || d.dev || '').trim();
+    const unscopedRaw = rawFallback && !explicitDev;
+    const isDemo = !!(rawIns.is_demo || d.is_demo);
+    const inspect = Object.assign({}, rawIns, {
+      dev: explicitDev || String(selectedDev || '').trim(),
+      is_demo: isDemo,
+      _structured: structured,
+      _rawFallback: rawFallback,
+      _unscopedRaw: unscopedRaw,
+    });
+    return {
+      inspect,
+      structured,
+      rawFallback,
+      unscopedRaw,
+      dev: inspect.dev,
+      isDemo,
+    };
+  }
+
+  function buildCaptureRequest(input) {
+    const opts = input && typeof input === 'object' ? input : {};
+    const daemon = !!opts.daemon;
+    const portRaw = Number(opts.port);
+    const port = Number.isFinite(portRaw) && portRaw > 0 ? Math.trunc(portRaw) : 0;
+    const portDir = String(opts.portDir || 'dst').trim().toLowerCase();
+    const uidRaw = opts.uid;
+    const uid = (uidRaw !== '' && uidRaw !== null && uidRaw !== undefined && Number.isFinite(Number(uidRaw)))
+      ? Math.trunc(Number(uidRaw))
+      : -1;
+    const thrRaw = Number(opts.thresholdMs);
+    const thrMs = Number.isFinite(thrRaw) && thrRaw > 0 ? thrRaw : 20;
+    const preRaw = Number(opts.preWindowSec);
+    const postRaw = Number(opts.postWindowSec);
+    const durRaw = Number(opts.durationSec);
+    const durationSec = Number.isFinite(durRaw) && durRaw > 0 ? Math.trunc(durRaw) : 10;
+    return {
+      serial: String(opts.serial || ''),
+      mode: daemon ? 'daemon' : 'oneshot',
+      dev: String(opts.dev || ''),
+      scope: String(opts.scope || 'tc-egress') || 'tc-egress',
+      uid: uid,
+      proto: String(opts.proto || ''),
+      src_ip: String(opts.srcIp || '').trim(),
+      dst_ip: String(opts.dstIp || '').trim(),
+      src_port: port && portDir === 'src' ? port : 0,
+      dst_port: port && portDir !== 'src' ? port : 0,
+      mark: String(opts.mark || '').trim(),
+      sample: sampleToToken(daemon ? opts.daemonSample : opts.sample),
+      sample_by: String(opts.sampleBy || 'pkt') || 'pkt',
+      duration_sec: daemon ? 0 : durationSec,
+      capture_hdr: opts.captureHdr ? 96 : 0,
+      profile_sendmsg: !daemon && !!opts.profileSendmsg,
+      enable_plugins: !!opts.enablePlugins,
+      allow_partial: !!opts.allowPartial,
+      trigger: daemon ? `sojourn_us>${Math.round(thrMs * 1000)}` : '',
+      pre_window_sec: daemon && Number.isFinite(preRaw) ? Math.max(0, Math.trunc(preRaw)) : 0,
+      post_window_sec: daemon && Number.isFinite(postRaw) ? Math.max(0, Math.trunc(postRaw)) : 0,
+    };
   }
 
   function isRemovedPlugin(p) {
@@ -373,6 +464,8 @@
     parseTriggerThresholdMs,
     parseTcQdiscLine,
     normalizeQdiscs,
+    normalizeInspectPayload,
+    buildCaptureRequest,
     ICON_SLUG_MAP,
     renderPluginIcon,
     normalizeInstallPreview,

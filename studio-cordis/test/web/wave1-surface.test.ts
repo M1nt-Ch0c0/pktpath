@@ -110,7 +110,8 @@ test('applyStaticGates never leaves ssh, kernel-ext, or unregistered gated entri
 test('Wave 1 HTML removes linux-ssh and kernel-ext entries, hides gated chrome, and drops Go-service copy', () => {
   const html = fs.readFileSync(path.join(here, '../../web/index.html'), 'utf8');
   const app = fs.readFileSync(path.join(here, '../../web/app.js'), 'utf8');
-  assert.doesNotMatch(html, /id="paneSSH"|id="selSSH"|data-v="ssh"|Linux SSH|id="pcKernelExtBadge"|id="chkPlugins"/);
+  assert.doesNotMatch(html, /id="paneSSH"|id="selSSH"|data-v="ssh"|Linux SSH|id="pcKernelExtBadge"/);
+  assert.match(html, /id="chkPlugins"/);
   assert.doesNotMatch(html, /真实本地 Go 服务|Go 服务已连接|不等于设备已连接|pktpath-studio\.exe/);
   assert.match(html, /本地 Cordis 服务/);
   assert.match(html, /id="btnTheme"[^>]*hidden/);
@@ -133,7 +134,8 @@ test('Wave 1 HTML removes linux-ssh and kernel-ext entries, hides gated chrome, 
   assert.match(app, /\/api\/health/);
   assert.match(app, /\/api\/capture\/flush/);
   assert.match(app, /data\.unsupported === true/);
-  assert.match(app, /Wave1\.sampleToNumber/);
+  assert.match(app, /Wave1\.buildCaptureRequest/);
+  assert.match(app, /Wave1\.normalizeInspectPayload/);
   assert.match(app, /parseTriggerThresholdMs/);
   assert.match(app, /default_pre_window_sec/);
   assert.doesNotMatch(app, /\/api\/session\/export-pcapng/);
@@ -386,4 +388,161 @@ test('normalizeQdiscs filters multi-device tc lines by selected dev and preserve
   assert.equal(structured[0].parent, 'root');
   assert.equal(structured[0].packets, 42);
   assert.equal(structured[1].parent, '1:10');
+});
+
+test('P0-4 & P1-11: buildCaptureRequest matches legacy Go contract in oneshot and daemon modes', () => {
+  const oneshot = surface.buildCaptureRequest({
+    serial: '5cc2e4eb',
+    daemon: false,
+    dev: 'wlan0',
+    scope: 'tc-egress',
+    uid: 10234,
+    proto: 'tcp',
+    srcIp: ' 10.0.0.2 ',
+    dstIp: ' 1.1.1.1 ',
+    port: '443',
+    portDir: 'dst',
+    mark: ' 0x10/0xff ',
+    sample: '1/10',
+    daemonSample: '1/100',
+    sampleBy: 'flow',
+    durationSec: 30,
+    captureHdr: true,
+    profileSendmsg: true,
+    enablePlugins: true,
+    allowPartial: true,
+  });
+  assert.equal(oneshot.mode, 'oneshot');
+  assert.equal(oneshot.capture_hdr, 96);
+  assert.equal('hdr_bytes' in oneshot, false);
+  assert.equal('port' in oneshot, false);
+  assert.equal(oneshot.src_port, 0);
+  assert.equal(oneshot.dst_port, 443);
+  assert.equal(oneshot.mark, '0x10/0xff');
+  assert.equal(oneshot.src_ip, '10.0.0.2');
+  assert.equal(oneshot.dst_ip, '1.1.1.1');
+  assert.equal(oneshot.sample, '1/10');
+  assert.equal(oneshot.sample_by, 'flow');
+  assert.equal(oneshot.duration_sec, 30);
+  assert.equal(oneshot.uid, 10234);
+  assert.equal(oneshot.profile_sendmsg, true);
+  assert.equal(oneshot.enable_plugins, true);
+  assert.equal(oneshot.allow_partial, true);
+  assert.equal(oneshot.trigger, '');
+  assert.equal(oneshot.pre_window_sec, 0);
+  assert.equal(oneshot.post_window_sec, 0);
+
+  const srcPortDaemon = surface.buildCaptureRequest({
+    serial: '5cc2e4eb',
+    daemon: true,
+    dev: 'wlan0',
+    scope: 'tc-egress',
+    uid: undefined,
+    proto: 'udp',
+    srcIp: '192.168.1.5',
+    dstIp: '',
+    port: '5353',
+    portDir: 'src',
+    mark: '0x20',
+    sample: '1/1',
+    daemonSample: 100,
+    sampleBy: 'pkt',
+    durationSec: 10,
+    captureHdr: false,
+    profileSendmsg: true,
+    enablePlugins: false,
+    allowPartial: false,
+    thresholdMs: 25,
+    preWindowSec: 6,
+    postWindowSec: 3,
+  });
+  assert.equal(srcPortDaemon.mode, 'daemon');
+  assert.equal(srcPortDaemon.uid, -1);
+  assert.equal(srcPortDaemon.capture_hdr, 0);
+  assert.equal(srcPortDaemon.src_port, 5353);
+  assert.equal(srcPortDaemon.dst_port, 0);
+  assert.equal(srcPortDaemon.mark, '0x20');
+  assert.equal(srcPortDaemon.src_ip, '192.168.1.5');
+  assert.equal(srcPortDaemon.sample, '1/100');
+  assert.equal(srcPortDaemon.sample_by, 'pkt');
+  assert.equal(srcPortDaemon.duration_sec, 0);
+  assert.equal(srcPortDaemon.profile_sendmsg, false);
+  assert.equal(srcPortDaemon.enable_plugins, false);
+  assert.equal(srcPortDaemon.allow_partial, false);
+  assert.equal(srcPortDaemon.trigger, 'sojourn_us>25000');
+  assert.equal(srcPortDaemon.pre_window_sec, 6);
+  assert.equal(srcPortDaemon.post_window_sec, 3);
+});
+
+test('P1-11: every advanced filter control in index.html is wired with zero dead controls', () => {
+  const html = fs.readFileSync(path.join(here, '../../web/index.html'), 'utf8');
+  const appJs = fs.readFileSync(path.join(here, '../../web/app.js'), 'utf8');
+  for (const id of [
+    'inpPort', 'selPortDir', 'inpSrcIp', 'inpDstIp', 'inpMark',
+    'selScope', 'selSampleBy', 'chkPlugins', 'chkPartial',
+    'chkCapHdr', 'chkDCapHdr', 'chkSendmsg', 'inpThreshold', 'inpPre', 'inpPost',
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `index.html missing #${id}`);
+    assert.match(appJs, new RegExp(`#${id}`), `app.js does not wire #${id}`);
+  }
+});
+
+test('P1-10: normalizeInspectPayload prioritizes structured inspect and blocks unattributed raw lines from leaking', () => {
+  const structuredResp = {
+    ok: true,
+    serial: '5cc2e4eb',
+    dev: 'wlan0',
+    interfaces: [{ name: 'wlan0', state: 'UP', addrs: ['10.0.0.2/24'] }],
+    inspect: {
+      dev: 'wlan0',
+      kernel_release: '6.1.157-android14-11',
+      qdiscs: [{ kind: 'mq', handle: 0, parent: 0xffffffff }],
+      classes: [{ kind: 'mq', handle: 1, parent: 0 }],
+      adapters: [{ adapter_id: 'l2_tc_egress_core', name: 'TC/Qdisc', enabled: true, missing_reason: '' }],
+    },
+  };
+  const norm = surface.normalizeInspectPayload(structuredResp, 'wlan0');
+  assert.equal(norm.structured, true);
+  assert.equal(norm.rawFallback, false);
+  assert.equal(norm.unscopedRaw, false);
+  assert.equal(norm.dev, 'wlan0');
+
+  // Multi-NIC raw fallback: unattributed line without dev must NOT leak into wlan0
+  const mixedLines = [
+    'qdisc pfifo_fast 0: root refcnt 2',
+    'qdisc noqueue 0: dev lo root refcnt 2',
+    'qdisc mq 0: dev wlan0 root',
+    'qdisc fq_codel 0: dev wlan0 parent :1 limit 10240p',
+  ];
+  const filtered = surface.normalizeQdiscs(mixedLines, 'wlan0');
+  assert.equal(filtered.length, 2);
+  assert.equal(filtered[0].kind, 'mq');
+  assert.equal(filtered[1].kind, 'fq_codel');
+
+  // Unscoped raw fallback (no dev on response, no dev on lines, no structured inspect)
+  const rawOnlyResp = {
+    ok: true,
+    qdiscs: ['qdisc pfifo_fast 0: root refcnt 2'],
+  };
+  const rawNorm = surface.normalizeInspectPayload(rawOnlyResp, 'wlan0');
+  assert.equal(rawNorm.structured, false);
+  assert.equal(rawNorm.rawFallback, true);
+  assert.equal(rawNorm.unscopedRaw, true);
+  const rawQd = surface.normalizeQdiscs(rawNorm.inspect.qdiscs, 'wlan0', { unscopedRaw: rawNorm.unscopedRaw });
+  assert.equal(rawQd.length, 0);
+});
+
+test('P2-11: demo mock inspect and device labels clearly mark simulated data', () => {
+  const demoNorm = surface.normalizeInspectPayload({
+    ok: true,
+    dev: 'wlan0',
+    is_demo: true,
+    inspect: { is_demo: true, dev: 'wlan0', qdiscs: [{ kind: 'htb', handle: 0x10000, parent: 0xffffffff }] },
+  }, 'wlan0');
+  assert.equal(demoNorm.isDemo, true);
+  assert.equal(demoNorm.inspect.is_demo, true);
+
+  const appJs = fs.readFileSync(path.join(here, '../../web/app.js'), 'utf8');
+  assert.match(appJs, /Pixel 8（模拟演示）/);
+  assert.match(appJs, /模拟演示拓扑数据（非真实 Android 设备）/);
 });

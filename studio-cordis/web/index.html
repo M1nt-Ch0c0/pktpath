@@ -186,7 +186,8 @@
               <select id="selSampleBy"><option value="pkt">按包</option><option value="flow">按流 (5 元组)</option></select></label>
           </div>
           <div class="plugin-row" style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap">
-            <span class="badge badge-muted" id="pluginCountBadge">0 个已启用</span>
+            <label class="check" style="margin:0"><input type="checkbox" id="chkPlugins" checked><span>启用外部插件</span></label>
+            <span class="badge badge-muted" id="pluginCountBadge" title="点击「管理插件」加载 JSON 插件并查看能力">0 个已启用</span>
             <button type="button" class="link-btn" id="btnManagePluginsInline">🔌 管理插件</button>
           </div>
           <label class="check"><input type="checkbox" id="chkPartial" checked><span>允许部分探针缺失 (allow partial)</span></label>
