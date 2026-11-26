@@ -82,6 +82,18 @@ export class CaptureBadRequestError extends Error {
   }
 }
 
+export class CaptureStartFailedError extends Error {
+  readonly statusCode = 500;
+  readonly captureId: string;
+  readonly logLines: string[];
+
+  constructor(msg: string, captureId: string, logLines: string[]) {
+    super(msg);
+    this.captureId = captureId;
+    this.logLines = logLines;
+  }
+}
+
 function makeCaptureId(mode: 'oneshot' | 'daemon'): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -113,6 +125,8 @@ export function uniquePath(basePath: string): string {
 export class CaptureController {
   private readonly host: HostServices;
   private lockChain: Promise<unknown> = Promise.resolve();
+  private monitorTimer: ReturnType<typeof setInterval> | null = null;
+  private monitorTickBusy = false;
 
   private state: CaptureStateKind = 'idle';
   private captureId?: string;
@@ -145,7 +159,50 @@ export class CaptureController {
     return next;
   }
 
+  private stopMonitor(): void {
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = null;
+    }
+  }
+
+  private startMonitor(adb: AdbTransportService, expectedId: string): void {
+    this.stopMonitor();
+    const timer = setInterval(() => {
+      if (this.monitorTickBusy) return;
+      if (this.state !== 'running' || this.captureId !== expectedId) {
+        this.stopMonitor();
+        return;
+      }
+      this.monitorTickBusy = true;
+      void this.runExclusive(async () => {
+        if (this.state !== 'running' || this.captureId !== expectedId || !this.serial || !this.run) {
+          this.stopMonitor();
+          return;
+        }
+        try {
+          const p = await adb.client.poll(this.serial, this.run, 60);
+          if (p.lines.length > 0) this.logTail = p.lines;
+          if (!p.alive) {
+            this.stopMonitor();
+            this.selfExited = true;
+            await this.finishPull(adb);
+          }
+        } catch {
+          // Transient poll error: keep monitoring on next tick (mirrors Go capture.go monitor).
+        }
+      }).finally(() => {
+        this.monitorTickBusy = false;
+      });
+    }, 1000);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    this.monitorTimer = timer;
+  }
+
   private async finishPull(adb: AdbTransportService): Promise<void> {
+    this.stopMonitor();
     if (!this.serial || !this.run || !this.captureId) return;
     const activeRun = this.run;
     const activeSerial = this.serial;
@@ -247,10 +304,8 @@ export class CaptureController {
         throw new CaptureBadRequestError('serial is required (no connected ADB device found)');
       }
 
-      // Ensure agent is deployed when bundled collector exists (matching legacy Go EnsureReady).
-      if (adb.collectorPath) {
-        await adb.ensureReady(serial).catch(() => {});
-      }
+      // Always ensure device root + collector version match before start (mirrors Go capture.go:237).
+      await adb.ensureReady(serial);
 
       // First normalize/validate without plugin_dir to catch invalid args cleanly as HTTP 400.
       let normalized;
@@ -293,6 +348,30 @@ export class CaptureController {
       this.selfExited = false;
       this.lastError = undefined;
       this.logTail = [];
+
+      // Catch immediate failures (bad args, BPF load error) synchronously (mirrors Go capture.go:286-309).
+      await new Promise((r) => setTimeout(r, 900));
+      const initialPoll = await adb.client.poll(serial, run, 60).catch(() => ({ alive: true, lines: [] as string[] }));
+      if (initialPoll.lines.length > 0) {
+        this.logTail = initialPoll.lines;
+      }
+      if (!initialPoll.alive) {
+        const hasManifest = await adb.client.remoteExists(serial, `${run.outDir}/manifest.json`).catch(() => false);
+        if (!hasManifest) {
+          const lastMsg = this.logTail.length > 0 ? this.logTail[this.logTail.length - 1] : '';
+          const msg = lastMsg
+            ? `pktpath record exited immediately: ${lastMsg}`
+            : 'pktpath record exited immediately';
+          this.state = 'error';
+          this.lastError = msg;
+          this.endedAt = Date.now();
+          void adb.client.cleanupRun(serial, run).catch(() => false);
+          throw new CaptureStartFailedError(msg, id, [...this.logTail]);
+        }
+      }
+
+      // Background monitor polls every 1s and auto-finalizes timed oneshot runs on self-exit.
+      this.startMonitor(adb, id);
 
       return {
         ok: true,
@@ -448,6 +527,7 @@ export class CaptureController {
         return false;
       };
 
+      this.stopMonitor();
       // Check if it already self-exited before sending INT.
       const preCheck = await adb.client.poll(this.serial, this.run).catch(() => ({ alive: false, lines: [] }));
       if (preCheck.lines.length > 0) this.logTail = preCheck.lines;
@@ -499,6 +579,7 @@ export class CaptureController {
       if (this.mode !== targetMode || this.state !== 'running' || !this.serial || !this.run) {
         return;
       }
+      this.stopMonitor();
       const adb = this.host.getService<AdbTransportService>('transport.adb');
       if (adb) {
         await adb.client.signal(this.serial, this.run.pid, 'TERM').catch(() => {});

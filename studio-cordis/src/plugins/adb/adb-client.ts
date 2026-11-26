@@ -8,7 +8,7 @@ export const REMOTE_AGENT = `${REMOTE_DIR}/pktpath`;
 export const REMOTE_TMP = '/data/local/tmp/pktpath_tmp';
 export const REMOTE_PLUGINS_DIR = `${REMOTE_DIR}/plugins`;
 
-export type RootMode = '' | 'adbd-root' | 'adb-root' | 'su' | 'none';
+export type RootMode = '' | 'adbd-root' | 'adb-root' | 'su' | 'su0' | 'none';
 
 export interface AdbResult {
   stdout: string;
@@ -303,6 +303,9 @@ export function wrapPriv(mode: RootMode, command: string): string {
   if (mode === 'su') {
     return `su -c ${shQuote(command)}`;
   }
+  if (mode === 'su0') {
+    return `su 0 sh -c ${shQuote(command)}`;
+  }
   return command;
 }
 
@@ -422,8 +425,8 @@ export class AdbClient {
 
     const rSu0 = await this.shell(serial, 'su 0 id -u', 15_000).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
     if (firstLineIsZero(rSu0.stdout)) {
-      this.rootCache.set(serial, 'su');
-      return 'su';
+      this.rootCache.set(serial, 'su0');
+      return 'su0';
     }
 
     this.rootCache.set(serial, 'none');

@@ -417,27 +417,25 @@ describe('Wave 1+2 ADB built-in plugins (mock adb unit tests, NOT real device/BP
   it('checks remote outDir before pull and surfaces collector log_tail when remote directory is missing', async () => {
     const { root, logFile, app } = await createTestHarness({ missingOutDir: true });
     try {
-      const startRes = await fetch(`${app.url}/api/capture/start`, {
+      const startResp = await fetch(`${app.url}/api/capture/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serial: 'MOCKSER001', mode: 'oneshot', dev: 'wlan0', duration_sec: 10 }),
-      }).then((r) => r.json()) as { ok: boolean };
-      assert.equal(startRes.ok, true);
-
-      const stopResp = await fetch(`${app.url}/api/capture/stop`, { method: 'POST', body: '{}' });
-      assert.equal(stopResp.status, 400);
-      const stopBody = await stopResp.json() as {
+      });
+      assert.equal(startResp.status, 500);
+      const startRes = await startResp.json() as {
         ok: boolean;
-        status: string;
         error?: string;
+        capture_id?: string;
         log_tail?: string[];
+        log_lines?: string[];
       };
-      assert.equal(stopBody.ok, false);
-      assert.equal(stopBody.status, 'error');
-      assert.match(stopBody.error ?? '', /remote run directory missing/i);
-      assert.match(stopBody.error ?? '', /bpf_object__load failed/);
-      assert.ok(Array.isArray(stopBody.log_tail) && stopBody.log_tail.length > 0);
-      assert.ok(stopBody.log_tail.some((line) => line.includes('bpf_object__load failed')));
+      assert.equal(startRes.ok, false);
+      assert.match(startRes.error ?? '', /exited immediately/i);
+      assert.match(startRes.error ?? '', /bpf_object__load failed/);
+      assert.ok(startRes.capture_id && startRes.capture_id.length > 0);
+      assert.ok(Array.isArray(startRes.log_tail) && startRes.log_tail.some((line) => line.includes('bpf_object__load failed')));
+      assert.ok(Array.isArray(startRes.log_lines) && startRes.log_lines.some((line) => line.includes('bpf_object__load failed')));
 
       const stBody = await fetch(`${app.url}/api/capture/status`).then((r) => r.json()) as {
         status: string;

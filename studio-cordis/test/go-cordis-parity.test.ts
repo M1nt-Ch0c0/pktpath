@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { CordisHost } from '../src/kernel/host.ts';
-import { parseIPBrAddr, resolveAdbBinary, REMOTE_PLUGINS_DIR } from '../src/plugins/adb/adb-client.ts';
+import { AdbClient, parseIPBrAddr, resolveAdbBinary, REMOTE_PLUGINS_DIR, wrapPriv } from '../src/plugins/adb/adb-client.ts';
 import { uniquePath } from '../src/plugins/adb/capture-controller.ts';
 import type { EbpfCollectorService } from '../src/plugins/adb/ebpf-tc.ts';
 import { registerWave1Builtins } from '../src/plugins/register.ts';
@@ -563,6 +563,254 @@ describe('Go vs Cordis Backend Parity (P0-1..3, P1-1..4, P2-1..4)', () => {
       if (origEnv.ANDROID_SDK_ROOT === undefined) delete process.env.ANDROID_SDK_ROOT;
       else process.env.ANDROID_SDK_ROOT = origEnv.ANDROID_SDK_ROOT;
       process.env.PATH = origEnv.PATH;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('Yan cross-audit fixes (Y-AUDIT-01, Y-AUDIT-02, Y-AUDIT-04)', () => {
+  it('Y-AUDIT-04: wrapPriv and ensureRoot split su0 mode when su -c fails and su 0 id -u succeeds', async () => {
+    assert.equal(wrapPriv('su', 'id -u'), "su -c 'id -u'");
+    assert.equal(wrapPriv('su0', 'id -u'), "su 0 sh -c 'id -u'");
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-su0-'));
+    try {
+      const logFile = path.join(root, 'su0.log');
+      const mockAdb = path.join(root, 'adb');
+      fs.writeFileSync(
+        mockAdb,
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          `LOG="${logFile}"`,
+          'echo "$*" >> "$LOG"',
+          'if [ "$1" = "start-server" ]; then exit 0; fi',
+          'if [ "$1" = "-s" ]; then shift 2; fi',
+          'case "$1" in',
+          '  root)',
+          '    echo "adbd cannot run as root in production builds"',
+          '    exit 0',
+          '    ;;',
+          '  shell)',
+          '    shift',
+          '    CMD="$*"',
+          '    if [ "$CMD" = "id -u" ]; then echo "2000"; exit 0; fi',
+          '    if [[ "$CMD" == "su -c "* ]]; then echo "su: invalid option -- c" >&2; exit 1; fi',
+          '    if [ "$CMD" = "su 0 id -u" ]; then echo "0"; exit 0; fi',
+          '    if [[ "$CMD" == "su 0 sh -c "* ]]; then echo "SU0_OK"; exit 0; fi',
+          '    exit 1',
+          '    ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+
+      const client = new AdbClient(mockAdb);
+      const mode = await client.ensureRoot('SU0SER');
+      assert.equal(mode, 'su0');
+      assert.equal(client.rootMode('SU0SER'), 'su0');
+
+      const res = await client.priv('SU0SER', 'echo hello');
+      assert.equal(res.stdout.trim(), 'SU0_OK');
+      const log = fs.readFileSync(logFile, 'utf8');
+      assert.ok(log.includes("su 0 sh -c 'echo hello'"), `expected su 0 sh -c in log, got: ${log}`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('Y-AUDIT-01: POST /api/capture/start calls ensureReady automatically and fails cleanly when unrooted', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-yaudit01-'));
+    try {
+      const mockAdb = path.join(root, 'adb');
+      fs.writeFileSync(
+        mockAdb,
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'if [ "$1" = "start-server" ]; then exit 0; fi',
+          'if [ "$1" = "devices" ]; then echo "List of devices attached"; echo "NOROOT01 device product:test model:NoRoot"; exit 0; fi',
+          'if [ "$1" = "-s" ]; then shift 2; fi',
+          'case "$1" in',
+          '  root) echo "adbd cannot run as root in production builds"; exit 0 ;;',
+          '  shell)',
+          '    shift; CMD="$*"',
+          '    if [ "$CMD" = "id -u" ]; then echo "2000"; exit 0; fi',
+          '    if [[ "$CMD" == "su "* ]]; then exit 1; fi',
+          '    exit 0',
+          '    ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+
+      const collectorDir = path.join(root, 'collectors', 'android-arm64');
+      fs.mkdirSync(collectorDir, { recursive: true });
+      fs.writeFileSync(path.join(collectorDir, 'pktpath'), 'fake-elf');
+
+      const webDir = path.join(root, 'web');
+      fs.mkdirSync(webDir, { recursive: true });
+      fs.writeFileSync(path.join(webDir, 'index.html'), '<html></html>');
+      const host = new CordisHost({
+        appDir: path.join(root, 'app'),
+        sessionsRoot: path.join(root, 'sessions'),
+        pluginsDir: path.join(root, 'plugins'),
+        exportsDir: path.join(root, 'exports'),
+        collectorsDir: path.join(root, 'collectors'),
+        webDir,
+      });
+      registerWave1Builtins(host);
+      await host.start();
+      await host.updateConfig('builtin.transport.android-adb', { adb_path: mockAdb });
+      const app = await startStudioApp({ host, port: 0, hostAddr: '127.0.0.1' });
+      try {
+        const r = await fetch(`${app.url}/api/capture/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serial: 'NOROOT01', mode: 'oneshot', dev: 'wlan0', duration_sec: 5 }),
+        });
+        assert.equal(r.status, 400);
+        const body = await r.json() as { ok: boolean; error: string };
+        assert.equal(body.ok, false);
+        assert.match(body.error, /not rooted/i);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('Y-AUDIT-02: synchronous 900ms immediate-exit error surfaces log_lines, and background monitor auto-pulls timed oneshot', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-yaudit02-'));
+    try {
+      const stateDir = path.join(root, 'state');
+      fs.mkdirSync(stateDir, { recursive: true });
+      const modeFile = path.join(stateDir, 'mode.txt');
+      const pollCountFile = path.join(stateDir, 'poll.count');
+      const mockAdb = path.join(root, 'adb');
+      fs.writeFileSync(
+        mockAdb,
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          `MODE_FILE="${modeFile}"`,
+          `POLL_FILE="${pollCountFile}"`,
+          'if [ "$1" = "start-server" ]; then exit 0; fi',
+          'if [ "$1" = "devices" ]; then echo "List of devices attached"; echo "MON01 device product:test model:MonPhone"; exit 0; fi',
+          'if [ "$1" = "-s" ]; then shift 2; fi',
+          'case "$1" in',
+          '  push) exit 0 ;;',
+          '  pull)',
+          '    SRC="$2"; DST="$3"',
+          '    if [[ "$SRC" == *.log ]]; then echo "record done" > "$DST"; exit 0; fi',
+          '    BASE=$(basename "$SRC"); mkdir -p "$DST/$BASE"',
+          '    echo "{\"schema_version\":2}" > "$DST/$BASE/manifest.json"',
+          '    exit 0',
+          '    ;;',
+          '  shell)',
+          '    shift; CMD="$*"',
+          '    if [ "$CMD" = "id -u" ]; then echo "0"; exit 0; fi',
+          '    if [[ "$CMD" == *"sha256sum"* ]]; then echo "eb85480c61a2ceb4d48255572a9a779b2005498110dd945eeedfe226d343f1c3  /data/local/tmp/pktpath"; exit 0; fi',
+          '    if [[ "$CMD" == *"@@model="* ]]; then printf "@@model=MonPhone\n@@product=test\n@@android=15\n@@kernel=6.6\n@@arch=aarch64\n"; exit 0; fi',
+          '    if [[ "$CMD" == *"@@pid="* ]]; then echo "0" > "$POLL_FILE"; echo "@@pid=99123"; exit 0; fi',
+          '    if [[ "$CMD" == *"pktpath"* && "$CMD" == *"record"* && "$CMD" == *"@@pid="* ]]; then',
+          '      echo "0" > "$POLL_FILE"',
+          '      echo "@@pid=99123"',
+          '      exit 0',
+          '    fi',
+          '    if [[ "$CMD" == *"/proc/99123/comm"* ]]; then',
+          '      M=$(cat "$MODE_FILE")',
+          '      if [ "$M" = "crash" ]; then',
+          '        echo "error: failed to attach tc hook on wlan0: EPERM"',
+          '        echo "@@comm="',
+          '        echo "@@stat="',
+          '        exit 0',
+          '      fi',
+          '      C=$(cat "$POLL_FILE" 2>/dev/null || echo 0)',
+          '      C=$((C + 1)); echo "$C" > "$POLL_FILE"',
+          '      if [ "$C" -le 1 ]; then',
+          '        echo "recording on wlan0..."',
+          '        echo "@@comm=pktpath"',
+          '        echo "@@stat=S"',
+          '      else',
+          '        echo "duration elapsed, wrote manifest.json"',
+          '        echo "@@comm="',
+          '        echo "@@stat="',
+          '      fi',
+          '      exit 0',
+          '    fi',
+          '    if [[ "$CMD" == *"@@exists=1"* ]]; then',
+          '      M=$(cat "$MODE_FILE")',
+          '      if [ "$M" = "crash" ] && [[ "$CMD" == *"manifest.json"* ]]; then echo "@@exists=0"; exit 0; fi',
+          '      echo "@@exists=1"; exit 0',
+          '    fi',
+          '    exit 0',
+          '    ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+
+      const collectorDir = path.join(root, 'collectors', 'android-arm64');
+      fs.mkdirSync(collectorDir, { recursive: true });
+      fs.writeFileSync(path.join(collectorDir, 'pktpath'), 'fake-elf');
+
+      const webDir = path.join(root, 'web');
+      fs.mkdirSync(webDir, { recursive: true });
+      fs.writeFileSync(path.join(webDir, 'index.html'), '<html></html>');
+      const host = new CordisHost({
+        appDir: path.join(root, 'app'),
+        sessionsRoot: path.join(root, 'sessions'),
+        pluginsDir: path.join(root, 'plugins'),
+        exportsDir: path.join(root, 'exports'),
+        collectorsDir: path.join(root, 'collectors'),
+        webDir,
+      });
+      registerWave1Builtins(host);
+      await host.start();
+      await host.updateConfig('builtin.transport.android-adb', { adb_path: mockAdb });
+      const app = await startStudioApp({ host, port: 0, hostAddr: '127.0.0.1' });
+      try {
+        // Case A: immediate crash (<900ms) without manifest.json -> synchronous 500 with log_lines
+        fs.writeFileSync(modeFile, 'crash');
+        const crashRes = await fetch(`${app.url}/api/capture/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serial: 'MON01', mode: 'oneshot', dev: 'wlan0', duration_sec: 10 }),
+        });
+        assert.equal(crashRes.status, 500);
+        const crashBody = await crashRes.json() as { ok: boolean; error: string; capture_id?: string; log_lines?: string[] };
+        assert.equal(crashBody.ok, false);
+        assert.match(crashBody.error, /exited immediately.*EPERM/);
+        assert.ok(crashBody.capture_id && crashBody.capture_id.length > 0);
+        assert.ok(Array.isArray(crashBody.log_lines) && crashBody.log_lines.some((l) => l.includes('EPERM')));
+
+        // Case B: survives 900ms check, then self-exits -> background monitor auto-pulls without frontend /status polling
+        fs.writeFileSync(modeFile, 'oneshot');
+        const okRes = await fetch(`${app.url}/api/capture/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serial: 'MON01', mode: 'oneshot', dev: 'wlan0', duration_sec: 1 }),
+        });
+        assert.equal(okRes.status, 200);
+
+        // Wait 1.6s WITHOUT calling /api/capture/status; background monitor should have auto-pulled already!
+        await new Promise((r) => setTimeout(r, 1600));
+        const sessions = fs.readdirSync(path.join(root, 'sessions')).filter((n) => !n.startsWith('.'));
+        assert.equal(sessions.length, 1, 'background monitor must auto-pull session without frontend /status polling');
+
+        const st = await fetch(`${app.url}/api/capture/status`).then((r) => r.json()) as { phase: string; last_session_id: string };
+        assert.equal(st.phase, 'done');
+        assert.ok(st.last_session_id.length > 0);
+      } finally {
+        await app.close();
+      }
+    } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });

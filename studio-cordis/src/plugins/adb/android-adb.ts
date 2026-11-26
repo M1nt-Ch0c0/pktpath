@@ -186,7 +186,6 @@ export const androidAdbPlugin: BuiltinPlugin = {
     };
 
     const ensureReady = async (serial: string): Promise<void> => {
-      if (!collectorPath) return;
       const wantSha = getWantSha();
       const st = devState.get(serial);
       if (st?.agentSha256 && wantSha && st.agentSha256 === wantSha && client.rootMode(serial)) {
@@ -252,7 +251,7 @@ export const androidAdbPlugin: BuiltinPlugin = {
 
             const cached = devState.get(e.serial);
             let gotSha = (p.agentSha256 ?? '').toLowerCase();
-            if (!gotSha && cached?.agentSha256 && mode === 'su') {
+            if (!gotSha && cached?.agentSha256 && (mode === 'su' || mode === 'su0')) {
               gotSha = cached.agentSha256;
             }
             entry.agent_ready = Boolean(wantSha && gotSha && gotSha === wantSha);

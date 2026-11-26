@@ -4,6 +4,7 @@ import type { AdbTransportService } from '../plugins/adb/android-adb.ts';
 import {
   CaptureBadRequestError,
   CaptureConflictError,
+  CaptureStartFailedError,
   type CaptureController,
 } from '../plugins/adb/capture-controller.ts';
 import type { DaemonCaptureService } from '../plugins/adb/daemon.ts';
@@ -205,6 +206,16 @@ export async function handleAdbRoute(
         sendJson(res, 200, out);
       }
     } catch (err) {
+      if (err instanceof CaptureStartFailedError) {
+        sendJson(res, err.statusCode, {
+          ok: false,
+          error: err.message,
+          capture_id: err.captureId,
+          log_lines: err.logLines,
+          log_tail: err.logLines,
+        });
+        return true;
+      }
       sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
     return true;
