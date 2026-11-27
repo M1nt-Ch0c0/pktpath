@@ -35,6 +35,8 @@ const DEVICE_MAIN_C_RECORD_FLAGS = new Set([
   '--mem-budget',
   '--disk-budget',
   '--plugin-dir',
+  '--probe-groups',
+  '--preset-label',
 ]);
 
 function assertOnlyValidDeviceFlags(args: string[]): void {
@@ -257,6 +259,8 @@ describe('Go vs Cordis Backend Parity (P0-1..3, P1-1..4, P2-1..4)', () => {
         '--scope', 'tc-egress',
         '--duration', '15s',
         '--capture-hdr', '96',
+        '--probe-groups', 'core_drop,egress_tc,sock_app',
+        '--preset-label', 'egress',
       ]);
       assert.equal(defaultUiArgs.includes('--hdr-bytes'), false);
 
@@ -312,6 +316,8 @@ describe('Go vs Cordis Backend Parity (P0-1..3, P1-1..4, P2-1..4)', () => {
         '--mem-budget', '64M',
         '--disk-budget', '256M',
         '--plugin-dir', REMOTE_PLUGINS_DIR,
+        '--probe-groups', 'core_drop,egress_tc,sock_app',
+        '--preset-label', 'egress',
       ]);
       assert.equal(fullArgs.includes('--port'), false);
       assert.equal(fullArgs.includes('--profile-sendmsg'), false);

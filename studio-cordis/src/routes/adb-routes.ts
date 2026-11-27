@@ -160,7 +160,31 @@ export async function handleAdbRoute(
     return true;
   }
 
-  if (method === 'GET' && pathname === '/api/device/apps') {
+  const deviceSelfCheckMatch = method === 'GET' ? pathname.match(/^\/api\/devices\/([^/]+)\/self-check$/) : null;
+  if (method === 'GET' && (pathname === '/api/device/self-check' || deviceSelfCheckMatch)) {
+    const adb = host.getService<AdbTransportService>('transport.adb');
+    if (!adb) {
+      sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });
+      return true;
+    }
+    const rawSerial = deviceSelfCheckMatch
+      ? decodeURIComponent(deviceSelfCheckMatch[1])
+      : (url.searchParams.get('serial') ?? '');
+    const serial = await resolveSerial(adb, rawSerial);
+    if (!serial) {
+      sendJson(res, 400, { ok: false, error: 'serial query parameter is required' });
+      return true;
+    }
+    try {
+      const report = await adb.client.selfCheckDevice(serial);
+      sendJson(res, 200, { ok: true, ...report });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+    if (method === 'GET' && pathname === '/api/device/apps') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
       sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });

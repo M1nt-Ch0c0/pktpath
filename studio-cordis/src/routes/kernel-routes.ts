@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CordisHost } from '../kernel/host.ts';
+import { discoverExternalPlugins, exportExternalPackageZip } from '../kernel/external-loader.ts';
 import { readJsonBody, sendJson, serveStaticFile } from '../server/http-utils.ts';
 
 export async function handleKernelRoute(
@@ -130,6 +133,44 @@ export async function handleKernelRoute(
     }
     const out = await host.uninstallExternal(id);
     sendJson(res, out.ok ? 200 : 400, out);
+    return true;
+  }
+
+  const pluginExportMatch = method === 'POST' ? pathname.match(/^\/api\/plugins\/([^/]+)\/export$/) : null;
+  if (pathname === '/api/kernel/plugins/export' || pluginExportMatch) {
+    const body = await readJsonBody(req).catch(() => ({} as Record<string, unknown>));
+    const id = pluginExportMatch
+      ? decodeURIComponent(pluginExportMatch[1]).trim()
+      : (typeof body.id === 'string' ? body.id.trim() : '');
+    const requestedOutPath = typeof body.out_path === 'string' ? body.out_path.trim() : '';
+    if (!id) {
+      sendJson(res, 400, { ok: false, error: 'id is required' });
+      return true;
+    }
+    try {
+      const { loaded } = discoverExternalPlugins(host.paths.pluginsDir);
+      const ext = loaded.find((item) => item.manifest.id === id);
+      if (!ext) {
+        sendJson(res, 404, { ok: false, error: `external plugin not found: ${id}` });
+        return true;
+      }
+      const safeId = id.replace(/[^a-zA-Z0-9._-]+/g, '-');
+      const safeVer = (ext.manifest.version || '0.0.0').replace(/[^a-zA-Z0-9._-]+/g, '-');
+      const outPath = requestedOutPath || path.join(host.paths.exportsDir, `${safeId}-${safeVer}.zip`);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      const exported = exportExternalPackageZip(ext.dir, outPath);
+      sendJson(res, 200, {
+        ok: true,
+        id,
+        path: exported.outPath,
+        file_count: exported.fileCount,
+        size_bytes: exported.bytes,
+        signature_status: exported.signed ? 'verified' : 'unsigned',
+        key_fingerprint: exported.keyFingerprint ?? null,
+      });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
     return true;
   }
 

@@ -1,0 +1,67 @@
+{
+  "id": "community.example-bpf-probe",
+  "name": "示例内核探针插件",
+  "version": "0.1.0",
+  "author": "Your Name",
+  "description": "自带预编译 eBPF 探针与离线分析器的独立 PktPath 插件模板。",
+  "capabilities": ["collector.bpf-probes", "analyzer"],
+  "tags": ["ebpf", "template"],
+  "entrypoint": {
+    "module": "index.mjs"
+  },
+  "schema": {
+    "groups": [
+      {
+        "id": "probes",
+        "label": "探针开关",
+        "collapsible": false
+      }
+    ],
+    "presets": [
+      {
+        "id": "default",
+        "label": "默认启用",
+        "badge": "推荐",
+        "values": {
+          "probe_ingress_rx": true
+        }
+      }
+    ],
+    "fields": [
+      {
+        "key": "probe_ingress_rx",
+        "label": "收包入口示例探针",
+        "type": "boolean",
+        "default": true,
+        "group": "probes",
+        "description": "开启后在采集时下发本插件的收包入口探针。"
+      }
+    ]
+  },
+  "analyzers": [
+    {
+      "id": "example.bpf.summary",
+      "name": "示例探针统计",
+      "description": "汇总本插件探针在会话中采集到的事件数量。"
+    }
+  ],
+  "kernel_probes": {
+    "abi_version": 1,
+    "objects": {
+      "arm64": {
+        "path": "bpf/arm64/example_probe.bpf.o",
+        "sha256": "REPLACE_WITH_64_HEX_SHA256_AFTER_BUILD"
+      }
+    },
+    "hooks": [
+      {
+        "id": "ext.example.netif_receive_skb",
+        "group": "ingress_rx",
+        "sec": "tp_netif_receive_skb",
+        "type": "tracepoint",
+        "target": "net:netif_receive_skb",
+        "stage": "rx_ingress"
+      }
+    ]
+  }
+}

@@ -13,10 +13,55 @@ export interface ConfigField {
   min?: number;
   max?: number;
   options?: Array<{ value: string; label: string }>;
+  group?: string;
+  readOnly?: boolean;
+  badge?: string;
+}
+
+export interface ConfigPreset {
+  id: string;
+  label: string;
+  description?: string;
+  badge?: string;
+  values: Record<string, unknown>;
+}
+
+export interface ConfigGroup {
+  id: string;
+  label: string;
+  description?: string;
+  collapsible?: boolean;
+  defaultCollapsed?: boolean;
 }
 
 export interface ConfigSchema {
   fields: ConfigField[];
+  presets?: ConfigPreset[];
+  groups?: ConfigGroup[];
+}
+
+export type KernelProbeArch = 'arm64' | 'x86_64';
+
+export type KernelProbeHookType = 'tracepoint' | 'fentry' | 'fexit' | 'kprobe' | 'kretprobe' | 'raw_tp';
+
+export interface KernelProbeObjectDecl {
+  path: string;
+  sha256: string;
+}
+
+export interface KernelProbeHookDecl {
+  id: string;
+  group: string;
+  sec: string;
+  type: KernelProbeHookType;
+  target: string;
+  stage?: string;
+}
+
+export interface KernelProbesManifest {
+  abi_version: 1;
+  objects: Partial<Record<KernelProbeArch, KernelProbeObjectDecl>>;
+  hooks: KernelProbeHookDecl[];
 }
 
 export interface PluginMeta {
