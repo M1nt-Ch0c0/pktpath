@@ -226,7 +226,7 @@ func TestLauncherCrashBeforeReady(t *testing.T) {
 	l := newTestLauncher(p, flagsPath)
 	l.ReadyFor = 2 * time.Second
 	err := l.Start()
-	if err == nil || !strings.Contains(err.Error(), "就绪前已退出") {
+	if err == nil || !strings.Contains(err.Error(), "启动失败并已退出") {
 		t.Fatalf("expected early-exit error, got %v", err)
 	}
 	if _, err := os.Stat(p.RuntimePath); err == nil {
@@ -280,7 +280,7 @@ func TestLauncherMissingNodeDoesNotUsePATH(t *testing.T) {
 	// PATH definitely has node (we used it), but the launcher must refuse.
 	l := newTestLauncher(p, "")
 	err := l.Start()
-	if err == nil || !strings.Contains(err.Error(), "不会回退到 PATH") {
+	if err == nil || !strings.Contains(err.Error(), "内置运行环境") {
 		t.Fatalf("expected fail-closed PATH message, got %v", err)
 	}
 }

@@ -83,7 +83,7 @@ func TestValidateInstallFailClosed(t *testing.T) {
 		t.Fatal("expected missing-file error")
 	}
 	le, ok := err.(*LaunchError)
-	if !ok || !strings.Contains(le.Message, "node\\node.exe") {
+	if !ok || le.Code != "missing" || !strings.Contains(le.Message, "内置运行环境") {
 		t.Fatalf("expected node missing message, got %#v", err)
 	}
 
@@ -92,11 +92,11 @@ func TestValidateInstallFailClosed(t *testing.T) {
 		rel string
 		msg string
 	}{
-		{RelNodeExe, "node\\node.exe"},
-		{RelEntry, "main.ts"},
-		{RelWebIndex, "index.html"},
-		{RelCordisCore, "@cordisjs\\core"},
-		{RelAndroidCollector, "android-arm64"},
+		{RelNodeExe, "内置运行环境"},
+		{RelEntry, "主程序文件"},
+		{RelWebIndex, "界面文件"},
+		{RelCordisCore, "核心组件"},
+		{RelAndroidCollector, "手机采集组件"},
 	}
 	for i, step := range order {
 		if err := ValidateInstall(p, true); err == nil || !strings.Contains(err.Error(), step.msg) {
@@ -116,7 +116,7 @@ func TestValidateInstallFailClosed(t *testing.T) {
 
 	// Wrong hash must fail when skip is false, and must not use PATH.
 	err = ValidateInstall(p, false)
-	if err == nil || !strings.Contains(err.Error(), "SHA256") {
+	if err == nil || !strings.Contains(err.Error(), "已损坏或被修改") {
 		t.Fatalf("expected hash mismatch, got %v", err)
 	}
 

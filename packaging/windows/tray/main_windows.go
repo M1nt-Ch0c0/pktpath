@@ -19,7 +19,7 @@ func runWindowsTray() int {
 	// Single-instance mutex keyed by the data directory.
 	hMutex, already, err := createMutex(MutexName(host.paths.AppDir))
 	if err != nil {
-		messageBox(0, "无法创建单实例锁，启动中止。\n"+err.Error(), "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+		messageBox(0, "无法启动 PktPath Studio，请关闭后重试。", "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 		return 1
 	}
 	defer closeHandle(hMutex)
@@ -43,12 +43,12 @@ func runWindowsTray() int {
 	host.hInst = getModuleHandle()
 	host.hIcon = loadAppIcon(host.hInst)
 	if err := registerClass(TrayWindowClass, trayWndProc, host.hInst, host.hIcon); err != nil {
-		messageBox(0, "无法注册托盘窗口类。\n"+err.Error(), "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+		messageBox(0, "无法在系统托盘创建图标，请关闭后重试或重启电脑。", "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 		return 1
 	}
 	hwnd, err := createHiddenWindow(TrayWindowClass, "PktPath Studio", host.hInst)
 	if err != nil {
-		messageBox(0, "无法创建托盘窗口。\n"+err.Error(), "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+		messageBox(0, "无法在系统托盘创建图标，请关闭后重试或重启电脑。", "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 		return 1
 	}
 	host.hwnd = hwnd
