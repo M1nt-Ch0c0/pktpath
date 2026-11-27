@@ -140,7 +140,7 @@ func (l *Launcher) startLocked() error {
 	if err := cmd.Start(); err != nil {
 		outFile.Close()
 		errFile.Close()
-		return &LaunchError{Code: "spawn", Message: "无法启动随包 Node（node\\node.exe），拒绝启动，不会回退到 PATH。"}
+		return &LaunchError{Code: "spawn", Message: "无法启动内置运行环境，请确认杀毒软件未拦截，或重新运行 PktPath Studio 安装程序修复。"}
 	}
 
 	l.mu.Lock()
@@ -218,12 +218,12 @@ func (l *Launcher) startLocked() error {
 		if early {
 			return &LaunchError{
 				Code:    "exited",
-				Message: "Studio 在就绪前已退出。请查看日志：" + l.Paths.OutLog,
+				Message: "PktPath Studio 启动失败并已退出，请打开日志查看原因，或重新运行安装程序修复。",
 			}
 		}
 		return &LaunchError{
 			Code:    "timeout",
-			Message: "等待 Studio 就绪超时，已停止后台进程。请查看日志：" + l.Paths.OutLog,
+			Message: "PktPath Studio 启动超时，已停止后台服务。请稍后重试或查看日志。",
 		}
 	}
 

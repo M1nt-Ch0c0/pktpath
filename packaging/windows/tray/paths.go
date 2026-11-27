@@ -72,11 +72,11 @@ type missingFile struct {
 }
 
 var requiredFiles = []missingFile{
-	{RelNodeExe, "缺少随包 Node（node\\node.exe），拒绝启动，不会回退到 PATH。"},
-	{RelEntry, "缺少 Studio 入口（studio-cordis\\src\\main.ts），拒绝启动。"},
-	{RelWebIndex, "缺少前端页面（studio-cordis\\web\\index.html），拒绝启动。"},
-	{RelCordisCore, "缺少 @cordisjs/core（studio-cordis\\node_modules\\@cordisjs\\core\\package.json），拒绝启动。"},
-	{RelAndroidCollector, "缺少 Android 采集器（collectors\\android-arm64\\pktpath），拒绝启动。"},
+	{RelNodeExe, "安装文件不完整（缺少内置运行环境），请重新运行 PktPath Studio 安装程序修复。"},
+	{RelEntry, "安装文件不完整（缺少主程序文件），请重新运行 PktPath Studio 安装程序修复。"},
+	{RelWebIndex, "安装文件不完整（缺少界面文件），请重新运行 PktPath Studio 安装程序修复。"},
+	{RelCordisCore, "安装文件不完整（缺少核心组件），请重新运行 PktPath Studio 安装程序修复。"},
+	{RelAndroidCollector, "安装文件不完整（缺少手机采集组件），请重新运行 PktPath Studio 安装程序修复。"},
 }
 
 // ValidateInstall fail-closes if any required file is missing. It never
@@ -95,12 +95,12 @@ func ValidateInstall(p Paths, skipHash bool) error {
 	}
 	sum, err := sha256File(p.Node)
 	if err != nil {
-		return &LaunchError{Code: "hash", Message: "无法读取随包 node\\node.exe 以校验 SHA256，拒绝启动，不会回退到 PATH。", Path: p.Node}
+		return &LaunchError{Code: "hash", Message: "无法校验内置运行环境文件，请确认文件未被占用，或重新运行 PktPath Studio 安装程序修复。", Path: p.Node}
 	}
 	if !strings.EqualFold(sum, OfficialNodeExeSHA256) {
 		return &LaunchError{
 			Code:    "hash",
-			Message: "随包 node\\node.exe 的 SHA256 与官方 Node v24.22.1 win-x64 不一致，拒绝启动，不会回退到 PATH。",
+			Message: "内置运行环境文件已损坏或被修改，为安全起见已取消启动。请重新运行 PktPath Studio 安装程序修复。",
 			Path:    p.Node,
 		}
 	}

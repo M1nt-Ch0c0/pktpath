@@ -29,7 +29,10 @@ const (
 
 const (
 	ReadyTimeout  = 20 * time.Second
-	QuitWait      = 8 * time.Second
+	// QuitWait aligns with the studio-cordis graceful shutdown ceiling
+	// (HTTP close + kernel/capture teardown) and pairs with the 24s NSIS
+	// CloseRunningStudio wait window.
+	QuitWait      = 16 * time.Second
 	HealthWait    = 1500 * time.Millisecond
 	ForceKillWait = 3 * time.Second
 	ProbeWait     = 8 * time.Second

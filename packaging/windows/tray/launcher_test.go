@@ -226,7 +226,7 @@ func TestLauncherCrashBeforeReady(t *testing.T) {
 	l := newTestLauncher(p, flagsPath)
 	l.ReadyFor = 2 * time.Second
 	err := l.Start()
-	if err == nil || !strings.Contains(err.Error(), "就绪前已退出") {
+	if err == nil || !strings.Contains(err.Error(), "启动失败并已退出") {
 		t.Fatalf("expected early-exit error, got %v", err)
 	}
 	if _, err := os.Stat(p.RuntimePath); err == nil {
@@ -280,7 +280,7 @@ func TestLauncherMissingNodeDoesNotUsePATH(t *testing.T) {
 	// PATH definitely has node (we used it), but the launcher must refuse.
 	l := newTestLauncher(p, "")
 	err := l.Start()
-	if err == nil || !strings.Contains(err.Error(), "不会回退到 PATH") {
+	if err == nil || !strings.Contains(err.Error(), "内置运行环境") {
 		t.Fatalf("expected fail-closed PATH message, got %v", err)
 	}
 }
@@ -364,5 +364,79 @@ func TestSpacesAndUnicodePaths(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"ok":true`) {
 		t.Fatalf("health %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestDefaultQuitWaitMatchesGracefulWindow(t *testing.T) {
+	if QuitWait != 16*time.Second {
+		t.Fatalf("QuitWait = %v, want 16s", QuitWait)
+	}
+	l := NewLauncher(ResolvePaths(t.TempDir(), t.TempDir()))
+	if l.QuitFor != 16*time.Second {
+		t.Fatalf("NewLauncher().QuitFor = %v, want 16s", l.QuitFor)
+	}
+}
+
+func TestLauncherGracefulQuitWithinWindow(t *testing.T) {
+	p, flagsPath := writeFakeInstall(t, map[string]any{"quitDelayMs": 350})
+	t.Setenv("PKTPATH_MOCK_FLAGS", flagsPath)
+	t.Setenv(SkipNodeHashEnv, "1")
+	l := newTestLauncher(p, flagsPath)
+	l.QuitFor = 2 * time.Second
+	if err := l.Start(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := l.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 250*time.Millisecond {
+		t.Fatalf("Stop returned too early (%v); child should have exited gracefully after ~350ms", elapsed)
+	}
+	if elapsed >= l.QuitFor {
+		t.Fatalf("Stop took %v >= QuitFor (%v); expected graceful exit before force kill", elapsed, l.QuitFor)
+	}
+	if _, err := os.Stat(p.RuntimePath); !os.IsNotExist(err) {
+		t.Fatal("runtime file should be removed after graceful Stop")
+	}
+}
+
+func TestLauncherQuitHangWaitsFullWindowBeforeKill(t *testing.T) {
+	p, flagsPath := writeFakeInstall(t, map[string]any{"quitHang": true})
+	t.Setenv("PKTPATH_MOCK_FLAGS", flagsPath)
+	t.Setenv(SkipNodeHashEnv, "1")
+	l := newTestLauncher(p, flagsPath)
+	l.QuitFor = 400 * time.Millisecond
+	if err := l.Start(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := l.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 350*time.Millisecond {
+		t.Fatalf("Stop killed child too early (%v < 350ms) instead of waiting QuitFor (%v)", elapsed, l.QuitFor)
+	}
+	if _, err := os.Stat(p.RuntimePath); !os.IsNotExist(err) {
+		t.Fatal("runtime file should be removed after forced kill")
+	}
+}
+
+func TestLauncherZeroQuitForFallsBackToDefault(t *testing.T) {
+	p, flagsPath := writeFakeInstall(t, map[string]any{"quitDelayMs": 50})
+	t.Setenv("PKTPATH_MOCK_FLAGS", flagsPath)
+	t.Setenv(SkipNodeHashEnv, "1")
+	l := newTestLauncher(p, flagsPath)
+	l.QuitFor = 0
+	if err := l.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p.RuntimePath); !os.IsNotExist(err) {
+		t.Fatal("runtime file should be removed after Stop")
 	}
 }
