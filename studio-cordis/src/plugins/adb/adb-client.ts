@@ -480,7 +480,8 @@ export class AdbClient {
     }));
     const first = r.stdout.trim().split(/\s+/)[0] ?? '';
     if (first.length === 64) return first.toLowerCase();
-    if (this.rootMode(serial) === 'su') {
+    const rootMode = this.rootMode(serial);
+    if (rootMode === 'su' || rootMode === 'su0') {
       const rp = await this.priv(serial, `sha256sum ${REMOTE_AGENT} 2>/dev/null`, 15_000).catch(() => ({
         stdout: '',
         stderr: '',
@@ -598,7 +599,7 @@ export class AdbClient {
     const r = await this.shell(
       serial,
       'cmd package list packages -U 2>/dev/null || pm list packages -U 2>/dev/null',
-      15_000,
+      30_000,
     ).catch(() => ({
       stdout: '',
       stderr: '',
@@ -606,7 +607,7 @@ export class AdbClient {
     }));
     const apps = parsePackages(r.stdout);
     if (apps.length > 0) return apps;
-    const r2 = await this.priv(serial, 'cat /data/system/packages.list 2>/dev/null', 15_000).catch(() => ({
+    const r2 = await this.priv(serial, 'cat /data/system/packages.list 2>/dev/null', 30_000).catch(() => ({
       stdout: '',
       stderr: '',
       exitCode: 1,

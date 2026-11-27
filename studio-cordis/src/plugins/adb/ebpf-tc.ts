@@ -108,6 +108,7 @@ export const ebpfTcPlugin: BuiltinPlugin = {
     builtin: true,
     capabilities: ['collector.ebpf', 'collector.tc', 'collector.socket'],
     provides: ['collector.ebpf'],
+    usedBy: ['短时采集模式 (Oneshot)', '常驻录制模式 (Daemon)'],
     requires: [],
     tags: ['ebpf', 'tc', 'collector'],
   },

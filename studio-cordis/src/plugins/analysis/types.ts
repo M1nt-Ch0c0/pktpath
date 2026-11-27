@@ -34,6 +34,8 @@ export interface PluginMeta {
   capabilities: string[]
   provides?: string[]
   requires?: string[]
+  required?: boolean
+  usedBy?: string[]
   tags?: string[]
 }
 

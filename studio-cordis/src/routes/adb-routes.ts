@@ -103,7 +103,7 @@ export async function handleAdbRoute(
   if (method === 'GET' && pathname === '/api/devices') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
-      sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
+      sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });
       return true;
     }
     try {
@@ -118,7 +118,7 @@ export async function handleAdbRoute(
   if (method === 'POST' && pathname === '/api/device/prepare') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
-      sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
+      sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });
       return true;
     }
     const body = await readJsonBody(req);
@@ -139,7 +139,7 @@ export async function handleAdbRoute(
   if (method === 'GET' && pathname === '/api/device/inspect') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
-      sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
+      sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });
       return true;
     }
     const serial = await resolveSerial(adb, url.searchParams.get('serial') ?? '');
@@ -163,7 +163,7 @@ export async function handleAdbRoute(
   if (method === 'GET' && pathname === '/api/device/apps') {
     const adb = host.getService<AdbTransportService>('transport.adb');
     if (!adb) {
-      sendJson(res, 400, { ok: false, error: 'builtin.transport.android-adb plugin is disabled' });
+      sendJson(res, 400, { ok: false, error: '「Android ADB 连接」插件未启用，请先在插件页启用后再使用设备与采集功能。' });
       return true;
     }
     const serial = await resolveSerial(adb, url.searchParams.get('serial') ?? '');
@@ -191,7 +191,7 @@ export async function handleAdbRoute(
       if (mode === 'oneshot') {
         const oneshot = host.getService<OneshotCaptureService>('capture.mode.oneshot');
         if (!oneshot) {
-          sendJson(res, 400, { ok: false, error: 'builtin.mode.oneshot (or builtin.collector.ebpf-tc) plugin is disabled' });
+          sendJson(res, 400, { ok: false, error: '短时采集功能未启用，请先在插件页同时启用「短时采集模式 (Oneshot)」和「eBPF TC / Socket 采集器」。' });
           return true;
         }
         const out = await oneshot.start({ ...(body as unknown as CaptureSpec), mode: 'oneshot' });
@@ -199,7 +199,7 @@ export async function handleAdbRoute(
       } else {
         const daemon = host.getService<DaemonCaptureService>('capture.mode.daemon');
         if (!daemon) {
-          sendJson(res, 400, { ok: false, error: 'builtin.mode.daemon (or builtin.collector.ebpf-tc) plugin is disabled' });
+          sendJson(res, 400, { ok: false, error: '常驻录制功能未启用，请先在插件页同时启用「常驻录制模式 (Daemon)」和「eBPF TC / Socket 采集器」。' });
           return true;
         }
         const out = await daemon.start({ ...(body as unknown as CaptureSpec), mode: 'daemon' });
@@ -216,6 +216,15 @@ export async function handleAdbRoute(
         });
         return true;
       }
+      if (err instanceof CaptureConflictError) {
+        sendJson(res, err.statusCode, {
+          ok: false,
+          error: err.message,
+          ...(err.captureId ? { capture_id: err.captureId } : {}),
+          ...(err.logLines ? { log_lines: err.logLines, log_tail: err.logLines } : {}),
+        });
+        return true;
+      }
       sendJson(res, statusCodeForError(err), { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
     return true;
@@ -224,7 +233,7 @@ export async function handleAdbRoute(
   if (method === 'POST' && pathname === '/api/capture/flush') {
     const daemon = host.getService<DaemonCaptureService>('capture.mode.daemon');
     if (!daemon) {
-      sendJson(res, 400, { ok: false, error: 'builtin.mode.daemon plugin is disabled' });
+      sendJson(res, 400, { ok: false, error: '「常驻录制模式 (Daemon)」插件未启用，请先在插件页启用后再执行手动落盘。' });
       return true;
     }
     try {
@@ -267,7 +276,7 @@ export async function handleAdbRoute(
   if (method === 'POST' && pathname === '/api/capture/stop') {
     const controller = host.getService<CaptureController>('capture.controller');
     if (!controller) {
-      sendJson(res, 400, { ok: false, error: 'no capture mode plugin is active' });
+      sendJson(res, 400, { ok: false, error: '当前没有已启用的采集模式插件，请先在插件页启用短时采集或常驻录制插件。' });
       return true;
     }
     const out = await controller.stop();

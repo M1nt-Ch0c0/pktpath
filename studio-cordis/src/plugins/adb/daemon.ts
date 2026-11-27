@@ -25,6 +25,7 @@ export const daemonModePlugin: BuiltinPlugin = {
     capabilities: ['capture.mode.daemon', 'capture.flush'],
     provides: ['capture.mode.daemon'],
     requires: ['collector.ebpf'],
+    usedBy: ['常驻录制', '手动落盘 (Flush)'],
     tags: ['capture', 'daemon', 'flush'],
   },
   schema: {

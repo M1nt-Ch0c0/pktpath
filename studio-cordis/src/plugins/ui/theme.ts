@@ -55,6 +55,7 @@ export const uiThemePlugin: BuiltinPlugin = {
     builtin: true,
     capabilities: ['ui.theme'],
     provides: ['ui.theme'],
+    usedBy: ['界面配色主题'],
     tags: ['ui', 'theme'],
   },
   schema: {

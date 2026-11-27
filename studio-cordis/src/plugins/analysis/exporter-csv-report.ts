@@ -91,6 +91,7 @@ export const csvReportExporterPlugin: BuiltinPlugin = {
       '导出含队列分位与样本明细的 Markdown 报告',
     ],
     provides: ['exporter.csv-report'],
+    usedBy: ['表格 / Markdown 报告导出'],
     tags: ['csv', 'markdown', 'report'],
   },
   schema: {

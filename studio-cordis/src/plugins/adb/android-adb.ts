@@ -107,6 +107,7 @@ export const androidAdbPlugin: BuiltinPlugin = {
     builtin: true,
     capabilities: ['transport.adb', 'device.discover', 'device.prepare', 'device.inspect'],
     provides: ['transport.adb'],
+    usedBy: ['设备列表与检查', '手机在线采集'],
     requires: [],
     tags: ['android', 'adb', 'transport'],
   },
@@ -296,7 +297,7 @@ export const androidAdbPlugin: BuiltinPlugin = {
         if (!adbPath) throw new Error('adb executable not found');
         // P0-3: ensure root + deploy agent before running `pktpath inspect --json`
         if (collectorPath) {
-          await ensureReady(serial).catch(() => {});
+          await ensureReady(serial);
         }
         const pluginPaths = enablePlugins ? enabledRuntimePluginPaths(ctx.host.paths.pluginsDir) : undefined;
         const res = await client.inspect(serial, dev, scope, pluginPaths);

@@ -90,7 +90,7 @@ export async function handleSessionRoute(
   if (method === 'GET' && pathname === '/api/sessions') {
     const sp = getProvider(host)
     if (!sp) {
-      sendJson(res, 503, { ok: false, error: 'session.provider service is not active' })
+      sendJson(res, 503, { ok: false, error: '「本地会话存储与加载」插件未启用，无法读取本地会话。请先在插件页确认该插件已启用。' })
       return true
     }
     try {
@@ -109,7 +109,7 @@ export async function handleSessionRoute(
   if (method === 'POST' && pathname === '/api/sessions/open') {
     const sp = getProvider(host)
     if (!sp) {
-      sendJson(res, 503, { ok: false, error: 'session.provider service is not active' })
+      sendJson(res, 503, { ok: false, error: '「本地会话存储与加载」插件未启用，无法读取本地会话。请先在插件页确认该插件已启用。' })
       return true
     }
     try {
@@ -130,7 +130,7 @@ export async function handleSessionRoute(
   if (method === 'GET' && pathname === '/api/session/overview') {
     const sp = getProvider(host)
     if (!sp) {
-      sendJson(res, 503, { ok: false, error: 'session.provider service is not active' })
+      sendJson(res, 503, { ok: false, error: '「本地会话存储与加载」插件未启用，无法读取本地会话。请先在插件页确认该插件已启用。' })
       return true
     }
     const id = sessionIdFromQuery(url)
@@ -156,7 +156,7 @@ export async function handleSessionRoute(
   if (method === 'GET' && pathname === '/api/session/sample') {
     const sp = getProvider(host)
     if (!sp) {
-      sendJson(res, 503, { ok: false, error: 'session.provider service is not active' })
+      sendJson(res, 503, { ok: false, error: '「本地会话存储与加载」插件未启用，无法读取本地会话。请先在插件页确认该插件已启用。' })
       return true
     }
     const id = sessionIdFromQuery(url)
@@ -180,7 +180,7 @@ export async function handleSessionRoute(
   if (method === 'GET' && pathname === '/api/session/export-pcapng') {
     const sp = getProvider(host)
     if (!sp) {
-      sendJson(res, 503, { ok: false, error: 'session.provider service is not active' })
+      sendJson(res, 503, { ok: false, error: '「本地会话存储与加载」插件未启用，无法读取本地会话。请先在插件页确认该插件已启用。' })
       return true
     }
     const id = sessionIdFromQuery(url)
@@ -218,7 +218,7 @@ export async function handleSessionRoute(
   // Legacy Go alias (P1-9): POST /api/session/export-pcapng delegates to builtin.exporter.pcapng
   if (method === 'POST' && pathname === '/api/session/export-pcapng') {
     if (typeof host.runExport !== 'function') {
-      sendJson(res, 503, { ok: false, error: 'exporter runner unavailable on host' })
+      sendJson(res, 503, { ok: false, error: '当前导出服务暂不可用，请重启 Studio 后重试。' })
       return true
     }
     try {
