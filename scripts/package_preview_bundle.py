@@ -416,6 +416,54 @@ def copy_collectors(collectors_dir: Path, dst_dir: Path) -> list[str]:
     return copied
 
 
+def copy_official_plugins(official_plugins_dir: Path, dst_dir: Path) -> list[str]:
+    if official_plugins_dir.is_symlink():
+        raise ValueError(f"Symlink forbidden in official plugins source: {official_plugins_dir}")
+    if not official_plugins_dir.is_dir():
+        raise FileNotFoundError(f"Official plugins directory not found: {official_plugins_dir}")
+    assert_no_symlinks(official_plugins_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for entry in sorted(official_plugins_dir.iterdir()):
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        manifest_path = entry / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Official plugin missing manifest.json: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        plugin_id = manifest.get("id")
+        if not isinstance(plugin_id, str) or not plugin_id.strip():
+            raise ValueError(f"Official plugin manifest missing valid id: {manifest_path}")
+        kp = manifest.get("kernel_probes")
+        if isinstance(kp, dict):
+            objects = kp.get("objects")
+            if isinstance(objects, dict):
+                for arch, obj_meta in objects.items():
+                    if not isinstance(obj_meta, dict):
+                        raise ValueError(f"Invalid kernel_probes.objects[{arch}] in {manifest_path}")
+                    rel_obj = obj_meta.get("path")
+                    want_sha = obj_meta.get("sha256")
+                    if not isinstance(rel_obj, str) or not rel_obj:
+                        raise ValueError(f"Missing kernel_probes.objects[{arch}].path in {manifest_path}")
+                    obj_path = (entry / rel_obj).resolve()
+                    if not obj_path.is_relative_to(entry.resolve()):
+                        raise ValueError(f"Kernel probe path escapes plugin dir: {rel_obj}")
+                    if not obj_path.is_file():
+                        raise FileNotFoundError(f"Missing kernel probe ELF for {arch}: {obj_path}")
+                    check_binary_magic(obj_path, "linux")
+                    if isinstance(want_sha, str) and want_sha:
+                        got_sha = sha256_file(obj_path)
+                        if got_sha.lower() != want_sha.lower():
+                            raise ValueError(
+                                f"SHA256 mismatch for {entry.name}/{rel_obj}: expected {want_sha}, got {got_sha}"
+                            )
+        shutil.copytree(entry, dst_dir / entry.name, symlinks=False)
+        copied.append(f"plugins/official/{entry.name}")
+    if not copied:
+        raise FileNotFoundError(f"No official plugin packages found in {official_plugins_dir}")
+    return copied
+
+
 def iter_node_packages(node_modules_dir: Path) -> list[Path]:
     pkgs: list[Path] = []
     if not node_modules_dir.is_dir():
@@ -670,6 +718,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory containing collector ELF binaries (android-arm64/pktpath or pktpath-android-arm64)",
     )
     parser.add_argument(
+        "--official-plugins-dir",
+        default=None,
+        help="Optional directory of official plugin packages (e.g. plugins/official) to bundle under plugins/official/",
+    )
+    parser.add_argument(
         "--repo-license",
         default="LICENSE",
         help="Path to repository root LICENSE file",
@@ -733,6 +786,12 @@ def main(argv: list[str] | None = None) -> int:
     node_license = extract_node(args.target_os, archive_src, bundle_dir)
     copy_cordis_studio(studio_dir, bundle_dir / "studio-cordis")
     copied_collectors = copy_collectors(collectors_dir, bundle_dir / "collectors")
+    copied_official_plugins: list[str] = []
+    if args.official_plugins_dir:
+        official_plugins_dir = Path(args.official_plugins_dir).resolve()
+        copied_official_plugins = copy_official_plugins(
+            official_plugins_dir, bundle_dir / "plugins" / "official"
+        )
     licenses = collect_licenses(
         repo_license, node_license, bundle_dir / "studio-cordis" / "node_modules", bundle_dir
     )
@@ -769,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
         "node_version": NODE_VERSION,
         "node_archive_sha256": OFFICIAL_NODE[args.target_os]["sha256"],
         "collectors": copied_collectors,
+        "official_plugins": copied_official_plugins,
         "launchers": launchers,
         "tray_exe_sha256": tray_exe_sha256,
         "licensed_components": len(licenses),

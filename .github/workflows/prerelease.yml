@@ -140,6 +140,7 @@ jobs:
             "--app-version", "$env:TAG",
             "--studio-dir", "studio-cordis",
             "--collectors-dir", "bin",
+            "--official-plugins-dir", "plugins/official",
             "--repo-license", "LICENSE",
             "--download-node",
             "--cache-dir", "$env:RUNNER_TEMP/pktpath-node-cache",
@@ -202,6 +203,7 @@ jobs:
             --os linux
             --studio-dir studio-cordis
             --collectors-dir bin
+            --official-plugins-dir plugins/official
             --repo-license LICENSE
             --download-node
             --cache-dir "${RUNNER_TEMP}/pktpath-node-cache"
