@@ -708,6 +708,7 @@
         </div>
         <div class="pc-det-actions">
           ${detToggleHtml}
+          <button class="btn btn-ghost btn-sm" id="pcDetExport" data-pid="${esc(m.id)}" title="将插件打包导出为 .zip">导出 .zip</button>
           <button class="btn btn-ghost btn-sm" id="pcDetReload" data-pid="${esc(m.id)}">重载</button>
           ${!req && p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">卸载</button>` : ''}
         </div>
@@ -1097,6 +1098,55 @@
     }
   }
 
+  async function exportPluginZip(id, btnEl) {
+    if (!id) return;
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const url = `/api/plugins/${encodeURIComponent(id)}/export`;
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          if (ct.includes('application/json')) {
+            const errJson = await res.json();
+            if (errJson && errJson.error) msg = errJson.error;
+          } else {
+            const txt = (await res.text()).trim();
+            if (txt) msg = txt;
+          }
+        } catch {}
+        throw new Error(msg);
+      }
+      if (ct.includes('application/zip') || ct.includes('application/octet-stream')) {
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        const objUrl = URL.createObjectURL(blob);
+        a.href = objUrl;
+        a.download = `${id.replace(/[^a-zA-Z0-9._-]/g, '_')}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+        toast(`已导出插件包 ${a.download}`, 'ok');
+        return;
+      }
+      const data = await res.json();
+      if (data && data.ok === false) {
+        throw new Error(data.error || '导出失败');
+      }
+      const kb = data && data.size_bytes ? `${(Number(data.size_bytes) / 1024).toFixed(1)} KB` : '';
+      const count = data && data.file_count ? `${data.file_count} 个文件` : '';
+      const sigTxt = data && data.signature_status ? ` · 签名: ${data.signature_status}` : '';
+      const metaStr = [count, kb].filter(Boolean).join(' / ');
+      toast(`插件已导出${data && data.path ? '：' + data.path : ''}${metaStr ? '（' + metaStr + '）' : ''}${sigTxt}`, 'ok');
+    } catch (e) {
+      toast('导出插件失败：' + friendlyErr(e.message), 'bad');
+    } finally {
+      if (btnEl) btnEl.disabled = false;
+    }
+  }
+
   async function reloadPluginById(id) {
     try {
       const r = await api('/api/kernel/plugins/reload', { body: { id } });
@@ -1164,7 +1214,11 @@
       const hasBpf = Boolean(pv.has_kernel_bpf);
       const bpfObjects = Array.isArray(pv.kernel_bpf_objects) ? pv.kernel_bpf_objects : [];
       const bpfHooks = Array.isArray(pv.kernel_bpf_hooks) ? pv.kernel_bpf_hooks : [];
+      const sig = (Wave1() && typeof Wave1().describePluginSignature === 'function')
+        ? Wave1().describePluginSignature(pv)
+        : { status: 'unsigned', trust: 'none', label: '未签名', badgeClass: 'badge-muted', boxClass: 'is-muted', blocked: false, detail: '', fingerprint: null };
       const badges = [];
+      badges.push(`<span class="badge ${esc(sig.badgeClass)}" id="instSigBadge">${esc(sig.label)}</span>`);
       if (hasBpf) badges.push('<span class="badge badge-bad">含内核 eBPF 字节码</span>');
       if ((pv.sock_fields || []).length) badges.push(`<span class="badge">BTF 字段 ×${pv.sock_fields.length}</span>`);
       if ((pv.qdiscs || []).length) badges.push(`<span class="badge">自定义队列 ×${pv.qdiscs.length}</span>`);
@@ -1210,12 +1264,20 @@
           </div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">${badges.join('')}</div>
+        <div class="inst-sig-box ${esc(sig.boxClass)}" id="instSigBox">
+          <div class="inst-sig-head">
+            <span class="inst-sig-title">签名状态：${esc(sig.label)}</span>
+            ${sig.fingerprint ? `<code class="inst-sig-fp" title="${esc(sig.fingerprint)}">公钥指纹 ${esc(sig.fingerprint)}</code>` : ''}
+          </div>
+          ${sig.detail ? `<div class="inst-sig-detail">${esc(sig.detail)}</div>` : ''}
+        </div>
+        ${sig.blocked ? '<div class="pc-alert-bad" id="instSigBlocked">❌ 签名无效，禁止安装此插件包。</div>' : ''}
         ${bpfWarningHtml}
         <div class="section-title" style="margin:8px 0 4px">安装后将立即提供以下能力：</div>
         <ul class="pc-cap-list">${caps || '<li class="muted">未声明能力</li>'}</ul>
         ${warns}
       `;
-      if (btnOk) btnOk.disabled = hasBpf;
+      if (btnOk) btnOk.disabled = Boolean(sig.blocked || hasBpf);
     }
     modal.hidden = false;
   }
@@ -1229,6 +1291,13 @@
 
   async function confirmInstallExternal() {
     if (!PC.pendingInstallPath) return;
+    const sigCheck = (Wave1() && typeof Wave1().describePluginSignature === 'function')
+      ? Wave1().describePluginSignature(PC.pendingPreview || {})
+      : { blocked: PC.pendingPreview && PC.pendingPreview.signature_status === 'invalid' };
+    if (sigCheck && sigCheck.blocked) {
+      toast('签名无效，禁止安装该插件', 'bad');
+      return;
+    }
     if (PC.pendingPreview && PC.pendingPreview.has_kernel_bpf) {
       const ack = $('#instBpfConfirm');
       if (!ack || !ack.checked) {
@@ -1386,6 +1455,8 @@
         if (saveBtn) { saveSelectedConfig(saveBtn.dataset.pid); return; }
         const resetBtn = e.target.closest('#pcBtnResetCfg');
         if (resetBtn) { resetSelectedConfig(resetBtn.dataset.pid); return; }
+        const exportBtn = e.target.closest('#pcDetExport');
+        if (exportBtn) { exportPluginZip(exportBtn.dataset.pid, exportBtn); return; }
         const reloadBtn = e.target.closest('#pcDetReload');
         if (reloadBtn) { reloadPluginById(reloadBtn.dataset.pid); return; }
         const uninstBtn = e.target.closest('#pcDetUninstall');
@@ -1450,7 +1521,8 @@
     $('#instBody')?.addEventListener('change', (e) => {
       if (e.target && e.target.id === 'instBpfConfirm') {
         const btnOk = $('#instConfirm');
-        if (btnOk) btnOk.disabled = !e.target.checked;
+        const blocked = PC.pendingPreview && PC.pendingPreview.signature_status === 'invalid';
+        if (btnOk) btnOk.disabled = Boolean(blocked || !e.target.checked);
       }
     });
     $('#instClose')?.addEventListener('click', closeInstallModal);

@@ -895,11 +895,340 @@
     const objects = normalizeKernelBpfObjects(obj.kernel_bpf_objects || (kp && kp.objects));
     const hooks = normalizeKernelBpfHooks(obj.kernel_bpf_hooks || (kp && kp.hooks));
     const hasBpf = Boolean(obj.has_kernel_bpf || objects.length > 0 || hooks.length > 0);
+    const rawSigStatus = String(obj.signature_status || '').trim().toLowerCase();
+    const sigStatus = (rawSigStatus === 'verified' || rawSigStatus === 'invalid' || rawSigStatus === 'unsigned')
+      ? rawSigStatus
+      : 'unsigned';
+    const rawSigTrust = String(obj.signature_trust || '').trim().toLowerCase();
+    const sigTrust = (rawSigTrust === 'trusted_key' || rawSigTrust === 'self_declared' || rawSigTrust === 'none')
+      ? rawSigTrust
+      : (sigStatus === 'verified' ? 'self_declared' : 'none');
+    const sigFp = (typeof obj.signature_key_fingerprint === 'string' && obj.signature_key_fingerprint.trim())
+      ? obj.signature_key_fingerprint.trim()
+      : null;
+    const sigMsg = typeof obj.signature_message === 'string' ? obj.signature_message.trim() : '';
+    const sigReason = typeof obj.signature_reason === 'string' ? obj.signature_reason.trim() : '';
+
     return Object.assign({}, obj, {
       has_kernel_bpf: hasBpf,
       kernel_bpf_objects: objects,
       kernel_bpf_hooks: hooks,
+      signature_status: sigStatus,
+      signature_trust: sigTrust,
+      signature_key_fingerprint: sigFp,
+      signature_message: sigMsg,
+      signature_reason: sigReason,
     });
+  }
+
+  function describePluginSignature(pv) {
+    const norm = enrichPreviewBpf(pv || {});
+    const status = norm.signature_status;
+    const trust = norm.signature_trust;
+    const fingerprint = norm.signature_key_fingerprint;
+    if (status === 'invalid') {
+      return {
+        status,
+        trust,
+        fingerprint,
+        label: '签名无效·禁止安装',
+        badgeClass: 'badge-bad',
+        boxClass: 'is-bad',
+        blocked: true,
+        detail: norm.signature_message || norm.signature_reason || '插件包签名校验失败，禁止安装。',
+      };
+    }
+    if (status === 'verified' && trust === 'trusted_key') {
+      return {
+        status,
+        trust,
+        fingerprint,
+        label: '已签名校验',
+        badgeClass: 'badge-ok',
+        boxClass: 'is-ok',
+        blocked: false,
+        detail: norm.signature_message || '已通过受信任公钥签名校验。',
+      };
+    }
+    if (status === 'verified') {
+      return {
+        status,
+        trust: 'self_declared',
+        fingerprint,
+        label: '签名完整·自签非官方背书',
+        badgeClass: 'badge-warn',
+        boxClass: 'is-warn',
+        blocked: false,
+        detail: norm.signature_message || '包内容与签名一致，但使用自声明公钥，非官方可信背书。',
+      };
+    }
+    return {
+      status: 'unsigned',
+      trust: 'none',
+      fingerprint,
+      label: '未签名',
+      badgeClass: 'badge-muted',
+      boxClass: 'is-muted',
+      blocked: false,
+      detail: norm.signature_message || '该插件包未附带数字签名。',
+    };
+  }
+
+  function normalizeSelfCheckLevel(v) {
+    const s = String(v || '').trim().toLowerCase();
+    if (s === 'green' || s === 'ok' || s === 'pass') return 'green';
+    if (s === 'red' || s === 'error' || s === 'fail' || s === 'bad') return 'red';
+    return 'yellow';
+  }
+
+  function normalizeDeviceSelfCheck(resp) {
+    if (!resp || typeof resp !== 'object') {
+      return {
+        ok: false,
+        serial: '',
+        overall: 'red',
+        overallLabel: '自检失败',
+        source: 'unknown',
+        sourceLabel: '未知来源',
+        arch: null,
+        kernel_release: null,
+        root_mode: null,
+        btf_available: null,
+        drop_reason_enum_count: null,
+        kptr_restrict: null,
+        items: [],
+        checks: [],
+        error: '设备自检响应无效',
+      };
+    }
+    const overallRaw = resp.overall || (resp.status === 'ok' ? 'green' : resp.status === 'degraded' ? 'yellow' : resp.status === 'blocked' ? 'red' : '');
+    const overall = normalizeSelfCheckLevel(overallRaw);
+    const overallMap = { green: '全部就绪', yellow: '部分降级', red: '存在阻塞项' };
+    const source = resp.source
+      ? String(resp.source)
+      : (resp.agent_self_check ? 'agent_self_check' : 'shell_fallback');
+    const sourceLabel = source === 'agent_self_check'
+      ? '设备 Agent 自检'
+      : source === 'shell_fallback'
+        ? 'ADB Shell 降级检测'
+        : source;
+    const levelMap = { green: '通过', yellow: '降级', red: '阻塞' };
+    const rawList = Array.isArray(resp.items)
+      ? resp.items
+      : (Array.isArray(resp.checks) ? resp.checks : []);
+    const items = rawList.map((c, idx) => {
+      const lv = normalizeSelfCheckLevel(c && (c.level !== undefined ? c.level : c.status));
+      const summary = typeof (c && c.summary) === 'string' ? c.summary.trim() : '';
+      const detail = typeof (c && c.detail) === 'string' ? c.detail.trim() : '';
+      const remediation = typeof (c && c.remediation) === 'string' ? c.remediation.trim() : '';
+      return {
+        id: String((c && c.id) || `check_${idx + 1}`),
+        label: String((c && c.label) || (c && c.id) || `检查项 ${idx + 1}`),
+        level: lv,
+        status: lv,
+        statusLabel: levelMap[lv],
+        summary,
+        detail,
+        remediation,
+      };
+    });
+    return {
+      ok: resp.ok !== false,
+      serial: String(resp.serial || ''),
+      overall,
+      overallLabel: overallMap[overall],
+      source,
+      sourceLabel,
+      arch: resp.arch ? String(resp.arch) : null,
+      kernel_release: resp.kernel_release ? String(resp.kernel_release) : null,
+      root_mode: resp.root_mode ? String(resp.root_mode) : null,
+      btf_available: typeof resp.btf_available === 'boolean' ? resp.btf_available : null,
+      drop_reason_enum_count: Number.isFinite(Number(resp.drop_reason_enum_count)) ? Number(resp.drop_reason_enum_count) : null,
+      kptr_restrict: resp.kptr_restrict !== undefined && resp.kptr_restrict !== null ? resp.kptr_restrict : null,
+      items,
+      checks: items,
+      error: resp.error ? String(resp.error) : '',
+    };
+  }
+
+  function finiteOptNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function isTcpDetailedProbeEnabled(sessionSummary) {
+    const s = sessionSummary && typeof sessionSummary === 'object' ? sessionSummary : {};
+    const inv = Array.isArray(s.probe_inventory) ? s.probe_inventory : [];
+    if (inv.length) {
+      return inv.some((p) =>
+        p && (p.group === 'tcp_diag' || p.group === 'tcp_probe') && p.status === 'attached'
+      );
+    }
+    const eff = Array.isArray(s.effective_groups) ? s.effective_groups
+      : (Array.isArray(s.requested_groups) ? s.requested_groups : []);
+    if (eff.length) {
+      return eff.includes('tcp_diag') || eff.includes('tcp_probe');
+    }
+    const preset = String(s.probe_preset || '');
+    if (preset === 'tcp-diag' || preset === 'full-path') return true;
+    return false;
+  }
+
+  function sameFlowKey(a, b) {
+    if (!a || !b) return false;
+    if (a.flow_key && b.flow_key && String(a.flow_key) === String(b.flow_key)) return true;
+    if (a.src && b.src && a.dst && b.dst) {
+      const pA = String(a.proto || '').toLowerCase();
+      const pB = String(b.proto || '').toLowerCase();
+      return pA === pB && String(a.src) === String(b.src) && String(a.dst) === String(b.dst);
+    }
+    return false;
+  }
+
+  function buildFlowTcpChartsData(detail, samples, sessionSummary, row) {
+    const d = detail && typeof detail === 'object' ? detail : {};
+    const probeEnabled = isTcpDetailedProbeEnabled(sessionSummary);
+    const timeSeqPoints = [];
+    const cwndPoints = [];
+    const rttPoints = [];
+    let retransmitCount = 0;
+    let dropCount = 0;
+
+    // 1. Prefer structured server-side series if Shan's analyzer provides them
+    const rawSeries = Array.isArray(d.tcp_series) ? d.tcp_series
+      : Array.isArray(d.time_sequence) ? d.time_sequence
+      : (d.tcp_metrics && Array.isArray(d.tcp_metrics.points) ? d.tcp_metrics.points : null);
+
+    if (rawSeries && rawSeries.length) {
+      let baseTs = null;
+      for (const pt of rawSeries) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tsRaw = finiteOptNum(pt.ts_ms) !== null
+          ? finiteOptNum(pt.ts_ms)
+          : (finiteOptNum(pt.ts_ns) !== null ? finiteOptNum(pt.ts_ns) / 1e6 : finiteOptNum(pt.rel_ms));
+        if (tsRaw !== null && baseTs === null) baseTs = tsRaw;
+        const tMs = tsRaw !== null ? Math.max(0, tsRaw - (baseTs || 0)) : timeSeqPoints.length;
+        const seq = finiteOptNum(pt.tcp_seq !== undefined ? pt.tcp_seq : pt.seq);
+        const cwnd = finiteOptNum(pt.snd_cwnd !== undefined ? pt.snd_cwnd : pt.cwnd);
+        const srttUs = finiteOptNum(pt.srtt_us);
+        const retransmit = Boolean(pt.retransmit || pt.is_retransmit);
+        const dropped = Boolean(pt.dropped || pt.is_drop || pt.drop);
+        if (retransmit) retransmitCount++;
+        if (dropped) dropCount++;
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttUs !== null) rttPoints.push({ tMs, srttUs, rttMs: srttUs / 1000 });
+      }
+    } else {
+      // 2. Collect from matching flow samples + current detail timeline (never fabricate 0 for missing fields)
+      const list = [];
+      const curRow = row && typeof row === 'object' ? row : {};
+      if (Array.isArray(samples) && samples.length && (curRow.src || curRow.flow_key)) {
+        for (const s of samples) {
+          if (sameFlowKey(curRow, s)) list.push(s);
+        }
+      }
+      if (!list.length && curRow && (curRow.tcp_seq !== undefined || curRow.snd_cwnd !== undefined || curRow.srtt_us !== undefined)) {
+        list.push(curRow);
+      }
+      // Also inspect timeline events in detail.branches
+      const brs = Array.isArray(d.branches) ? d.branches : [];
+      for (const b of brs) {
+        const tl = Array.isArray(b && b.timeline) ? b.timeline : [];
+        for (const ev of tl) {
+          if (!ev || typeof ev !== 'object') continue;
+          if (ev.tcp_seq !== undefined || ev.snd_cwnd !== undefined || ev.srtt_us !== undefined) {
+            list.push(ev);
+          }
+        }
+      }
+      let baseTs = null;
+      for (const item of list) {
+        const tsRaw = finiteOptNum(item.t_ms) !== null
+          ? finiteOptNum(item.t_ms)
+          : (finiteOptNum(item.ts_ns) !== null ? finiteOptNum(item.ts_ns) / 1e6 : finiteOptNum(item.rel_us) !== null ? finiteOptNum(item.rel_us) / 1000 : null);
+        if (tsRaw !== null && baseTs === null) baseTs = tsRaw;
+        const tMs = tsRaw !== null ? Math.max(0, tsRaw - (baseTs || 0)) : timeSeqPoints.length;
+        const seq = finiteOptNum(item.tcp_seq);
+        const cwnd = finiteOptNum(item.snd_cwnd);
+        const srttUs = finiteOptNum(item.srtt_us);
+        const stageStr = `${item.stage || ''} ${item.title || ''} ${item.outcome || ''}`.toUpperCase();
+        const retransmit = Boolean(item.retransmit || /RETRANS/.test(stageStr));
+        const dropped = Boolean(item.dropped || /DROP/.test(stageStr));
+        if (seq !== null || cwnd !== null || srttUs !== null) {
+          if (retransmit) retransmitCount++;
+          if (dropped) dropCount++;
+        }
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttUs !== null) rttPoints.push({ tMs, srttUs, rttMs: srttUs / 1000 });
+      }
+    }
+
+    const hasData = timeSeqPoints.length > 0 || cwndPoints.length > 0 || rttPoints.length > 0;
+    const reason = hasData
+      ? ''
+      : (!probeEnabled
+          ? '未开启 TCP 详细探针（tcp_diag / tcp_probe），未采集时间-序号与拥塞窗口/RTT 数据。'
+          : '已开启 TCP 详细探针，但当前流暂无带 tcp_seq / snd_cwnd / srtt_us 的样本点。');
+
+    return {
+      probeEnabled,
+      hasData,
+      reason,
+      timeSeqPoints,
+      cwndPoints,
+      rttPoints,
+      retransmitCount,
+      dropCount,
+    };
+  }
+
+  function extractFlowTlsEvents(detail, sessionSummary, row) {
+    const d = detail && typeof detail === 'object' ? detail : {};
+    const s = sessionSummary && typeof sessionSummary === 'object' ? sessionSummary : {};
+    const cur = row && typeof row === 'object' ? row : {};
+    const direct = Array.isArray(d.tls_events) ? d.tls_events
+      : Array.isArray(d.tls_correlation) ? d.tls_correlation
+      : null;
+    let raw = direct;
+    if (!raw) {
+      const sessList = Array.isArray(s.tls_events) ? s.tls_events
+        : Array.isArray(s.tls_correlation) ? s.tls_correlation
+        : [];
+      if (sessList.length) {
+        const pid = finiteOptNum(cur.pid);
+        const src = String(cur.src || '');
+        const dst = String(cur.dst || '');
+        raw = sessList.filter((ev) => {
+          if (!ev || typeof ev !== 'object') return false;
+          if (pid !== null && finiteOptNum(ev.pid) === pid) return true;
+          const h = ev.conn_hint && typeof ev.conn_hint === 'object' ? ev.conn_hint : null;
+          if (h && src && dst) {
+            const pair = `${h.src_ip || ''}:${h.src_port || ''}`;
+            const peer = `${h.dst_ip || ''}:${h.dst_port || ''}`;
+            if ((pair === src && peer === dst) || (pair === dst && peer === src)) return true;
+          }
+          return false;
+        });
+      } else {
+        raw = [];
+      }
+    }
+    return raw.filter((ev) => ev && typeof ev === 'object').map((ev) => ({
+      ts_ns: ev.ts_ns !== undefined && ev.ts_ns !== null ? String(ev.ts_ns) : '',
+      pid: finiteOptNum(ev.pid),
+      tid: finiteOptNum(ev.tid),
+      uid: finiteOptNum(ev.uid),
+      comm: String(ev.comm || ''),
+      direction: String(ev.direction || 'write').toLowerCase() === 'read' ? 'read' : 'write',
+      library: String(ev.library || 'unknown'),
+      conn_hint: ev.conn_hint && typeof ev.conn_hint === 'object' ? ev.conn_hint : null,
+      plaintext_len: finiteOptNum(ev.plaintext_len) || 0,
+      plaintext_preview: typeof ev.plaintext_preview === 'string' ? ev.plaintext_preview : '',
+      truncated: Boolean(ev.truncated),
+    }));
   }
 
   function normalizeInstallPreview(resp) {
@@ -969,5 +1298,10 @@
     applyPresetToConfig,
     groupSchemaFields,
     summarizeCollectorPreset,
+    describePluginSignature,
+    normalizeDeviceSelfCheck,
+    isTcpDetailedProbeEnabled,
+    buildFlowTcpChartsData,
+    extractFlowTlsEvents,
   };
 });

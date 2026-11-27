@@ -237,9 +237,154 @@ test('Wave 3 HTML and plugin-center.js wire required BPF warning, readOnly lock,
   assert.match(html, /id="probePresetSummary"/);
   assert.match(pcJs, /包含将在设备内核态以 root 权限加载的 eBPF 字节码，仅安装信任来源/);
   assert.match(pcJs, /id="instBpfConfirm"/);
-  assert.match(pcJs, /btnOk\.disabled = hasBpf/);
+  assert.match(pcJs, /btnOk\.disabled = Boolean\(sig\.blocked \|\| hasBpf\)/);
   assert.match(pcJs, /必选底座/);
   assert.match(pcJs, /去插件设置调整/);
   assert.match(pcJs, /sf-preset-card/);
   assert.match(pcJs, /sf-group/);
+});
+
+test('Wave 3 describePluginSignature distinguishes trusted_key, self_declared (never official), unsigned, and invalid hard-block', () => {
+  const trusted = Wave1.describePluginSignature({
+    signature_status: 'verified',
+    signature_trust: 'trusted_key',
+    signature_key_fingerprint: 'sha256:aaaa1111',
+    signature_message: 'Verified by trusted key',
+  });
+  assert.equal(trusted.label, '已签名校验');
+  assert.equal(trusted.badgeClass, 'badge-ok');
+  assert.equal(trusted.blocked, false);
+  assert.equal(trusted.fingerprint, 'sha256:aaaa1111');
+
+  const selfDecl = Wave1.describePluginSignature({
+    signature_status: 'verified',
+    signature_trust: 'self_declared',
+    signature_key_fingerprint: 'sha256:bbbb2222',
+  });
+  assert.equal(selfDecl.label, '签名完整·自签非官方背书');
+  assert.equal(selfDecl.badgeClass, 'badge-warn');
+  assert.equal(selfDecl.blocked, false);
+  assert.equal(selfDecl.fingerprint, 'sha256:bbbb2222');
+  assert.doesNotMatch(selfDecl.label, /官方可信/);
+
+  const unsigned = Wave1.describePluginSignature({
+    signature_status: 'unsigned',
+    signature_trust: 'none',
+  });
+  assert.equal(unsigned.label, '未签名');
+  assert.equal(unsigned.blocked, false);
+
+  const invalid = Wave1.describePluginSignature({
+    signature_status: 'invalid',
+    signature_trust: 'none',
+    signature_reason: 'digest mismatch',
+  });
+  assert.equal(invalid.label, '签名无效·禁止安装');
+  assert.equal(invalid.badgeClass, 'badge-bad');
+  assert.equal(invalid.blocked, true);
+  assert.match(invalid.detail, /digest mismatch/);
+});
+
+test('Wave 3 normalizeDeviceSelfCheck reads Bo actual items/level/summary/detail schema and preserves metadata', () => {
+  const rep = Wave1.normalizeDeviceSelfCheck({
+    ok: true,
+    serial: 'emulator-5554',
+    overall: 'yellow',
+    arch: 'arm64',
+    kernel_release: '6.1.157-android14-g1234',
+    root_mode: 'su -c',
+    btf_available: false,
+    agent_self_check: { status: 'degraded' },
+    items: [
+      { id: 'root_priv', label: 'Root / BPF 权限', level: 'green', summary: 'su -c 可用' },
+      { id: 'vmlinux_btf', label: '内核 BTF', level: 'yellow', summary: '缺少 /sys/kernel/btf/vmlinux', detail: '降级为原始数值显示' },
+      { id: 'core_probes', label: '核心探针', level: 'red', summary: '内核版本过低', detail: '需要 5.10+' },
+    ],
+  });
+  assert.equal(rep.ok, true);
+  assert.equal(rep.overall, 'yellow');
+  assert.equal(rep.overallLabel, '部分降级');
+  assert.equal(rep.sourceLabel, '设备 Agent 自检');
+  assert.equal(rep.arch, 'arm64');
+  assert.equal(rep.kernel_release, '6.1.157-android14-g1234');
+  assert.equal(rep.root_mode, 'su -c');
+  assert.equal(rep.items.length, 3);
+  assert.equal(rep.items[0].level, 'green');
+  assert.equal(rep.items[0].summary, 'su -c 可用');
+  assert.equal(rep.items[1].level, 'yellow');
+  assert.equal(rep.items[1].detail, '降级为原始数值显示');
+  assert.equal(rep.items[2].level, 'red');
+
+  const fb = Wave1.normalizeDeviceSelfCheck({ ok: true, serial: 'dev1', overall: 'green', arch: 'x86_64', items: [] });
+  assert.equal(fb.sourceLabel, 'ADB Shell 降级检测');
+  assert.equal(fb.overallLabel, '全部就绪');
+});
+
+test('Wave 3 buildFlowTcpChartsData reports disabled TCP probe honestly and never fills missing cwnd/srtt with 0', () => {
+  const noProbe = Wave1.buildFlowTcpChartsData({}, [], {
+    probe_inventory: [{ id: 'builtin.tcp_probe', group: 'tcp_probe', status: 'disabled_by_user' }],
+  }, { proto: 'tcp', src: '10.0.0.1:1234', dst: '1.1.1.1:443' });
+  assert.equal(noProbe.probeEnabled, false);
+  assert.equal(noProbe.hasData, false);
+  assert.match(noProbe.reason, /未开启 TCP 详细探针/);
+
+  const withData = Wave1.buildFlowTcpChartsData({
+    tcp_series: [
+      { ts_ms: 1000, tcp_seq: 100, snd_cwnd: 10, srtt_us: 12000 },
+      { ts_ms: 1020, tcp_seq: 1440, retransmit: true }, // missing cwnd & srtt_us must NOT become 0
+      { ts_ms: 1050, tcp_seq: 2880, snd_cwnd: 8, srtt_us: 15000, dropped: true },
+    ],
+  }, [], {
+    probe_inventory: [{ id: 'builtin.tcp_probe', group: 'tcp_probe', status: 'attached' }],
+  }, {});
+  assert.equal(withData.probeEnabled, true);
+  assert.equal(withData.hasData, true);
+  assert.equal(withData.timeSeqPoints.length, 3);
+  assert.equal(withData.cwndPoints.length, 2);
+  assert.equal(withData.rttPoints.length, 2);
+  assert.equal(withData.retransmitCount, 1);
+  assert.equal(withData.dropCount, 1);
+});
+
+test('Wave 3 extractFlowTlsEvents returns empty for default sessions and extracts matched TLS plaintext when present', () => {
+  const empty = Wave1.extractFlowTlsEvents({}, {}, { pid: 100 });
+  assert.equal(empty.length, 0);
+
+  const matched = Wave1.extractFlowTlsEvents({}, {
+    tls_events: [
+      { ts_ns: '1732700000000000000', pid: 12345, comm: 'com.example.app', direction: 'write', library: 'boringssl', plaintext_len: 42, plaintext_preview: 'GET /health HTTP/1.1', truncated: false },
+      { ts_ns: '1732700000000000100', pid: 99999, comm: 'other', direction: 'read', library: 'openssl', plaintext_len: 10, plaintext_preview: 'skip' },
+    ],
+  }, { pid: 12345 });
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].library, 'boringssl');
+  assert.equal(matched[0].direction, 'write');
+  assert.equal(matched[0].plaintext_preview, 'GET /health HTTP/1.1');
+});
+
+test('Wave 3 addition A HTML and JS wire flow detail TCP chart tab and hidden-by-default TLS tab', () => {
+  const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
+  const appJs = fs.readFileSync(path.join(webDir, 'app.js'), 'utf8');
+  assert.match(html, /id="drwTabTimeline"/);
+  assert.match(html, /id="drwTabTcp"/);
+  assert.match(html, /id="drwTabTls"[^>]*hidden/);
+  assert.match(appJs, /buildFlowTcpChartsData/);
+  assert.match(appJs, /extractFlowTlsEvents/);
+  assert.match(appJs, /未开启 TCP 详细探针/);
+});
+
+test('Wave 3 additions B/C HTML and JS wire plugin export .zip, signature badge/block, and device self-check modal', () => {
+  const html = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
+  const pcJs = fs.readFileSync(path.join(webDir, 'plugin-center.js'), 'utf8');
+  const appJs = fs.readFileSync(path.join(webDir, 'app.js'), 'utf8');
+
+  assert.match(pcJs, /id="pcDetExport"/);
+  assert.match(pcJs, /\/api\/plugins\/\$\{encodeURIComponent\(id\)\}\/export/);
+  assert.match(pcJs, /instSigBadge/);
+  assert.match(pcJs, /instSigBlocked/);
+  assert.match(pcJs, /describePluginSignature/);
+  assert.match(html, /id="btnDeviceSelfCheck"/);
+  assert.match(html, /id="selfCheckModal"/);
+  assert.match(appJs, /\/api\/devices\/\$\{encodeURIComponent\(serial\)\}\/self-check/);
+  assert.match(appJs, /normalizeDeviceSelfCheck/);
 });

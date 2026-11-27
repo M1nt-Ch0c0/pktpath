@@ -111,6 +111,10 @@
             <span class="field-label">Android 设备 (USB / ADB)</span>
             <select id="selDevice"><option value="">正在扫描 USB 设备…</option></select>
           </label>
+          <div class="device-actions">
+            <button type="button" class="btn btn-ghost btn-sm" id="btnDeviceSelfCheck" disabled title="对当前 Android 设备执行一键环境自检">🩺 一键设备自检</button>
+            <span class="badge badge-muted" id="selfCheckQuickBadge" hidden></span>
+          </div>
         </div>
         <div id="paneOffline" class="offline-pane" hidden>
           <p class="muted" style="margin:6px 0 8px;font-size:12px">打开本机历史或他人分享的会话目录。</p>
@@ -440,6 +444,11 @@
         <svg viewBox="0 0 24 24" width="15" height="15"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
     </div>
+    <div class="drw-tabs" id="drwTabs" role="tablist" aria-label="流详情视图">
+      <button type="button" class="drw-tab active" id="drwTabTimeline" data-tab="timeline" role="tab" aria-selected="true">路径与时间线</button>
+      <button type="button" class="drw-tab" id="drwTabTcp" data-tab="tcp" role="tab" aria-selected="false">时间-序号 &amp; cwnd/RTT</button>
+      <button type="button" class="drw-tab" id="drwTabTls" data-tab="tls" role="tab" aria-selected="false" hidden>TLS 明文关联</button>
+    </div>
     <div class="drawer-body" id="drwBody"></div>
     <div id="slotSampleExtra" class="ui-slot-host" data-slot="sample.extra" style="padding:0 18px 14px"></div>
   </aside>
@@ -495,6 +504,22 @@
       <div class="modal-foot">
         <button class="btn btn-ghost" id="instCancel">取消</button>
         <button class="btn btn-primary" id="instConfirm">确认安装并立即启用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== Device One-Click Self-Check Modal ===================== -->
+  <div class="modal-mask" id="selfCheckModal" hidden>
+    <div class="modal-card card">
+      <div class="modal-head">
+        <h3 id="selfCheckTitle">🩺 设备一键自检</h3>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="selfCheckClose" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="selfCheckBody"></div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="selfCheckRecheck">重新检测</button>
+        <button class="btn btn-primary" id="selfCheckOk">关闭</button>
       </div>
     </div>
   </div>

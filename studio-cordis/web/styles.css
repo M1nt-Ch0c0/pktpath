@@ -1108,3 +1108,173 @@ body.density-compact .pc-item { padding: 8px 10px; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ===== Wave 3 Additions B/C: Plugin Signature Status & Device Self-Check ===== */
+.inst-sig-box {
+  margin: 8px 0 10px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-size: 12px;
+}
+.inst-sig-box.is-ok {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, var(--card));
+}
+.inst-sig-box.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+  background: color-mix(in srgb, var(--warn) 9%, var(--card));
+}
+.inst-sig-box.is-bad {
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--border));
+  background: color-mix(in srgb, var(--bad) 10%, var(--card));
+}
+.inst-sig-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-weight: 600;
+}
+.inst-sig-fp {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  word-break: break-all;
+}
+.inst-sig-detail {
+  margin-top: 4px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+.device-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.sc-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.sc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sc-item {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: var(--bg-soft);
+}
+.sc-item.is-green { border-left: 3px solid var(--ok); }
+.sc-item.is-yellow { border-left: 3px solid var(--warn); }
+.sc-item.is-red { border-left: 3px solid var(--bad); }
+.sc-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sc-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sc-dot.is-green { background: var(--ok); }
+.sc-dot.is-yellow { background: var(--warn); }
+.sc-dot.is-red { background: var(--bad); }
+.sc-label { font-weight: 600; font-size: 13px; color: var(--text); }
+.sc-detail { margin-top: 4px; font-size: 12px; color: var(--text-2); line-height: 1.45; }
+.sc-remediation {
+  margin-top: 5px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px dashed var(--border);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+/* ===== Wave 3 Addition A: Flow Detail Tabs (TCP Time-Seq/cwnd/RTT & Conditional TLS) ===== */
+.drw-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+.drw-tab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 10px 8px;
+  cursor: pointer;
+}
+.drw-tab:hover { color: var(--text); }
+.drw-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.tcp-empty-card {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 18px 16px;
+  background: var(--bg-soft);
+}
+.tcp-empty-title { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.tcp-empty-desc { margin: 0 0 12px; font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+.tcp-charts-wrap { display: flex; flex-direction: column; gap: 12px; }
+.tcp-chart-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-soft);
+}
+.tcp-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+.tcp-chart-svg { display: block; width: 100%; height: auto; }
+.tls-list { display: flex; flex-direction: column; gap: 10px; }
+.tls-ev-card {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: var(--bg-soft);
+}
+.tls-ev-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tls-ev-meta { margin-top: 4px; font-size: 11.5px; color: var(--text-2); }
+.tls-ev-preview {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow: auto;
+}
+.sc-summary-line { margin-top: 4px; font-size: 12.5px; color: var(--text); font-weight: 500; }
