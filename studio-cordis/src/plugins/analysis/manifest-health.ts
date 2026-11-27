@@ -696,35 +696,42 @@ export function buildSessionHealth(session: Session, overview?: SessionOverview)
     zero_hit_verdict = '已观测，窗口内 0 次触发'
   }
 
+  const technical_details: string[] = [
+    ...failedProbes.map((p) => `${p.plugin_id ? `[${p.plugin_id}] ` : ''}${p.id}: ${p.reason ?? 'attach_failed'}`),
+    ...unavailableProbes.map((p) => `${p.id}: ${p.reason ?? 'unavailable_in_kernel'}`),
+    ...capability_warnings,
+    ...(sample_loss_warning ? [sample_loss_warning] : []),
+  ]
+
   let title: string
   let summary: string
   if (severity === 'error') {
-    title = `探针挂载存在失败（${failedProbes.length} 项失败）`
-    const reasons = failedProbes
-      .slice(0, 3)
-      .map((p) => `${p.plugin_id ? `[${p.plugin_id}] ` : ''}${p.id}: ${p.reason ?? 'attach_failed'}`)
-    summary = reasons.join('；') || '存在核心探针或外置插件探针挂载失败，当前观测结果不完整。'
+    title = '部分探针未能生效'
+    summary = `有 ${failedProbes.length || 1} 项探针挂载失败，当前观测结果可能不完整，可在技术详情中查看原因。`
   } else if (severity === 'warn') {
-    const warnParts: string[] = []
-    if (unavailableProbes.length > 0) warnParts.push(`${unavailableProbes.length} 项探针内核不支持`)
-    if (capability_warnings.length > 0) warnParts.push(`${capability_warnings.length} 项内核能力降级`)
-    if (sample_loss.has_loss) warnParts.push('存在采样丢样')
-    title = `观测存在降级（${warnParts.join('、')}）`
-    summary = [
-      ...unavailableProbes.slice(0, 2).map((p) => `${p.id}: ${p.reason ?? 'unavailable_in_kernel'}`),
-      ...capability_warnings.slice(0, 2),
-      ...(sample_loss_warning ? [sample_loss_warning] : []),
-    ].join('；')
+    const hasKernelDeg = unavailableProbes.length > 0 || capability_warnings.length > 0
+    if (hasKernelDeg && sample_loss.has_loss) {
+      title = '内核部分降级且存在丢事件'
+      summary = '部分内核能力已自动降级，且采集期间有少量事件丢失，可在技术详情中查看明细。'
+    } else if (sample_loss.has_loss) {
+      title = '采集期间存在丢事件'
+      summary = '采集期间有少量事件丢失，未命中的异常项不代表未发生，可在技术详情中查看数量。'
+    } else {
+      title = '内核部分降级'
+      summary = '当前设备内核不支持部分高级探针或符号能力，已自动降级采集，可在技术详情中查看。'
+    }
   } else {
     const attachedCount = normalized.probe_inventory.filter((p) => p.status === 'attached').length
-    const disabledNote =
-      disabled_groups.length > 0
-        ? `；${disabled_groups.length} 组未开启（未观测）`
-        : ''
-    title = normalized.present ? '探针与能力观测完整' : '会话未携带 Wave 3 探针清单（兼容旧格式）'
-    summary = normalized.present
-      ? `已挂载 ${attachedCount} 项探针，无降级且零丢样${disabledNote}。`
-      : '旧版会话格式不含 probe_inventory/capabilities，按兼容模式展示。'
+    if (!normalized.present) {
+      title = '旧版会话（兼容模式）'
+      summary = '该会话由旧版采集器生成，按兼容模式展示。'
+    } else if (disabled_groups.length > 0) {
+      title = '采集正常（部分功能未开启）'
+      summary = `已开启的 ${attachedCount} 项探针均正常运行、无丢事件；其余 ${disabled_groups.length} 组未开启，不计为异常。`
+    } else {
+      title = '采集正常'
+      summary = `已开启的 ${attachedCount} 项探针全部正常运行，无降级、无丢事件。`
+    }
   }
 
   // External .bpf.o plugin attribution

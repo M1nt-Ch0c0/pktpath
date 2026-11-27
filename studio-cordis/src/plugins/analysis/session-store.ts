@@ -12,6 +12,13 @@ import path from 'node:path'
 import { buildOverview, buildSampleDetail, reconstruct } from './reconstruct/index.ts'
 import type { Session, SessionOverview } from './reconstruct/index.ts'
 import { buildSessionHealth } from './manifest-health.ts'
+import {
+  buildFlowTcpSeries,
+  correlateTlsEvents,
+  summarizeTlsSidecar,
+  type FlowTcpSeriesResult,
+  type TlsCorrelationResult,
+} from './tcp-flow-series.ts'
 import type {
   AnalysisHostLike,
   AnalyzerOutput,
@@ -532,6 +539,7 @@ export class SessionStore implements SessionProvider {
     }
 
     const probeHealth = buildSessionHealth(base.session, base.overview)
+    const tlsSidecar = summarizeTlsSidecar(base.session, dir)
 
     if (!analysisOut) {
       const baseRecord: Record<string, unknown> = {
@@ -539,6 +547,7 @@ export class SessionStore implements SessionProvider {
         probe_health: probeHealth,
         external_bpf_plugins: probeHealth.external_bpf_plugins,
         drop_reasons_summary: probeHealth.drop_reasons_summary,
+      ...(tlsSidecar ? { tls_sidecar: tlsSidecar } : {}),
       }
       analysisOut = this.host && typeof this.host.runAnalyzers === 'function'
         ? await this.host.runAnalyzers(sessionId, dir, baseRecord)
@@ -563,6 +572,7 @@ export class SessionStore implements SessionProvider {
       probe_health: probeHealth,
       external_bpf_plugins: probeHealth.external_bpf_plugins,
       drop_reasons_summary: probeHealth.drop_reasons_summary,
+      ...(tlsSidecar ? { tls_sidecar: tlsSidecar } : {}),
       plugin_insights: analysisOut.insights,
       plugin_kpis: analysisOut.kpis,
       plugin_notes: analysisOut.notes,
@@ -580,7 +590,31 @@ export class SessionStore implements SessionProvider {
     const sid = parseSampleIdStrict(sampleId)
     const base = this.loadBase(dir)
     const detail = buildSampleDetail(base.session, sid)
-    return detail as unknown as Record<string, unknown>
+    const tcpSeries = buildFlowTcpSeries(base.session, { sample_id: sid })
+    const tlsCorr = correlateTlsEvents(base.session, dir, { sample_id: sid })
+    return {
+      ...(detail as unknown as Record<string, unknown>),
+      tcp_series: tcpSeries,
+      ...(tlsCorr.available ? { tls_correlation: tlsCorr } : {}),
+    }
+  }
+
+  async getFlowTcpSeries(
+    sessionId: string,
+    opts?: { flow_key?: string; sample_id?: string },
+  ): Promise<FlowTcpSeriesResult> {
+    const dir = this.resolveSessionDir(sessionId)
+    const base = this.loadBase(dir)
+    return buildFlowTcpSeries(base.session, opts)
+  }
+
+  async getTlsCorrelations(
+    sessionId: string,
+    opts?: { flow_key?: string; sample_id?: string; window_ms?: number },
+  ): Promise<TlsCorrelationResult> {
+    const dir = this.resolveSessionDir(sessionId)
+    const base = this.loadBase(dir)
+    return correlateTlsEvents(base.session, dir, opts)
   }
 
   async getSessionForExport(sessionId: string): Promise<SessionExportData> {
