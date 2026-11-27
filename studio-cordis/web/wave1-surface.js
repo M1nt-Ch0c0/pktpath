@@ -40,15 +40,171 @@
 
   /* Lin Wave 1 snapshot plugins are flat PluginSnapshotItem objects
    * ({id,name,...,config}), not the older {meta:{...}} wrapper. Keep both. */
+  const USED_BY_LABELS = Object.freeze({
+    sessions: '会话列表',
+    'session-list': '会话列表',
+    'session.list': '会话列表',
+    'session.provider': '会话管理',
+    'session-detail': '会话详情',
+    'session.detail': '会话详情',
+    overview: '会话详情',
+    sample: '单包详情',
+    pull: '手机拉回',
+    'device-pull': '手机拉回',
+    'capture-pull': '手机拉回',
+    'adb-pull': '手机拉回',
+    capture: '实时抓包',
+    'live-capture': '实时抓包',
+    inspect: '设备与队列检查',
+    topology: '设备与队列检查',
+    export: '报告与数据导出',
+    exporters: '报告与数据导出',
+    analysis: '路径重建与分析',
+    dag: '路径重建与分析',
+    reconstruct: '路径重建与分析',
+  });
+
+  const SERVICE_PLUGIN_LABELS = Object.freeze({
+    'session.provider': '离线会话存储',
+    'builtin.transport.offline': '离线会话存储',
+    'transport.adb': 'Android ADB 连接',
+    'builtin.transport.android-adb': 'Android ADB 连接',
+    'collector.ebpf': 'eBPF/TC 采集器',
+    'builtin.collector.ebpf-tc': 'eBPF/TC 采集器',
+    'mode.oneshot': '复现抓包（短时）',
+    'builtin.mode.oneshot': '复现抓包（短时）',
+    'mode.daemon': '常驻录制（Daemon）',
+    'builtin.mode.daemon': '常驻录制（Daemon）',
+    'analyzer.dag': '路径图重建',
+    'builtin.analyzer.dag-reconstruct': '路径图重建',
+    'analyzer.anomaly': '异常雷达',
+    'builtin.analyzer.anomaly-radar': '异常雷达',
+    'exporter.csv': 'CSV 报告导出',
+    'builtin.exporter.csv-report': 'CSV 报告导出',
+    'exporter.pcapng': 'PCAPNG 导出',
+    'builtin.exporter.pcapng': 'PCAPNG 导出',
+    'exporter.redact': '脱敏导出',
+    'builtin.exporter.redact': '脱敏导出',
+    'ui.theme': '界面主题',
+    'builtin.ui.theme': '界面主题',
+  });
+
+  function rawUsedBy(p) {
+    if (!p || typeof p !== 'object') return [];
+    const list = Array.isArray(p.usedBy)
+      ? p.usedBy
+      : Array.isArray(p.used_by)
+        ? p.used_by
+        : (p.meta && Array.isArray(p.meta.usedBy))
+          ? p.meta.usedBy
+          : (p.meta && Array.isArray(p.meta.used_by))
+            ? p.meta.used_by
+            : [];
+    return list.map((x) => String(x || '').trim()).filter(Boolean);
+  }
+
+  function isRequiredPlugin(p) {
+    if (!p || typeof p !== 'object') return false;
+    return Boolean(p.required || (p.meta && p.meta.required));
+  }
+
+  function pluginUsedByLabels(p) {
+    const seen = new Set();
+    const out = [];
+    for (const item of rawUsedBy(p)) {
+      const key = item.toLowerCase();
+      const label = Object.prototype.hasOwnProperty.call(USED_BY_LABELS, key) ? USED_BY_LABELS[key] : item;
+      if (label && !seen.has(label)) {
+        seen.add(label);
+        out.push(label);
+      }
+    }
+    return out;
+  }
+
+  function mapServiceOrPluginToken(token) {
+    const raw = String(token || '').trim().replace(/^['"`]|['"`]$/g, '');
+    if (!raw) return '';
+    const lower = raw.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(SERVICE_PLUGIN_LABELS, lower)) {
+      return SERVICE_PLUGIN_LABELS[lower];
+    }
+    return '';
+  }
+
+  function formatUserError(raw) {
+    const text = String(raw == null ? '' : raw).trim();
+    if (!text) return '';
+
+    const svcInactive = /^([^\s]+)\s+service\s+is\s+not\s+active\b/i.exec(text);
+    if (svcInactive) {
+      const label = mapServiceOrPluginToken(svcInactive[1]);
+      return label
+        ? `「${label}」核心插件当前未启用，请在「插件中心」启用后再试。`
+        : '所需插件功能当前未启用，请在「插件中心」检查并启用对应插件后再试。';
+    }
+
+    const pluginDisabled = /^(.+?)\s+plugin\s+is\s+disabled\b/i.exec(text);
+    if (pluginDisabled) {
+      const rawPart = pluginDisabled[1];
+      const tokens = rawPart
+        .replace(/[()]/g, ' ')
+        .split(/\s+or\s+|,|、/i)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const mapped = [];
+      for (const tok of tokens) {
+        const lbl = mapServiceOrPluginToken(tok);
+        if (lbl && !mapped.includes(lbl)) mapped.push(lbl);
+      }
+      if (mapped.length) {
+        return `「${mapped.join(' / ')}」插件当前已停用，请在「插件中心」启用后再试。`;
+      }
+      return '所需插件当前已停用，请在「插件中心」启用后再试。';
+    }
+
+    if (/^missing\s+required\s+service\(s\):/i.test(text)) {
+      const rest = text.replace(/^missing\s+required\s+service\(s\):\s*/i, '');
+      const labels = rest.split(',').map((s) => mapServiceOrPluginToken(s)).filter(Boolean);
+      if (labels.length) {
+        return `缺少前置插件「${labels.join('、')}」，请先在「插件中心」启用。`;
+      }
+      return '缺少所需的前置插件能力，请先在「插件中心」启用相关内置插件。';
+    }
+
+    const depUnavail = /^required\s+service\s+unavailable\s+after\s+disabling\s+(.+)$/i.exec(text);
+    if (depUnavail) {
+      const lbl = mapServiceOrPluginToken(depUnavail[1]);
+      return lbl
+        ? `前置插件「${lbl}」已停用，当前插件暂时无法运行，请先重新启用前置插件。`
+        : '前置插件已停用，当前插件暂时无法运行，请先在「插件中心」重新启用前置插件。';
+    }
+
+    if (/cannot\s+disable\s+(?:required|core)\s+plugin/i.test(text)) {
+      return '该插件为核心内置底座插件，不可关闭。';
+    }
+
+    if (/\bservice\s+is\s+not\s+active\b/i.test(text)) {
+      return '所需插件功能当前未启用，请在「插件中心」检查并启用对应插件后再试。';
+    }
+
+    return text;
+  }
+
   function asPluginRecord(p) {
     if (!p || typeof p !== 'object') return p;
+    const required = isRequiredPlugin(p);
+    const usedBy = rawUsedBy(p);
     if (p.meta && p.meta.id) {
-      if (p.can_uninstall !== undefined) return p;
-      return Object.assign({}, p, { can_uninstall: p.meta.builtin === false });
+      const canUninstall = required ? false : (p.can_uninstall !== undefined ? !!p.can_uninstall : p.meta.builtin === false);
+      const nextMeta = Object.assign({}, p.meta, { required, usedBy });
+      return Object.assign({}, p, { can_uninstall: canUninstall, required, usedBy, meta: nextMeta });
     }
-    const canUninstall = p.can_uninstall !== undefined ? !!p.can_uninstall : p.builtin === false;
+    const canUninstall = required ? false : (p.can_uninstall !== undefined ? !!p.can_uninstall : p.builtin === false);
     return Object.assign({}, p, {
       can_uninstall: canUninstall,
+      required,
+      usedBy,
       meta: {
         id: p.id,
         name: p.name,
@@ -58,6 +214,8 @@
         category: p.category,
         icon: p.icon,
         builtin: p.builtin,
+        required,
+        usedBy,
         source_path: p.source_path,
         capabilities: p.capabilities || [],
         provides: p.provides,
@@ -455,6 +613,9 @@
     exporterIdFor,
     applyStaticGates,
     asPluginRecord,
+    isRequiredPlugin,
+    pluginUsedByLabels,
+    formatUserError,
     asTransport,
     asCaptureMode,
     asCollector,

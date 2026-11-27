@@ -546,3 +546,72 @@ test('P2-11: demo mock inspect and device labels clearly mark simulated data', (
   assert.match(appJs, /Pixel 8（模拟演示）/);
   assert.match(appJs, /模拟演示拓扑数据（非真实 Android 设备）/);
 });
+
+test('required and usedBy metadata from /api/kernel/state are preserved and locked', () => {
+  const flat = surface.asPluginRecord({
+    id: 'builtin.transport.offline',
+    name: '离线会话存储',
+    builtin: true,
+    required: true,
+    usedBy: ['sessions', 'session-detail', 'pull', '手机拉回'],
+  });
+  assert.equal(surface.isRequiredPlugin(flat), true);
+  assert.equal(flat.required, true);
+  assert.equal(flat.meta.required, true);
+  assert.equal(flat.can_uninstall, false);
+  assert.deepEqual(surface.pluginUsedByLabels(flat), ['会话列表', '会话详情', '手机拉回']);
+
+  const snake = surface.asPluginRecord({
+    meta: { id: 'builtin.analyzer.dag-reconstruct', name: '路径图重建', builtin: true },
+    required: true,
+    used_by: ['analysis', 'overview'],
+  });
+  assert.equal(surface.isRequiredPlugin(snake), true);
+  assert.deepEqual(surface.pluginUsedByLabels(snake), ['路径重建与分析', '会话详情']);
+
+  const optional = surface.asPluginRecord({
+    id: 'builtin.ui.theme',
+    name: '界面主题',
+    builtin: true,
+    required: false,
+  });
+  assert.equal(surface.isRequiredPlugin(optional), false);
+  assert.deepEqual(surface.pluginUsedByLabels(optional), []);
+});
+
+test('formatUserError translates internal service/plugin errors and never leaks raw service is not active', () => {
+  const s1 = surface.formatUserError('session.provider service is not active');
+  assert.doesNotMatch(s1, /service is not active|session\.provider/i);
+  assert.match(s1, /离线会话存储/);
+  assert.match(s1, /插件中心/);
+
+  const s2 = surface.formatUserError('custom.internal.svc service is not active');
+  assert.doesNotMatch(s2, /service is not active|custom\.internal\.svc/i);
+  assert.match(s2, /插件中心/);
+
+  const s3 = surface.formatUserError('builtin.transport.android-adb plugin is disabled');
+  assert.doesNotMatch(s3, /builtin\.transport\.android-adb|plugin is disabled/i);
+  assert.match(s3, /Android ADB 连接/);
+
+  const s4 = surface.formatUserError('builtin.mode.oneshot (or builtin.collector.ebpf-tc) plugin is disabled');
+  assert.doesNotMatch(s4, /builtin\.mode\.oneshot|plugin is disabled/i);
+  assert.match(s4, /复现抓包/);
+  assert.match(s4, /eBPF\/TC 采集器/);
+
+  const s5 = surface.formatUserError('required service unavailable after disabling builtin.transport.offline');
+  assert.doesNotMatch(s5, /builtin\.transport\.offline|unavailable after disabling/i);
+  assert.match(s5, /离线会话存储/);
+
+  const s6 = surface.formatUserError('cannot disable required plugin builtin.transport.offline');
+  assert.doesNotMatch(s6, /builtin\.transport\.offline/i);
+  assert.match(s6, /核心内置底座插件，不可关闭/);
+
+  assert.equal(surface.formatUserError('未发现 USB 设备'), '未发现 USB 设备');
+
+  const appJs = fs.readFileSync(path.join(here, '../../web/app.js'), 'utf8');
+  const pcJs = fs.readFileSync(path.join(here, '../../web/plugin-center.js'), 'utf8');
+  assert.match(appJs, /Wave1\.formatUserError/);
+  assert.match(pcJs, /核心内置 · 不可关闭/);
+  assert.match(pcJs, /被以下核心功能依赖/);
+  assert.match(pcJs, /isRequiredPlugin/);
+});

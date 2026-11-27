@@ -197,8 +197,9 @@
     // Lin returns HTTP 501 + {ok:false, unsupported:true} for dialogs on non-Windows.
     if (data && data.unsupported === true) return data;
     if (!res.ok || (data && data.ok === false)) {
-      const msg = (data && (data.error || data.message || data.raw)) || res.statusText || `HTTP ${res.status}`;
-      throw new Error(String(msg).slice(0, 400));
+      const rawMsg = (data && (data.error || data.message || data.raw)) || res.statusText || `HTTP ${res.status}`;
+      const friendly = (Wave1 && Wave1.formatUserError) ? Wave1.formatUserError(rawMsg) : String(rawMsg);
+      throw new Error(String(friendly || rawMsg).slice(0, 400));
     }
     return data || {};
   }
