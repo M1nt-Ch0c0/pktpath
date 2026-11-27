@@ -959,7 +959,7 @@ export class AdbClient {
         id: 'root_access',
         label: 'Root 权限',
         level: 'red',
-        summary: '设备无 root 权限（adbd-root / adb-root / su 均不可用）',
+        summary: '未获取到 Root 权限，无法启动采集',
         detail: 'eBPF 加载与内核探针挂接需要 root 权限。',
       });
       return {
@@ -1077,7 +1077,7 @@ export class AdbClient {
     if (btfAvailable) {
       items.push({
         id: 'vmlinux_btf',
-        label: '内核 BTF (/sys/kernel/btf/vmlinux)',
+        label: '丢包原因解析（BTF）',
         level: 'green',
         summary: dropReasonEnumCount !== undefined
           ? `可读（已识别 ${dropReasonEnumCount} 个丢包原因枚举）`
@@ -1086,9 +1086,9 @@ export class AdbClient {
     } else {
       items.push({
         id: 'vmlinux_btf',
-        label: '内核 BTF (/sys/kernel/btf/vmlinux)',
+        label: '丢包原因解析（BTF）',
         level: 'yellow',
-        summary: '不可读或缺失：采集可降级运行，但丢包原因仅显示原始数值',
+        summary: '仍可采集，但丢包原因仅显示编号',
         detail: '未检测到可读的 /sys/kernel/btf/vmlinux，无法加载目标内核丢包原因枚举表。',
       });
     }
@@ -1097,7 +1097,7 @@ export class AdbClient {
       const kptrLevel = kptrCheckLevelFromAgent ?? (kptrRestrict >= 2 ? 'yellow' : 'green');
       items.push({
         id: 'kptr_restrict',
-        label: '内核符号可见性 (kptr_restrict)',
+        label: '调用栈符号显示',
         level: kptrLevel,
         summary: kptrLevel === 'green'
           ? `kptr_restrict=${kptrRestrict}（允许内核符号化）`
@@ -1109,11 +1109,11 @@ export class AdbClient {
     if (coreTracepointOk !== undefined) {
       items.push({
         id: 'core_tracepoints',
-        label: '核心丢包探针 (skb:kfree_skb)',
+        label: '核心丢包采集点',
         level: coreTracepointOk ? 'green' : 'red',
         summary: coreTracepointOk
-          ? '核心 tracepoint 可用'
-          : '未检测到 skb:kfree_skb tracepoint，基础采集可能无法挂接',
+          ? '可用'
+          : '缺少核心丢包采集点，可能无法正常抓包',
       });
     }
 
