@@ -31,9 +31,11 @@
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "WordFunc.nsh"
 !include "x64.nsh"
 
 !insertmacro GetSize
+!insertmacro un.WordReplace
 
 Unicode True
 SetCompressor /SOLID lzma
@@ -90,6 +92,8 @@ LangString CloseTimeoutText ${LANG_ENGLISH} "PktPath Studio is still running. Pl
 LangString AlreadyRunningText ${LANG_SIMPCHINESE} "正在关闭已运行的 PktPath Studio…"
 LangString AlreadyRunningText ${LANG_ENGLISH} "Closing the running PktPath Studio instance…"
 
+; Wait up to 24s (240 * 100ms) for the tray host to complete graceful
+; shutdown (QuitWait=16s + ForceKillWait=3s + safety margin).
 !macro CloseRunningStudio
   Push $0
   Push $1
@@ -103,7 +107,7 @@ LangString AlreadyRunningText ${LANG_ENGLISH} "Closing the running PktPath Studi
     SendMessage $0 ${WM_CLOSE} 0 0 /TIMEOUT=2000
     StrCpy $1 1
   wait:
-    IntCmp $2 100 timeout
+    IntCmp $2 240 timeout
     Sleep 100
     IntOp $2 $2 + 1
     Goto loop
@@ -121,6 +125,111 @@ LangString AlreadyRunningText ${LANG_ENGLISH} "Closing the running PktPath Studi
     Pop $1
     Pop $0
 !macroend
+
+; Remove parent directories of a relative path bottom-up using non-recursive
+; RMDir (only deletes directories that are completely empty, preserving any
+; user files stored inside $INSTDIR).
+; Input on stack: relative path using backslashes (e.g. "node\node.exe").
+Function un.PruneEmptyParents
+  Exch $0 ; $0 = current relative path
+  Push $1 ; length
+  Push $2 ; cursor index
+  Push $3 ; char
+
+  prune_outer:
+    StrLen $1 $0
+    StrCpy $2 $1
+  find_sep:
+    IntCmp $2 0 prune_done prune_done 0
+    IntOp $2 $2 - 1
+    StrCpy $3 $0 1 $2
+    StrCmp $3 "\" found_sep
+    Goto find_sep
+  found_sep:
+    IntCmp $2 0 prune_done prune_done 0
+    StrCpy $0 $0 $2
+    RMDir "$INSTDIR\$0"
+    Goto prune_outer
+
+  prune_done:
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+
+; Delete only the files listed in $INSTDIR\MANIFEST.sha256 and prune any
+; directories that become empty. Never uses recursive directory deletion so
+; unrelated user files sharing $INSTDIR cannot be deleted.
+Function un.DeleteManifestFiles
+  Push $0 ; file handle
+  Push $1 ; raw line
+  Push $2 ; relative path
+  Push $3 ; scratch / separator check
+  Push $4 ; length / last char
+
+  IfFileExists "$INSTDIR\MANIFEST.sha256" 0 manifest_done
+  FileOpen $0 "$INSTDIR\MANIFEST.sha256" r
+  IfErrors manifest_done
+
+  read_next:
+    ClearErrors
+    FileRead $0 $1
+    IfErrors read_close
+
+    ; Strip trailing CR/LF.
+  strip_eol:
+    StrLen $4 $1
+    IntCmp $4 0 read_next read_next 0
+    IntOp $4 $4 - 1
+    StrCpy $3 $1 1 $4
+    StrCmp $3 "$\r" do_strip
+    StrCmp $3 "$\n" do_strip
+    Goto parse_line
+  do_strip:
+    StrCpy $1 $1 $4
+    Goto strip_eol
+
+  parse_line:
+    ; Format: "<64-hex-sha256>  <relative/path>"
+    StrLen $4 $1
+    IntCmp $4 67 0 read_next 0
+    StrCpy $3 $1 2 64
+    StrCmp $3 "  " 0 read_next
+    StrCpy $2 $1 "" 66
+    StrCmp $2 "" read_next
+
+    ; Normalize POSIX slashes to Windows backslashes.
+    ${un.WordReplace} "$2" "/" "\" "+" $2
+
+    ; Reject absolute paths, drive letters, and parent traversal ("..").
+    StrCpy $3 $2 1
+    StrCmp $3 "\" read_next
+    ${un.WordReplace} "$2" ":" "" "+" $3
+    StrCmp $3 $2 0 read_next
+    StrCmp $2 ".." read_next
+    StrCpy $3 $2 3
+    StrCmp $3 "..\" read_next
+    ${un.WordReplace} "$2" "\..\" "" "+" $3
+    StrCmp $3 $2 0 read_next
+    StrCpy $3 $2 3 -3
+    StrCmp $3 "\.." read_next
+
+    Delete "$INSTDIR\$2"
+    Push $2
+    Call un.PruneEmptyParents
+    Goto read_next
+
+  read_close:
+    FileClose $0
+
+  manifest_done:
+  Pop $4
+  Pop $3
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
 
 Function .onInit
   SetShellVarContext current
@@ -167,15 +276,20 @@ Section "Uninstall"
   SetShellVarContext current
   !insertmacro CloseRunningStudio
 
-  ; Only the program directory, shortcuts and uninstall registry keys.
-  ; NEVER delete %LOCALAPPDATA%\PktPathStudio (sessions, logs, plugins, config).
+  ; Remove shortcuts and installed files listed in MANIFEST.sha256 only.
+  ; NEVER delete %LOCALAPPDATA%\PktPathStudio (sessions, logs, plugins, config),
+  ; and NEVER use recursive RMDir on $INSTDIR so user files remain untouched.
   Delete "$DESKTOP\PktPath Studio.lnk"
   Delete "$SMPROGRAMS\PktPath Studio\PktPath Studio.lnk"
   Delete "$SMPROGRAMS\PktPath Studio\卸载 PktPath Studio.lnk"
   RMDir "$SMPROGRAMS\PktPath Studio"
 
+  Call un.DeleteManifestFiles
+  Delete "$INSTDIR\MANIFEST.sha256"
+  Delete "$INSTDIR\PktPathStudio.exe"
   Delete "$INSTDIR\Uninstall.exe"
-  RMDir /r "$INSTDIR"
+  ; Non-recursive: removes $INSTDIR only if completely empty.
+  RMDir "$INSTDIR"
 
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   DeleteRegKey HKCU "${SETTINGS_KEY}"
