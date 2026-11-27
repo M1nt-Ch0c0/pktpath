@@ -1,10 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { HostServices } from '../../kernel/types.ts';
+import { discoverExternalPlugins } from '../../kernel/external-loader.ts';
+import type { HostServices, KernelProbeArch } from '../../kernel/types.ts';
 import type { SessionProvider } from '../analysis/types.ts';
-import { REMOTE_PLUGINS_DIR, type RemoteRun } from './adb-client.ts';
+import { REMOTE_PLUGINS_DIR, type ExternalBpfSyncItem, type RemoteRun } from './adb-client.ts';
 import type { AdbTransportService } from './android-adb.ts';
-import type { CaptureScope, CaptureSpec, EbpfCollectorService } from './ebpf-tc.ts';
+import { VALID_PROBE_GROUPS, type CaptureScope, type CaptureSpec, type EbpfCollectorService, type ProbeGroupId, type ProbePresetLabel } from './ebpf-tc.ts';
 import { enabledRuntimePluginPaths } from './runtime-plugins.ts';
 
 export type CaptureStateKind = 'idle' | 'running' | 'pulling' | 'done' | 'error';
@@ -22,6 +23,15 @@ export interface CaptureStartResult {
   remote_pid: number;
   remote_dir: string;
   command: string;
+  probe_preset?: ProbePresetLabel;
+  requested_groups?: ProbeGroupId[];
+  skipped_bpf_plugins?: SkippedBpfPlugin[];
+}
+
+export interface SkippedBpfPlugin {
+  plugin_id: string;
+  status: 'unavailable_for_arch';
+  reason: string;
 }
 
 export interface CaptureStatusSnapshot {
@@ -118,6 +128,109 @@ export function uniquePath(basePath: string): string {
     if (!fs.existsSync(candidate)) return candidate;
   }
   return `${basePath}_${Date.now()}`;
+}
+
+const BUILTIN_PROBE_GROUP_SET = new Set<string>(VALID_PROBE_GROUPS);
+
+function readKernelConfigState(appDir: string): {
+  enabled: Record<string, boolean>;
+  configs: Record<string, Record<string, unknown>>;
+} {
+  const cfgPath = path.join(appDir, 'kernel-config.json');
+  try {
+    if (!fs.existsSync(cfgPath)) return { enabled: {}, configs: {} };
+    const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    const enabled = (raw && typeof raw.enabled === 'object' && raw.enabled !== null
+      ? raw.enabled
+      : {}) as Record<string, boolean>;
+    const configs = (raw && typeof raw.configs === 'object' && raw.configs !== null
+      ? raw.configs
+      : {}) as Record<string, Record<string, unknown>>;
+    return { enabled, configs };
+  } catch {
+    return { enabled: {}, configs: {} };
+  }
+}
+
+export function hasEnabledExternalBpfPlugins(pluginsDir: string, appDir: string): boolean {
+  const { enabled } = readKernelConfigState(appDir);
+  const { loaded } = discoverExternalPlugins(pluginsDir);
+  return loaded.some((ext) => Boolean(ext.manifest.kernel_probes) && enabled[ext.manifest.id] !== false);
+}
+
+export function collectEnabledExternalBpfBundles(
+  pluginsDir: string,
+  appDir: string,
+  arch: KernelProbeArch | undefined,
+  requestedGroups: readonly string[],
+): {
+  bundles: ExternalBpfSyncItem[];
+  skipped: SkippedBpfPlugin[];
+} {
+  const { enabled, configs } = readKernelConfigState(appDir);
+  const { loaded } = discoverExternalPlugins(pluginsDir);
+  const reqSet = new Set(requestedGroups);
+  const bundles: ExternalBpfSyncItem[] = [];
+  const skipped: SkippedBpfPlugin[] = [];
+
+  for (const ext of loaded) {
+    const kp = ext.manifest.kernel_probes;
+    if (!kp) continue;
+    const pluginId = ext.manifest.id;
+    if (enabled[pluginId] === false) continue;
+
+    if (!arch || !kp.objects[arch]) {
+      skipped.push({
+        plugin_id: pluginId,
+        status: 'unavailable_for_arch',
+        reason: arch
+          ? `no precompiled BPF object for arch "${arch}"`
+          : 'could not detect target device arch',
+      });
+      continue;
+    }
+
+    const objDecl = kp.objects[arch]!;
+    const pluginCfg = configs[pluginId] ?? {};
+    const schemaFields = new Map(ext.manifest.schema.fields.map((f) => [f.key, f]));
+    const hookGroups = [...new Set(kp.hooks.map((h) => h.group))];
+    const hasPluginGroupToggles = hookGroups.some(
+      (g) => schemaFields.has(`probe_${g}`) || pluginCfg[`probe_${g}`] !== undefined,
+    );
+
+    const enabledGroups: string[] = [];
+    for (const g of hookGroups) {
+      if (hasPluginGroupToggles) {
+        const key = `probe_${g}`;
+        const val = pluginCfg[key] !== undefined ? pluginCfg[key] : schemaFields.get(key)?.default;
+        if (val === true || val === 'true' || val === 1) {
+          enabledGroups.push(g);
+        }
+      } else if (BUILTIN_PROBE_GROUP_SET.has(g)) {
+        if (reqSet.has(g)) enabledGroups.push(g);
+      } else {
+        enabledGroups.push(g);
+      }
+    }
+
+    if (enabledGroups.length === 0) continue;
+    const enabledGroupSet = new Set(enabledGroups);
+    const activeHooks = kp.hooks.filter((h) => enabledGroupSet.has(h.group));
+    if (activeHooks.length === 0) continue;
+
+    bundles.push({
+      pluginId,
+      abiVersion: 1,
+      arch,
+      localObjectPath: path.resolve(ext.dir, objDecl.path),
+      objectFileName: path.basename(objDecl.path),
+      sha256: objDecl.sha256,
+      enabledGroups,
+      hooks: activeHooks,
+    });
+  }
+
+  return { bundles, skipped };
 }
 
 /**
@@ -329,11 +442,28 @@ export class CaptureController {
       }
 
       let args = [...normalized.args];
+      let skippedBpfPlugins: SkippedBpfPlugin[] = [];
       if (normalized.enablePlugins && !spec.plugin_dir) {
         const pluginPaths = enabledRuntimePluginPaths(this.host.paths.pluginsDir);
-        if (pluginPaths.length > 0) {
-          const synced = await adb.client.syncPluginFiles(serial, pluginPaths).catch(() => 0);
-          if (synced > 0) {
+        let bpfBundles: ExternalBpfSyncItem[] = [];
+        if (hasEnabledExternalBpfPlugins(this.host.paths.pluginsDir, this.host.paths.appDir)) {
+          const arch = await adb.client.detectArch(serial);
+          const collected = collectEnabledExternalBpfBundles(
+            this.host.paths.pluginsDir,
+            this.host.paths.appDir,
+            arch,
+            normalized.requestedGroups,
+          );
+          bpfBundles = collected.bundles;
+          skippedBpfPlugins = collected.skipped;
+        }
+        if (pluginPaths.length > 0 || bpfBundles.length > 0) {
+          const syncRes = await adb.client.syncAllPlugins(serial, pluginPaths, bpfBundles).catch(() => ({
+            legacySynced: 0,
+            bpfSynced: 0,
+            bpfReused: 0,
+          }));
+          if (syncRes.legacySynced + syncRes.bpfSynced + syncRes.bpfReused > 0) {
             args.push('--plugin-dir', REMOTE_PLUGINS_DIR);
           }
         }
@@ -400,6 +530,9 @@ export class CaptureController {
         remote_pid: run.pid,
         remote_dir: run.outDir,
         command: run.command,
+        probe_preset: normalized.probePreset,
+        requested_groups: normalized.requestedGroups,
+        ...(skippedBpfPlugins.length > 0 ? { skipped_bpf_plugins: skippedBpfPlugins } : {}),
       };
     });
   }

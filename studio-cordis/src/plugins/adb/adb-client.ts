@@ -1,7 +1,10 @@
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { validateBpfObjectFile } from '../../kernel/external-loader.ts';
+import type { KernelProbeArch, KernelProbeHookDecl } from '../../kernel/types.ts';
 
 export const REMOTE_DIR = '/data/local/tmp/.pktpath_studio';
 export const REMOTE_AGENT = `${REMOTE_DIR}/pktpath`;
@@ -314,6 +317,30 @@ export function runPaths(id: string): { outDir: string; logPath: string; pidPath
   return { outDir, logPath: `${outDir}.log`, pidPath: `${outDir}.pid` };
 }
 
+export function normalizeDeviceArch(raw: string): KernelProbeArch | undefined {
+  const s = raw.trim().toLowerCase();
+  if (s === 'aarch64' || s === 'arm64') return 'arm64';
+  if (s === 'x86_64' || s === 'amd64') return 'x86_64';
+  return undefined;
+}
+
+export interface ExternalBpfSyncItem {
+  pluginId: string;
+  abiVersion: 1;
+  arch: KernelProbeArch;
+  localObjectPath: string;
+  objectFileName: string;
+  sha256: string;
+  enabledGroups: string[];
+  hooks: KernelProbeHookDecl[];
+}
+
+export interface SyncAllPluginsResult {
+  legacySynced: number;
+  bpfSynced: number;
+  bpfReused: number;
+}
+
 export class AdbClient {
   readonly adbPath: string | undefined;
   private readonly rootCache = new Map<string, RootMode>();
@@ -540,6 +567,122 @@ export class AdbClient {
       pushed += 1;
     }
     return pushed;
+  }
+
+  async detectArch(serial: string): Promise<KernelProbeArch | undefined> {
+    const r = await this.shell(serial, 'uname -m', 10_000).catch(() => ({
+      stdout: '',
+      stderr: '',
+      exitCode: 1,
+    }));
+    const first = normNL(r.stdout).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+    return normalizeDeviceArch(first);
+  }
+
+  async remoteFileSha256(serial: string, remotePath: string): Promise<string> {
+    const r = await this.priv(
+      serial,
+      `(sha256sum ${shQuote(remotePath)} 2>/dev/null || toybox sha256sum ${shQuote(remotePath)} 2>/dev/null) | awk '{print $1}'`,
+      10_000,
+    ).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    const sha = (r.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase();
+    return /^[a-f0-9]{64}$/.test(sha) ? sha : '';
+  }
+
+  async syncAllPlugins(
+    serial: string,
+    legacyJsonPaths: string[],
+    bpfBundles: ExternalBpfSyncItem[],
+  ): Promise<SyncAllPluginsResult> {
+    if (bpfBundles.length === 0) {
+      const legacySynced = await this.syncPluginFiles(serial, legacyJsonPaths);
+      return { legacySynced, bpfSynced: 0, bpfReused: 0 };
+    }
+
+    // Verify all local .bpf.o files and SHA256 before touching the device.
+    for (const bundle of bpfBundles) {
+      validateBpfObjectFile(
+        bundle.localObjectPath,
+        bundle.sha256,
+        `external BPF plugin ${bundle.pluginId}`,
+      );
+    }
+
+    // Ensure root plugin dir exists; remove stale flat *.json files and stale plugin subdirs
+    // while keeping active BPF plugin subdirs intact for incremental SHA256 reuse.
+    const keepIds = new Set(bpfBundles.map((b) => b.pluginId));
+    const keepChecks = [...keepIds].map((id) => `[ "$base" = ${shQuote(id)} ]`).join(' || ');
+    const cleanupCmd = [
+      `mkdir -p ${REMOTE_PLUGINS_DIR}`,
+      `chmod 755 ${REMOTE_PLUGINS_DIR}`,
+      `rm -f ${REMOTE_PLUGINS_DIR}/*.json`,
+      `for d in ${REMOTE_PLUGINS_DIR}/*; do [ -d "$d" ] || continue; base=$(basename "$d"); if ! (${keepChecks}); then rm -rf "$d"; fi; done`,
+    ].join(' && ');
+    await this.priv(serial, cleanupCmd, 15_000);
+
+    let legacySynced = 0;
+    for (const localPath of legacyJsonPaths) {
+      const name = path.basename(localPath);
+      const stage = `${REMOTE_TMP}_plug_${name}`;
+      await this.run(['-s', serial, 'push', localPath, stage], 20_000);
+      const dst = `${REMOTE_PLUGINS_DIR}/${name}`;
+      await this.priv(serial, `mv -f ${shQuote(stage)} ${shQuote(dst)} && chmod 644 ${shQuote(dst)}`, 10_000);
+      legacySynced += 1;
+    }
+
+    let bpfSynced = 0;
+    let bpfReused = 0;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-bpf-bundle-'));
+    try {
+      for (const bundle of bpfBundles) {
+        const pluginDir = `${REMOTE_PLUGINS_DIR}/${bundle.pluginId}`;
+        const remoteObj = `${pluginDir}/${bundle.objectFileName}`;
+        const remoteBundleJson = `${pluginDir}/bundle.json`;
+
+        await this.priv(
+          serial,
+          `mkdir -p ${shQuote(pluginDir)} && chmod 755 ${shQuote(pluginDir)}`,
+          10_000,
+        );
+
+        const existingSha = await this.remoteFileSha256(serial, remoteObj);
+        if (existingSha === bundle.sha256) {
+          bpfReused += 1;
+        } else {
+          const objStage = `${REMOTE_TMP}_bpf_${bundle.pluginId}_${bundle.objectFileName}`;
+          await this.run(['-s', serial, 'push', bundle.localObjectPath, objStage], 30_000);
+          await this.priv(
+            serial,
+            `mv -f ${shQuote(objStage)} ${shQuote(remoteObj)} && chmod 644 ${shQuote(remoteObj)}`,
+            10_000,
+          );
+          bpfSynced += 1;
+        }
+
+        const bundleDoc = {
+          abi_version: bundle.abiVersion,
+          plugin_id: bundle.pluginId,
+          arch: bundle.arch,
+          object: bundle.objectFileName,
+          sha256: bundle.sha256,
+          enabled_groups: bundle.enabledGroups,
+          hooks: bundle.hooks,
+        };
+        const localBundlePath = path.join(tempDir, `${bundle.pluginId}.bundle.json`);
+        fs.writeFileSync(localBundlePath, JSON.stringify(bundleDoc, null, 2), 'utf8');
+        const bundleStage = `${REMOTE_TMP}_bundle_${bundle.pluginId}.json`;
+        await this.run(['-s', serial, 'push', localBundlePath, bundleStage], 20_000);
+        await this.priv(
+          serial,
+          `mv -f ${shQuote(bundleStage)} ${shQuote(remoteBundleJson)} && chmod 644 ${shQuote(remoteBundleJson)}`,
+          10_000,
+        );
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+
+    return { legacySynced, bpfSynced, bpfReused };
   }
 
   async inspect(

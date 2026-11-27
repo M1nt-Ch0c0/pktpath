@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,11 @@ import type {
   ConfigSchema,
   ExporterInput,
   ExporterOutput,
+  KernelProbeArch,
+  KernelProbeHookDecl,
+  KernelProbeHookType,
+  KernelProbeObjectDecl,
+  KernelProbesManifest,
   PluginMeta,
 } from './types.ts';
 import { normalizeU64String } from './u64-json.ts';
@@ -43,6 +49,7 @@ export interface ExternalManifest {
   };
   analyzers: ExternalAnalyzerDecl[];
   exporters: ExternalExporterDecl[];
+  kernel_probes?: KernelProbesManifest;
 }
 
 export interface LoadedExternalPlugin {
@@ -61,6 +68,126 @@ export interface ExternalModuleExports {
 const VALID_ID_RE = /^[a-z0-9][a-z0-9._-]{1,95}$/;
 const VALID_SEVERITIES = new Set(['ok', 'info', 'warn', 'critical']);
 const VALID_TONES = new Set(['default', 'ok', 'warn', 'bad']);
+const MAX_BPF_OBJECT_BYTES = 2 * 1024 * 1024;
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+const VALID_BPF_ARCHES = new Set<KernelProbeArch>(['arm64', 'x86_64']);
+const VALID_HOOK_TYPES = new Set<KernelProbeHookType>([
+  'tracepoint',
+  'fentry',
+  'fexit',
+  'kprobe',
+  'kretprobe',
+  'raw_tp',
+]);
+
+export function computeFileSha256(filePath: string): string {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+export function validateBpfObjectFile(filePath: string, declaredSha256: string, label = 'bpf object'): string {
+  if (!SHA256_HEX_RE.test(declaredSha256)) {
+    throw new Error(`invalid ${label} sha256 (must be 64 lowercase hex chars)`);
+  }
+  const st = fs.statSync(filePath);
+  if (!st.isFile()) {
+    throw new Error(`${label} is not a regular file: ${filePath}`);
+  }
+  if (st.size < 64) {
+    throw new Error(`${label} too small to be a valid ELF64 object (${st.size} bytes)`);
+  }
+  if (st.size > MAX_BPF_OBJECT_BYTES) {
+    throw new Error(`${label} exceeds 2 MiB limit (${st.size} bytes)`);
+  }
+  const buf = fs.readFileSync(filePath);
+  if (buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) {
+    throw new Error(`${label} is not an ELF file (bad magic)`);
+  }
+  if (buf[4] !== 2) {
+    throw new Error(`${label} must be ELF64 (EI_CLASS=2), got ${buf[4]}`);
+  }
+  if (buf[5] !== 1) {
+    throw new Error(`${label} must be little-endian (EI_DATA=1), got ${buf[5]}`);
+  }
+  const eMachine = buf.readUInt16LE(18);
+  if (eMachine !== 247) {
+    throw new Error(`${label} must be EM_BPF (247), got e_machine=${eMachine}`);
+  }
+  const actual = crypto.createHash('sha256').update(buf).digest('hex');
+  if (actual !== declaredSha256) {
+    throw new Error(`${label} sha256 mismatch: expected ${declaredSha256}, got ${actual}`);
+  }
+  return actual;
+}
+
+function parseKernelProbes(rawProbes: unknown, pluginDir: string): KernelProbesManifest {
+  if (!isRecord(rawProbes)) {
+    throw new Error('manifest.json "kernel_probes" must be an object');
+  }
+  if (rawProbes.abi_version !== 1) {
+    throw new Error(`unsupported kernel_probes.abi_version: ${String(rawProbes.abi_version)} (expected 1)`);
+  }
+  if (!isRecord(rawProbes.objects)) {
+    throw new Error('kernel_probes.objects must be an object');
+  }
+  const objects: Partial<Record<KernelProbeArch, KernelProbeObjectDecl>> = {};
+  const objKeys = Object.keys(rawProbes.objects);
+  if (objKeys.length === 0) {
+    throw new Error('kernel_probes.objects must declare at least one arch (arm64 or x86_64)');
+  }
+  for (const archKey of objKeys) {
+    if (!VALID_BPF_ARCHES.has(archKey as KernelProbeArch)) {
+      throw new Error(`unsupported kernel_probes.objects arch: "${archKey}" (allowed: arm64, x86_64)`);
+    }
+    const decl = rawProbes.objects[archKey];
+    if (!isRecord(decl)) {
+      throw new Error(`kernel_probes.objects.${archKey} must be an object`);
+    }
+    const objRel = typeof decl.path === 'string' ? decl.path.trim() : '';
+    if (!objRel || !objRel.endsWith('.o')) {
+      throw new Error(`kernel_probes.objects.${archKey}.path must be a relative .o path`);
+    }
+    const sha256 = typeof decl.sha256 === 'string' ? decl.sha256.trim() : '';
+    const resolvedObj = assertInsideRoot(pluginDir, objRel, `kernel_probes.objects.${archKey}`);
+    validateBpfObjectFile(resolvedObj, sha256, `kernel_probes.objects.${archKey}`);
+    objects[archKey as KernelProbeArch] = { path: objRel, sha256 };
+  }
+  if (!Array.isArray(rawProbes.hooks) || rawProbes.hooks.length === 0 || rawProbes.hooks.length > 32) {
+    throw new Error('kernel_probes.hooks must be an array with 1..32 items');
+  }
+  const seenHookIds = new Set<string>();
+  const hooks: KernelProbeHookDecl[] = [];
+  for (const h of rawProbes.hooks) {
+    if (!isRecord(h)) {
+      throw new Error('each kernel_probes.hooks entry must be an object');
+    }
+    const hookId = typeof h.id === 'string' ? h.id.trim() : '';
+    const group = typeof h.group === 'string' ? h.group.trim() : '';
+    const sec = typeof h.sec === 'string' ? h.sec.trim() : '';
+    const target = typeof h.target === 'string' ? h.target.trim() : '';
+    const hookType = typeof h.type === 'string' ? h.type.trim() : '';
+    if (!hookId || !group || !sec || !target) {
+      throw new Error('kernel_probes.hooks entry requires non-empty id, group, sec, and target');
+    }
+    if (!VALID_HOOK_TYPES.has(hookType as KernelProbeHookType)) {
+      throw new Error(`invalid kernel_probes.hooks type: "${hookType}"`);
+    }
+    if (seenHookIds.has(hookId)) {
+      throw new Error(`duplicate kernel_probes.hooks id: "${hookId}"`);
+    }
+    seenHookIds.add(hookId);
+    const stage = typeof h.stage === 'string' && h.stage.trim() ? h.stage.trim() : undefined;
+    hooks.push({
+      id: hookId,
+      group,
+      sec,
+      type: hookType as KernelProbeHookType,
+      target,
+      ...(stage ? { stage } : {}),
+    });
+  }
+  return { abi_version: 1, objects, hooks };
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -170,8 +297,16 @@ export function parseExternalPluginDir(pluginDir: string): LoadedExternalPlugin 
   }
 
   const schema: ConfigSchema = isRecord(raw.schema) && Array.isArray(raw.schema.fields)
-    ? { fields: raw.schema.fields as ConfigSchema['fields'] }
+    ? {
+        fields: raw.schema.fields as ConfigSchema['fields'],
+        ...(Array.isArray(raw.schema.presets) ? { presets: raw.schema.presets as ConfigSchema['presets'] } : {}),
+        ...(Array.isArray(raw.schema.groups) ? { groups: raw.schema.groups as ConfigSchema['groups'] } : {}),
+      }
     : { fields: [] };
+
+  const kernelProbes = raw.kernel_probes !== undefined
+    ? parseKernelProbes(raw.kernel_probes, pluginDir)
+    : undefined;
 
   const capabilities = Array.isArray(raw.capabilities)
     ? raw.capabilities.filter((x): x is string => typeof x === 'string')
@@ -193,6 +328,7 @@ export function parseExternalPluginDir(pluginDir: string): LoadedExternalPlugin 
     entrypoint: { module: modRel },
     analyzers,
     exporters,
+    ...(kernelProbes ? { kernel_probes: kernelProbes } : {}),
   };
 
   const meta: PluginMeta = {
@@ -240,6 +376,8 @@ export function previewExternalPackage(sourcePath: string): {
   analyzers: ExternalAnalyzerDecl[];
   exporters: ExternalExporterDecl[];
   entrypoint_module: string;
+  has_kernel_bpf: boolean;
+  kernel_bpf_objects: Array<{ arch: string; path: string; sha256: string }>;
 } {
   const resolved = path.resolve(sourcePath);
   if (!fs.existsSync(resolved)) {
@@ -269,6 +407,12 @@ export function previewExternalPackage(sourcePath: string): {
       analyzers: parsed.manifest.analyzers,
       exporters: parsed.manifest.exporters,
       entrypoint_module: parsed.manifest.entrypoint.module,
+      has_kernel_bpf: Boolean(parsed.manifest.kernel_probes),
+      kernel_bpf_objects: parsed.manifest.kernel_probes
+        ? Object.entries(parsed.manifest.kernel_probes.objects)
+            .filter(([, v]) => Boolean(v))
+            .map(([arch, v]) => ({ arch, path: v!.path, sha256: v!.sha256 }))
+        : [],
     };
   } finally {
     if (tempDir) {
