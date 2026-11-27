@@ -15,6 +15,10 @@ export interface Site {
   stage: number
   has_stage: boolean
   evidence_level: number
+  plugin_id?: string
+  group?: string
+  source?: string
+  target?: string
 }
 
 export interface TopoDevice {
@@ -146,9 +150,59 @@ export function parseSites(d: Record<string, unknown>): Map<number, Site> {
       has_stage: stageVal !== undefined,
       evidence_level: asInt(m['evidence_level']) ?? 0,
     }
+    const pluginId = jstr(m['plugin_id'])
+    if (pluginId) s.plugin_id = pluginId
+    const group = jstr(m['group'])
+    if (group) s.group = group
+    const source = jstr(m['source'])
+    if (source) s.source = source
+    const target = jstr(m['target'])
+    if (target) s.target = target
     out.set(idx, s)
   }
   return out
+}
+
+export function mergeManifestSites(sites: Map<number, Site>, manifest: Record<string, unknown>): void {
+  const arr = manifest['sites']
+  if (!Array.isArray(arr)) return
+  for (const a of arr) {
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) continue
+    const m = a as Record<string, unknown>
+    const idx = asInt(m['site_idx']) ?? asInt(m['site_id']) ?? asInt(m['id'])
+    if (idx === undefined) continue
+    const pluginId = jstr(m['plugin_id']) || undefined
+    const group = jstr(m['group']) || undefined
+    const source = jstr(m['source']) || (pluginId || idx >= 0x2000 ? 'external_bpf' : undefined)
+    const target = jstr(m['target']) || undefined
+    const existing = sites.get(idx)
+    if (existing) {
+      if (pluginId && !existing.plugin_id) existing.plugin_id = pluginId
+      if (group && !existing.group) existing.group = group
+      if (source && !existing.source) existing.source = source
+      if (target && !existing.target) existing.target = target
+      continue
+    }
+    const stageVal = m['stage'] !== undefined && m['stage'] !== null ? asInt(m['stage']) : undefined
+    const name = jstr(m['name']) || jstr(m['probe_id']) || target || `site_${idx}`
+    const symbol = jstr(m['symbol']) || target || name
+    sites.set(idx, {
+      site_idx: idx,
+      adapter_id: jstr(m['adapter_id']) || (pluginId ? `plugin:${pluginId}` : 'external_bpf'),
+      name,
+      symbol,
+      qdisc_kind: jstr(m['qdisc_kind']).trim().toLowerCase() || undefined,
+      probe_type: 'probe_type' in m ? jstr(m['probe_type']) : (source === 'external_bpf' ? 'external_bpf' : ''),
+      probe_version: jstr(m['probe_version']),
+      stage: stageVal ?? 0,
+      has_stage: stageVal !== undefined,
+      evidence_level: asInt(m['evidence_level']) ?? 0,
+      ...(pluginId ? { plugin_id: pluginId } : {}),
+      ...(group ? { group } : {}),
+      ...(source ? { source } : {}),
+      ...(target ? { target } : {}),
+    })
+  }
 }
 
 export function parseTopology(d: Record<string, unknown>): TopoEpoch[] {

@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { buildOverview, buildSampleDetail, reconstruct } from './reconstruct/index.ts'
 import type { Session, SessionOverview } from './reconstruct/index.ts'
+import { buildSessionHealth } from './manifest-health.ts'
 import type {
   AnalysisHostLike,
   AnalyzerOutput,
@@ -530,8 +531,15 @@ export class SessionStore implements SessionProvider {
       }
     }
 
+    const probeHealth = buildSessionHealth(base.session, base.overview)
+
     if (!analysisOut) {
-      const baseRecord = base.overview as unknown as Record<string, unknown>
+      const baseRecord: Record<string, unknown> = {
+        ...(base.overview as unknown as Record<string, unknown>),
+        probe_health: probeHealth,
+        external_bpf_plugins: probeHealth.external_bpf_plugins,
+        drop_reasons_summary: probeHealth.drop_reasons_summary,
+      }
       analysisOut = this.host && typeof this.host.runAnalyzers === 'function'
         ? await this.host.runAnalyzers(sessionId, dir, baseRecord)
         : { insights: [], kpis: [], notes: [] }
@@ -552,6 +560,9 @@ export class SessionStore implements SessionProvider {
       ...base.overview,
       session_id: sessionId,
       session_dir: dir,
+      probe_health: probeHealth,
+      external_bpf_plugins: probeHealth.external_bpf_plugins,
+      drop_reasons_summary: probeHealth.drop_reasons_summary,
       plugin_insights: analysisOut.insights,
       plugin_kpis: analysisOut.kpis,
       plugin_notes: analysisOut.notes,

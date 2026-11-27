@@ -181,8 +181,70 @@ export const anomalyRadarPlugin: BuiltinPlugin = {
           })
         }
 
+        // Wave 3 health awareness: never report silent green when probes/capabilities degraded or samples lost.
+        const healthRec =
+          typeof ov['probe_health'] === 'object' && ov['probe_health'] !== null
+            ? (ov['probe_health'] as Record<string, unknown>)
+            : null
+        const bannerRec =
+          healthRec && typeof healthRec['banner'] === 'object' && healthRec['banner'] !== null
+            ? (healthRec['banner'] as Record<string, unknown>)
+            : null
+        const sampleLossRec =
+          healthRec && typeof healthRec['sample_loss'] === 'object' && healthRec['sample_loss'] !== null
+            ? (healthRec['sample_loss'] as Record<string, unknown>)
+            : null
+        const bannerSeverity = typeof bannerRec?.['severity'] === 'string' ? bannerRec['severity'] : 'ok'
+        const hasSampleLoss = Boolean(sampleLossRec?.['has_loss'])
+        const zeroHitVerdict =
+          typeof bannerRec?.['zero_hit_verdict'] === 'string'
+            ? bannerRec['zero_hit_verdict']
+            : hasSampleLoss
+              ? '0 命中（存在丢样，不保证未发生）'
+              : '已观测，窗口内 0 次触发'
+        const degradedProbes = Array.isArray(bannerRec?.['degraded_probes'])
+          ? (bannerRec['degraded_probes'] as Array<Record<string, unknown>>)
+          : []
+        const disabledGroups = Array.isArray(bannerRec?.['disabled_groups'])
+          ? (bannerRec['disabled_groups'] as Array<Record<string, unknown>>)
+          : []
+        const capWarnings = Array.isArray(bannerRec?.['capability_warnings'])
+          ? (bannerRec['capability_warnings'] as string[])
+          : []
+
+        if (disabledGroups.length > 0) {
+          const labels = disabledGroups
+            .map((g) => String(g['label'] ?? g['group_id'] ?? ''))
+            .filter(Boolean)
+          if (labels.length > 0) {
+            out.notes.push(`未开启（未观测）探针组：${labels.join('、')}；对应路径空白不计为丢包或 SEQ_GAP`)
+          }
+        }
+
+        if (bannerSeverity === 'error' || bannerSeverity === 'warn') {
+          const bannerTitle =
+            typeof bannerRec?.['title'] === 'string' ? bannerRec['title'] : '探针或能力存在降级'
+          const bannerSummary =
+            typeof bannerRec?.['summary'] === 'string' ? bannerRec['summary'] : '当前观测不完整。'
+          out.insights.push({
+            id: 'radar.probe_health_degraded',
+            plugin_id: 'builtin.analyzer.anomaly-radar',
+            analyzer_id: 'anomaly-radar',
+            severity: bannerSeverity === 'error' ? 'critical' : 'warn',
+            title: bannerTitle,
+            summary: bannerSummary,
+            detail: bannerSummary,
+            metric:
+              degradedProbes.length > 0
+                ? `${degradedProbes.length} 项探针降级`
+                : capWarnings.length > 0
+                  ? `${capWarnings.length} 项能力降级`
+                  : '存在丢样',
+          })
+        }
+
         if (out.insights.length === 0 && rawSamples.length > 0) {
-          const summary = `共 ${rawSamples.length} 个样本，最大驻留 ${maxMs.toFixed(2)} ms（阈值 ${warnMs.toFixed(1)} ms），无丢包与重排。`
+          const summary = `共 ${rawSamples.length} 个样本，最大驻留 ${maxMs.toFixed(2)} ms（阈值 ${warnMs.toFixed(1)} ms），丢包与重排：${zeroHitVerdict}。`
           out.insights.push({
             id: 'radar.healthy',
             plugin_id: 'builtin.analyzer.anomaly-radar',
@@ -197,19 +259,20 @@ export const anomalyRadarPlugin: BuiltinPlugin = {
 
         let tone: 'ok' | 'warn' | 'bad' = 'ok'
         let statusLabel = '正常'
-        if (drops >= dropThresh || maxMs >= critMs) {
+        if (drops >= dropThresh || maxMs >= critMs || bannerSeverity === 'error') {
           tone = 'bad'
-          statusLabel = '存在瓶颈/丢包'
-        } else if (slow.length > 0 || requeueCount >= reqThresh) {
+          statusLabel = bannerSeverity === 'error' && drops < dropThresh && maxMs < critMs ? '探针挂载失败' : '存在瓶颈/丢包'
+        } else if (slow.length > 0 || requeueCount >= reqThresh || bannerSeverity === 'warn') {
           tone = 'warn'
-          statusLabel = '时延波动'
+          statusLabel = bannerSeverity === 'warn' && slow.length === 0 && requeueCount < reqThresh ? '观测存在降级' : '时延波动'
         }
+        const dropText = drops > 0 ? `丢包 ${drops}` : `丢包 ${zeroHitVerdict}`
         out.kpis.push({
           plugin_id: 'builtin.analyzer.anomaly-radar',
           analyzer_id: 'anomaly-radar',
           label: '异常雷达评估',
           value: statusLabel,
-          sub: `峰值 ${maxMs.toFixed(2)} ms · 丢包 ${drops} · 重排 ${requeueCount}`,
+          sub: `峰值 ${maxMs.toFixed(2)} ms · ${dropText} · 重排 ${requeueCount}`,
           tone,
         })
         return out

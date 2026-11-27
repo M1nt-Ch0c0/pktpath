@@ -59,6 +59,7 @@ import {
   inferQdiscKindFromSite,
   isParentTCClass,
   jstr,
+  mergeManifestSites,
   parseCalibrations,
   parseSites,
   parseTopology,
@@ -302,6 +303,7 @@ export class Session {
     this.manifest = ls.manifest
     this.dict = ls.dictionary
     this.sites = parseSites(ls.dictionary)
+    mergeManifestSites(this.sites, ls.manifest)
     this.topo = parseTopology(ls.dictionary)
     this.calibs = parseCalibrations(ls.manifest)
   }

@@ -74,6 +74,33 @@ export const dagReconstructPlugin: BuiltinPlugin = {
             sample_ids: capped,
           })
         }
+
+        // Wave 3: attribute external .bpf.o plugin hits by plugin_id
+        const extPlugins = input.overview['external_bpf_plugins']
+        if (Array.isArray(extPlugins) && extPlugins.length > 0) {
+          for (const raw of extPlugins) {
+            if (typeof raw !== 'object' || raw === null) continue
+            const p = raw as Record<string, unknown>
+            const pluginId = typeof p['plugin_id'] === 'string' ? p['plugin_id'] : ''
+            const hitCount = typeof p['hit_count'] === 'number' ? p['hit_count'] : 0
+            if (!pluginId || hitCount <= 0) continue
+            const sampleIds = Array.isArray(p['sample_ids'])
+              ? (p['sample_ids'] as unknown[]).map((x) => String(x)).slice(0, 10)
+              : []
+            const summary = `外置 eBPF 插件 ${pluginId} 命中 ${hitCount} 次（涉及 ${sampleIds.length} 条样本）。`
+            out.insights.push({
+              id: `dag.external_bpf.${pluginId}`,
+              plugin_id: 'builtin.analyzer.dag-reconstruct',
+              analyzer_id: 'dag-reconstruct',
+              severity: 'info',
+              title: `外置 eBPF 插件命中：${pluginId}`,
+              summary,
+              detail: summary,
+              metric: `${hitCount} 次命中`,
+              sample_ids: sampleIds,
+            })
+          }
+        }
         return out
       },
     }

@@ -41,6 +41,8 @@ import {
   objectInitialSummary,
 } from './model.ts'
 import type { BranchPath, QStateAnnotation, QueueVisit, SampleGraph, Session } from './model.ts'
+import { normalizeWave3Manifest, resolveDropReason } from '../manifest-health.ts'
+import type { NormalizedWave3Manifest, ResolvedDropReason } from '../manifest-health.ts'
 import { branchPathSignature, computeStats, round3 } from './stats.ts'
 import type { Stats } from './stats.ts'
 import {
@@ -160,6 +162,9 @@ export interface TimelineEvent {
   probe_type: string
   probe_version: string
   adapter_name: string
+  plugin_id?: string
+  probe_source?: string
+  probe_group?: string
 }
 
 export interface BranchDetail {
@@ -173,6 +178,7 @@ export interface BranchDetail {
   endpoint: string
   end_reason: number
   drop_reason: string | null
+  drop_reason_resolved?: ResolvedDropReason | null
   boundary_note: string
   object_chain: string[]
   requeue_count: number
@@ -410,7 +416,12 @@ function visitQueueLabel(s: Session, v: QueueVisit, st: WireEvent): string {
   return qdiscStepLabelWithHint(s, st, s.resolveVisitQdiscKind(v))
 }
 
-function boundaryMessage(scope: string, br: BranchPath): string {
+function boundaryMessage(
+  scope: string,
+  br: BranchPath,
+  wave3?: NormalizedWave3Manifest,
+  resolvedDrop?: ResolvedDropReason | null,
+): string {
   if (br.end_reason_name === 'UNKNOWN_TAIL') {
     return '会话异常中断/缺少末尾健康检查点 (UNKNOWN_TAIL)；后续状态不可证'
   }
@@ -419,6 +430,9 @@ function boundaryMessage(scope: string, br: BranchPath): string {
       return `驱动接手 (NETDEV_TX_OK)；硬件队列/Wi-Fi 固件排队与空口 ACK 位于 ${scope} 软件观测范围之外`
     case END_DROP:
       if (br.drop_reason !== undefined) {
+        if (wave3?.present && resolvedDrop) {
+          return `内核协议栈/队列明确丢包 (DROP) (drop_reason=${resolvedDrop.label})`
+        }
         return `内核协议栈/队列明确丢包 (DROP) (drop_reason=${br.drop_reason.toString()})`
       }
       return '内核协议栈/队列明确丢包 (DROP)'
@@ -434,8 +448,18 @@ function boundaryMessage(scope: string, br: BranchPath): string {
       return '检测到地址身份冲突并隔离截断 (CONFLICT_TRUNCATED)'
     case END_BOUNDARY:
       return `跨出当前已挂载观测边界 (${scope} BOUNDARY)`
-    default:
+    default: {
+      if (wave3?.present) {
+        const unobserved = wave3.probe_inventory
+          .filter((p) => p.status !== 'attached')
+          .map((p) => p.group)
+        if (unobserved.length > 0) {
+          const uniq = [...new Set(unobserved)]
+          return `未观测到终点事件 (OPEN_UNFINISHED)；部分探针组未开启或降级（${uniq.join(', ')}），路径空白不视为丢包`
+        }
+      }
       return '未观测到终点事件 (OPEN_UNFINISHED)'
+    }
   }
 }
 
@@ -455,6 +479,9 @@ function fillProbeMeta(s: Session, te: TimelineEvent, ev: WireEvent | undefined)
     te.probe_name = `${ptype}:${sym}`
     te.probe_version = pver
     te.adapter_name = s.adapterName(site.adapter_id)
+    if (site.plugin_id) te.plugin_id = site.plugin_id
+    if (site.source) te.probe_source = site.source
+    if (site.group) te.probe_group = site.group
   } else {
     te.probe_name = `site#${ev.site_dict_idx}`
   }
@@ -663,6 +690,9 @@ function buildSampleSummary(s: Session, sg: SampleGraph, baseNs: bigint): Sample
 
 function buildBranchDetail(s: Session, sg: SampleGraph, br: BranchPath, baseNs: bigint): BranchDetail {
   const scope = manifestStr(s.manifest, 'scope', 'tc-egress')
+  const wave3 = normalizeWave3Manifest(s.manifest)
+  const resolvedDrop =
+    wave3.present && br.drop_reason !== undefined ? resolveDropReason(br.drop_reason, wave3) : null
   let relDesc = '主路径'
   if (br.relation_chain.length > 0) {
     relDesc = br.relation_chain
@@ -680,7 +710,8 @@ function buildBranchDetail(s: Session, sg: SampleGraph, br: BranchPath, baseNs: 
     endpoint: br.end_reason_name,
     end_reason: br.end_reason,
     drop_reason: optStr(br.drop_reason),
-    boundary_note: boundaryMessage(scope, br),
+    ...(wave3.present && br.drop_reason !== undefined ? { drop_reason_resolved: resolvedDrop } : {}),
+    boundary_note: boundaryMessage(scope, br, wave3, resolvedDrop),
     object_chain: br.object_ids.map((id) => id.toString()),
     requeue_count: br.requeue_count,
     start_rel_us: relUs(br.start_ts_ns, baseNs),
