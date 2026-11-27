@@ -149,7 +149,7 @@ class ReconcileReleaseChecksumsTests(unittest.TestCase):
                 "--allow-existing-release", "true",
             )
             self.assertNotEqual(r.returncode, 0)
-            self.assertIn("Refusing to leave two Windows zips", r.stderr)
+            self.assertIn("Refusing to leave two Windows packages", r.stderr)
 
     def test_conflicting_linux_tarball_name_blocked_even_with_allow_existing(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -235,6 +235,41 @@ class ReconcileReleaseChecksumsTests(unittest.TestCase):
             self.assertNotEqual(r_bad.returncode, 0)
             self.assertIn("size mismatch", r_bad.stderr)
 
+
+    def test_windows_nsis_installer_create_and_conflict_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dist = root / "dist"
+            dist.mkdir()
+            (dist / "PktPath-Studio-Setup-preview-r3-win-x64.exe").write_bytes(b"MZ-setup")
+            (dist / "pktpath-linux-x64-preview-r3.tar.gz").write_bytes(b"linux-tar")
+            (dist / "pktpath-android-arm64").write_bytes(b"android-elf")
+
+            r = run_cli(
+                "check-existing",
+                "--dist-dir", str(dist),
+                "--release-exists", "false",
+                "--event-name", "push",
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "create")
+
+            # Existing release has legacy zip -> must block uploading exe alongside zip
+            existing = root / "existing.json"
+            existing.write_text(
+                json.dumps({"assets": [{"name": "pktpath-windows-x64-preview-r3.zip"}]}),
+                encoding="utf-8",
+            )
+            r_conflict = run_cli(
+                "check-existing",
+                "--dist-dir", str(dist),
+                "--release-exists", "true",
+                "--existing-assets-json", str(existing),
+                "--event-name", "workflow_dispatch",
+                "--allow-existing-release", "true",
+            )
+            self.assertNotEqual(r_conflict.returncode, 0)
+            self.assertIn("Refusing to leave two Windows packages", r_conflict.stderr)
 
 if __name__ == "__main__":
     unittest.main()
