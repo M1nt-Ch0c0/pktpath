@@ -605,7 +605,7 @@ def pack_nsis_installer(
     cmd = [
         exe,
         f"{flag_prefix}V3",
-        f"{flag_prefix}DSTAGE_DIR={bundle_dir.resolve()}",
+        f"{flag_prefix}DSTAGING_DIR={bundle_dir.resolve()}",
         f"{flag_prefix}DOUT_FILE={out_exe}",
         f"{flag_prefix}DAPP_VERSION={app_version}",
         str(nsis_script.resolve()),
