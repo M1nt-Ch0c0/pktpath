@@ -582,7 +582,7 @@ test('required and usedBy metadata from /api/kernel/state are preserved and lock
 test('formatUserError translates internal service/plugin errors and never leaks raw service is not active', () => {
   const s1 = surface.formatUserError('session.provider service is not active');
   assert.doesNotMatch(s1, /service is not active|session\.provider/i);
-  assert.match(s1, /离线会话存储/);
+  assert.match(s1, /本地会话存储与加载/);
   assert.match(s1, /插件中心/);
 
   const s2 = surface.formatUserError('custom.internal.svc service is not active');
@@ -600,7 +600,7 @@ test('formatUserError translates internal service/plugin errors and never leaks 
 
   const s5 = surface.formatUserError('required service unavailable after disabling builtin.transport.offline');
   assert.doesNotMatch(s5, /builtin\.transport\.offline|unavailable after disabling/i);
-  assert.match(s5, /离线会话存储/);
+  assert.match(s5, /本地会话存储与加载/);
 
   const s6 = surface.formatUserError('cannot disable required plugin builtin.transport.offline');
   assert.doesNotMatch(s6, /builtin\.transport\.offline/i);

@@ -604,7 +604,7 @@
             ${toggleHtml}
           </div>
           <div class="pc-item-desc">${esc(m.description)}</div>
-          ${deps.length ? `<div class="pc-item-usedby">核心依赖：${esc(deps.join(' · '))}</div>` : ''}
+          ${deps.length ? `<div class="pc-item-usedby">${req ? '核心依赖：' : '依赖功能：'}${esc(deps.join(' · '))}</div>` : ''}
         </div>`;
     }).join('');
 
@@ -628,7 +628,7 @@
     const ptsHtml = (p.extension_points || []).map((pt) => `<span class="chip chip-accent">${esc(EXT_POINT_ZH[pt] || pt)}</span>`).join('');
     const reqsHtml = (m.requires || []).map((r) => `<span class="chip">依赖 ${esc(r)}</span>`).join('');
     const usedByHtml = deps.length
-      ? `<div class="pc-used-by"><span class="pc-used-by-label">被以下核心功能依赖：</span><div class="pc-meta-chips">${deps.map((u) => `<span class="chip chip-accent">${esc(u)}</span>`).join('')}</div></div>`
+      ? `<div class="pc-used-by"><span class="pc-used-by-label">${req ? '被以下核心功能依赖：' : '被以下功能依赖：'}</span><div class="pc-meta-chips">${deps.map((u) => `<span class="chip chip-accent">${esc(u)}</span>`).join('')}</div></div>`
       : (req ? '<div class="pc-used-by"><span class="pc-used-by-label">核心底座插件，不可关闭，以保障工作台基础能力正常运转。</span></div>' : '');
     const detOriginBadge = req
       ? '<span class="badge badge-accent">核心内置 · 不可关闭</span>'

@@ -65,8 +65,8 @@
   });
 
   const SERVICE_PLUGIN_LABELS = Object.freeze({
-    'session.provider': '离线会话存储',
-    'builtin.transport.offline': '离线会话存储',
+    'session.provider': '本地会话存储与加载',
+    'builtin.transport.offline': '本地会话存储与加载',
     'transport.adb': 'Android ADB 连接',
     'builtin.transport.android-adb': 'Android ADB 连接',
     'collector.ebpf': 'eBPF/TC 采集器',
