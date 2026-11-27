@@ -21,9 +21,10 @@ type TrayHost struct {
 	nid       notifyIconDataW
 	tbCreated uint32
 
-	mu       sync.Mutex
-	shutting bool
-	busy     bool
+	mu          sync.Mutex
+	shutting    bool
+	busy        bool
+	pendingOpen bool
 }
 
 var trayWndProc = syscall.NewCallback(trayWindowProc)
@@ -35,7 +36,15 @@ func newTrayHost(opt TrayOptions) *TrayHost {
 	l.SkipHash = opt.SkipHash
 	h := &TrayHost{opts: opt, paths: p, launcher: l}
 	l.SetOnUnexpectedExit(func(err error) {
-		h.setTip("PktPath Studio 已停止，可通过托盘「重启服务」恢复")
+		if err == nil {
+			// Backend exited cleanly (for example, user clicked Exit in the web UI).
+			// Shut down the tray host too so it does not stay behind as an empty shell.
+			if h.hwnd != 0 {
+				postMessage(h.hwnd, wmClose, 0, 0)
+			}
+			return
+		}
+		h.setTip("PktPath Studio 已停止，再次打开或右键「重启服务」即可恢复")
 	})
 	return h
 }
@@ -72,18 +81,57 @@ func (h *TrayHost) deleteIcon() {
 	notifyIcon(nimDelete, &h.nid)
 }
 
+func (h *TrayHost) consumePendingOpen() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v := h.pendingOpen
+	h.pendingOpen = false
+	return v
+}
+
 func (h *TrayHost) openStudio() {
-	url := h.launcher.URL()
-	if url == "" {
-		if u, ok := ProbeExisting(h.paths.RuntimePath); ok {
-			url = u
-		}
-	}
-	if !safeLocalURL(url) {
-		messageBox(h.hwnd, "Studio 尚未就绪，请稍候或从托盘「查看日志」。\n日志目录：\n"+h.paths.LogsDir, "PktPath Studio", mbOK|mbIconWarning|mbSetForeground|mbTopmost)
+	h.handleActivate(false)
+}
+
+// handleActivate is called both on tray left-click/"Open" and when a second
+// PktPathStudio.exe launch posts wmActivate. It guarantees that clicking or
+// double-clicking always either opens the live UI, waits for an in-flight
+// start, or restarts a stopped backend automatically.
+func (h *TrayHost) handleActivate(noOpen bool) {
+	h.mu.Lock()
+	shutting := h.shutting
+	busy := h.busy
+	h.mu.Unlock()
+
+	decision := DecideTrayActivate(h.launcher.Running(), h.launcher.Starting(), busy, shutting)
+	switch decision {
+	case ActivateIgnore:
 		return
+	case ActivateOpenBrowser:
+		if noOpen {
+			return
+		}
+		url := h.launcher.URL()
+		if url == "" {
+			if u, ok := ProbeExisting(h.paths.RuntimePath); ok {
+				url = u
+			}
+		}
+		if safeLocalURL(url) {
+			shellExecuteOpen(url)
+			return
+		}
+		// URL disappeared unexpectedly; restart the backend cleanly.
+		h.restartAsyncWithOpen(true)
+	case ActivateWaitAndOpen:
+		if !noOpen {
+			h.mu.Lock()
+			h.pendingOpen = true
+			h.mu.Unlock()
+		}
+	case ActivateRestartAndOpen:
+		h.restartAsyncWithOpen(!noOpen)
 	}
-	shellExecuteOpen(url)
 }
 
 func (h *TrayHost) openDir(dir string) {
@@ -95,8 +143,15 @@ func (h *TrayHost) openDir(dir string) {
 }
 
 func (h *TrayHost) restartAsync() {
+	h.restartAsyncWithOpen(!h.opts.NoOpen)
+}
+
+func (h *TrayHost) restartAsyncWithOpen(openAfter bool) {
 	h.mu.Lock()
 	if h.shutting || h.busy {
+		if openAfter {
+			h.pendingOpen = true
+		}
 		h.mu.Unlock()
 		return
 	}
@@ -108,15 +163,17 @@ func (h *TrayHost) restartAsync() {
 			h.busy = false
 			h.mu.Unlock()
 		}()
-		h.setTip("PktPath Studio 正在重启…")
+		h.setTip("PktPath Studio 正在启动…")
 		if err := h.launcher.Restart(); err != nil {
-			h.setTip("PktPath Studio 重启失败，请查看日志")
+			h.consumePendingOpen()
+			h.setTip("PktPath Studio 启动失败，请查看日志")
 			messageBox(h.hwnd, err.Error()+"\n\n日志目录：\n"+h.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 			return
 		}
 		url := h.launcher.URL()
 		h.setTip(tipForURL(url))
-		if !h.opts.NoOpen && safeLocalURL(url) {
+		shouldOpen := openAfter || h.consumePendingOpen()
+		if shouldOpen && safeLocalURL(url) {
 			shellExecuteOpen(url)
 		}
 	}()
@@ -171,6 +228,9 @@ func trayWindowProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		case wmRButtonUp:
 			popupTrayMenu(hwnd)
 		}
+		return 0
+	case wmActivate:
+		h.handleActivate(wparam != 0)
 		return 0
 	case wmCommand:
 		switch loWord(wparam) {

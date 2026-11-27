@@ -19,6 +19,7 @@ const (
 	wmLButtonDblClk   = 0x0203
 	wmApp             = 0x8000
 	wmTray            = wmApp + 1
+	wmActivate        = wmApp + 2
 
 	wsOverlapped = 0x00000000
 	swHide       = 0
@@ -238,8 +239,17 @@ func destroyWindow(hwnd uintptr) {
 	procDestroyWindow.Call(hwnd)
 }
 
-func postMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) {
-	procPostMessageW.Call(hwnd, uintptr(msg), wparam, lparam)
+func postMessage(hwnd uintptr, msg uint32, wparam, lparam uintptr) bool {
+	r, _, _ := procPostMessageW.Call(hwnd, uintptr(msg), wparam, lparam)
+	return r != 0
+}
+
+func postActivateMessage(hwnd uintptr, noOpen bool) bool {
+	var wp uintptr
+	if noOpen {
+		wp = 1
+	}
+	return postMessage(hwnd, wmActivate, wp, 0)
 }
 
 func messageLoop() int {

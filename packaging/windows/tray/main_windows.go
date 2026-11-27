@@ -24,14 +24,28 @@ func runWindowsTray() int {
 	}
 	defer closeHandle(hMutex)
 	if already {
-		url, ok := ProbeExistingWait(host.paths.RuntimePath, ProbeWait)
-		if ok && safeLocalURL(url) && !opt.NoOpen {
-			shellExecuteOpen(url)
-			return 0
+		outcome := HandleSecondInstance(
+			func() (string, bool) { return ProbeExisting(host.paths.RuntimePath) },
+			findTrayWindow,
+			postActivateMessage,
+			func(url string) {
+				if safeLocalURL(url) {
+					shellExecuteOpen(url)
+				}
+			},
+			opt.NoOpen,
+			SecondInstanceWait,
+			SecondInstancePoll,
+		)
+		if outcome == OutcomeUnresponsive {
+			messageBox(
+				0,
+				"PktPath Studio 后台程序未响应，请先在任务栏右下角托盘图标右键选择「退出」（或在任务管理器结束 PktPathStudio.exe）后重试。",
+				"PktPath Studio",
+				mbOK|mbIconWarning|mbSetForeground|mbTopmost,
+			)
+			return 1
 		}
-		// First instance exists (or is still starting). Do not start a second
-		// backend. If we found a live window, we already tried to open it.
-		_ = findTrayWindow()
 		return 0
 	}
 
@@ -52,6 +66,7 @@ func runWindowsTray() int {
 		return 1
 	}
 	host.hwnd = hwnd
+	allowMessage(hwnd, wmActivate)
 	host.tbCreated = registerTaskbarCreated()
 	if host.tbCreated != 0 {
 		allowMessage(hwnd, host.tbCreated)
@@ -60,16 +75,21 @@ func runWindowsTray() int {
 	host.setTip("PktPath Studio 正在启动…")
 
 	// Start the Node backend on a goroutine so the message loop is live
-	// (Explorer / NSIS can already see the window class).
+	// (Explorer / NSIS / second launches can already reach the tray window).
 	go func() {
 		if err := host.launcher.Start(); err != nil {
+			host.consumePendingOpen()
 			host.setTip("PktPath Studio 启动失败，请查看日志")
 			messageBox(hwnd, err.Error()+"\n\n日志目录：\n"+host.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+			// Exit the tray cleanly instead of leaving an empty shell holding
+			// the single-instance mutex.
+			postMessage(hwnd, wmClose, 0, 0)
 			return
 		}
 		url := host.launcher.URL()
 		host.setTip(tipForURL(url))
-		if !opt.NoOpen && safeLocalURL(url) {
+		shouldOpen := !opt.NoOpen || host.consumePendingOpen()
+		if shouldOpen && safeLocalURL(url) {
 			shellExecuteOpen(url)
 		}
 	}()

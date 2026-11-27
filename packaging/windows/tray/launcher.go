@@ -66,6 +66,12 @@ func (l *Launcher) Running() bool {
 	return l.state == stateRunning && l.cmd != nil && l.cmd.Process != nil && !processExited(l.cmd)
 }
 
+func (l *Launcher) Starting() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.state == stateStarting
+}
+
 func (l *Launcher) UnexpectedExit() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -158,12 +164,17 @@ func (l *Launcher) startLocked() error {
 		var cb func(error)
 		if running {
 			l.state = stateExited
+			l.url = ""
+			l.ready = nil
 			l.unexpected = true
 			cb = l.onExit
 		} else if l.cmd == cmd && l.state == stateStopping {
 			l.state = stateExited
 		}
 		l.mu.Unlock()
+		if running {
+			RemoveRuntime(l.Paths.RuntimePath)
+		}
 		if cb != nil {
 			cb(err)
 		}
