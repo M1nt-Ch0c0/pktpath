@@ -15,7 +15,11 @@
   !define APP_VERSION "0.0.0-preview"
 !endif
 !ifndef STAGING_DIR
-  !error "STAGING_DIR is required (payload directory)"
+  !ifdef STAGE_DIR
+    !define STAGING_DIR "${STAGE_DIR}"
+  !else
+    !error "STAGE_DIR (or STAGING_DIR) is required (payload directory)"
+  !endif
 !endif
 !ifndef OUT_FILE
   !error "OUT_FILE is required (Setup .exe path)"
