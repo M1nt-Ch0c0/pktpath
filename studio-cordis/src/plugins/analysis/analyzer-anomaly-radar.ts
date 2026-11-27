@@ -29,6 +29,7 @@ export const anomalyRadarPlugin: BuiltinPlugin = {
       '汇总丢包（DROP）与驱动 BUSY 重排（Requeue）',
     ],
     provides: ['analyzer.anomaly-radar'],
+    usedBy: ['异常雷达诊断'],
     tags: ['diagnostics', 'anomaly', 'radar'],
   },
   schema: {

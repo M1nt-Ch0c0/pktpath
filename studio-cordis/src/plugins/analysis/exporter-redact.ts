@@ -22,6 +22,7 @@ export const redactExporterPlugin: BuiltinPlugin = {
       '另存为可独立打开的脱敏会话目录，绝不改动原会话',
     ],
     provides: ['exporter.redact'],
+    usedBy: ['隐私脱敏导出'],
     tags: ['privacy', 'redact'],
   },
   schema: {

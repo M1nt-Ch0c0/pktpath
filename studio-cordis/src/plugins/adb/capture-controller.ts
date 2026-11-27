@@ -70,8 +70,12 @@ export interface CaptureStopResult {
 
 export class CaptureConflictError extends Error {
   readonly statusCode = 409;
-  constructor(msg: string) {
+  readonly captureId?: string;
+  readonly logLines?: string[];
+  constructor(msg: string, captureId?: string, logLines?: string[]) {
     super(msg);
+    this.captureId = captureId;
+    this.logLines = logLines;
   }
 }
 
@@ -294,12 +298,16 @@ export class CaptureController {
   ): Promise<CaptureStartResult> {
     return this.runExclusive(async () => {
       if (this.state === 'running' || this.state === 'pulling') {
-        throw new CaptureConflictError(`capture ${this.captureId} is already active`);
+        throw new CaptureConflictError(
+          `capture ${this.captureId} is already active`,
+          this.captureId,
+          [...this.logTail],
+        );
       }
       const adb = this.host.getService<AdbTransportService>('transport.adb');
       const collector = this.host.getService<EbpfCollectorService>('collector.ebpf');
       if (!adb || !collector) {
-        throw new CaptureBadRequestError('transport.adb and collector.ebpf services must be active');
+        throw new CaptureBadRequestError('请先在插件页启用「Android ADB 连接」和「eBPF TC / Socket 采集器」插件后再开始采集。');
       }
       let serial = (spec.serial ?? '').trim();
       if (!serial) {
@@ -370,7 +378,8 @@ export class CaptureController {
           this.state = 'error';
           this.lastError = msg;
           this.endedAt = Date.now();
-          void adb.client.cleanupRun(serial, run).catch(() => false);
+          // Await remote cleanup before reporting failure so no dangling cleanup process races with callers.
+          this.remoteCleaned = await adb.client.cleanupRun(serial, run).catch(() => false);
           throw new CaptureStartFailedError(msg, id, [...this.logTail]);
         }
       }
@@ -404,7 +413,7 @@ export class CaptureController {
         throw new CaptureBadRequestError('flush (SIGUSR1) is only supported in daemon mode');
       }
       const adb = this.host.getService<AdbTransportService>('transport.adb');
-      if (!adb) throw new CaptureBadRequestError('transport.adb service is unavailable');
+      if (!adb) throw new CaptureBadRequestError('「Android ADB 连接」插件未启用，无法向设备发送落盘指令。');
       await adb.client.signal(this.serial, this.run.pid, 'USR1');
       this.flushCount += 1;
       return {
@@ -513,7 +522,7 @@ export class CaptureController {
           remote_cleaned: false,
           clean_exit: false,
           self_exited: false,
-          error: 'transport.adb service is unavailable',
+          error: '「Android ADB 连接」插件未启用，无法停止远端采集。',
         };
       }
 

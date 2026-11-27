@@ -22,6 +22,7 @@ export const pcapngExporterPlugin: BuiltinPlugin = {
       '支持导出前对 IP、端口、MAC 与负载脱敏',
     ],
     provides: ['exporter.pcapng'],
+    usedBy: ['Wireshark (.pcapng) 导出'],
     tags: ['pcapng', 'wireshark'],
   },
   schema: {

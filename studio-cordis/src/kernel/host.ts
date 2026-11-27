@@ -103,6 +103,7 @@ export class CordisHost {
   private readonly services = new Map<string, { pluginId: string; impl: unknown }>();
   private readonly extensions: ExtensionEntry[] = [];
   private persisted: PersistedKernelConfig = { enabled: {}, configs: {} };
+  private configHealed = false;
   private reloadSeq = 0;
   private started = false;
 
@@ -154,7 +155,11 @@ export class CordisHost {
     if (this.records.has(plugin.meta.id)) {
       throw new Error(`duplicate plugin id: ${plugin.meta.id}`);
     }
-    const enabled = this.persisted.enabled[plugin.meta.id] ?? true;
+    const persistedEnabled = this.persisted.enabled[plugin.meta.id];
+    const enabled = plugin.meta.required ? true : (persistedEnabled ?? true);
+    if (plugin.meta.required && persistedEnabled === false) {
+      this.configHealed = true;
+    }
     const config = {
       ...defaultsFromSchema(plugin.schema),
       ...(this.persisted.configs[plugin.meta.id] ?? {}),
@@ -204,6 +209,10 @@ export class CordisHost {
       if (rec.enabled) {
         await this.activateRecord(rec);
       }
+    }
+    if (this.configHealed) {
+      this.savePersistedConfig();
+      this.configHealed = false;
     }
   }
 
@@ -272,7 +281,7 @@ export class CordisHost {
     const missing = (rec.meta.requires ?? []).filter((req) => !this.services.has(req));
     if (missing.length > 0) {
       rec.status = 'error';
-      rec.error = `missing required service(s): ${missing.join(', ')}`;
+      rec.error = `依赖插件未启用：${missing.map((s) => this.describeService(s)).join('、')}`;
       return;
     }
 
@@ -394,7 +403,14 @@ export class CordisHost {
     return this.runLifecycleExclusive(async () => {
     const rec = this.records.get(id);
     if (!rec) {
-      return { ok: false, error: `plugin not found: ${id}`, state: this.snapshot() };
+      return { ok: false, error: `未找到插件：${id}`, state: this.snapshot() };
+    }
+    if (rec.meta.required && !enabled) {
+      return {
+        ok: false,
+        error: `核心插件「${rec.meta.name}」为系统必备组件，不可关闭。`,
+        state: this.snapshot(),
+      };
     }
     rec.enabled = enabled;
     let errMsg: string | undefined;
@@ -415,7 +431,7 @@ export class CordisHost {
         if (other.status === 'active' && (other.meta.requires ?? []).some((r) => !this.services.has(r))) {
           await this.deactivateRecord(other);
           other.status = 'error';
-          other.error = `required service unavailable after disabling ${id}`;
+          other.error = `因「${rec.meta.name}」已关闭，当前插件暂时停用`;
         }
       }
     }
@@ -610,6 +626,23 @@ export class CordisHost {
     return { insights, kpis, notes };
   }
 
+  private describeService(serviceName: string): string {
+    for (const rec of this.records.values()) {
+      if ((rec.meta.provides ?? []).includes(serviceName)) {
+        return `「${rec.meta.name}」`;
+      }
+    }
+    return serviceName;
+  }
+
+  private findExporterPluginName(exporterId: string): string | undefined {
+    const exact = this.records.get(exporterId);
+    if (exact) return exact.meta.name;
+    const byShortId = this.records.get(`builtin.exporter.${exporterId}`);
+    if (byShortId) return byShortId.meta.name;
+    return undefined;
+  }
+
   async runExport(req: {
     exporter_id: string;
     session_id: string;
@@ -619,11 +652,24 @@ export class CordisHost {
     const exporters = this.getExtensions<ExporterRegistration>('exporter');
     const reg = exporters.find((e) => e.id === req.exporter_id || e.plugin_id === req.exporter_id);
     if (!reg) {
-      return { ok: false, out_path: '', summary: '', error: `exporter not active or not found: ${req.exporter_id}` };
+      const pluginName = this.findExporterPluginName(req.exporter_id);
+      return {
+        ok: false,
+        out_path: '',
+        summary: '',
+        error: pluginName
+          ? `导出插件「${pluginName}」未启用，请先在插件页启用后再导出。`
+          : `未找到可用的导出插件（${req.exporter_id}），请确认对应插件已安装并启用。`,
+      };
     }
     const sp = this.getService<SessionProvider>('session.provider');
     if (!sp) {
-      return { ok: false, out_path: '', summary: '', error: 'session.provider service is not active' };
+      return {
+        ok: false,
+        out_path: '',
+        summary: '',
+        error: '「本地会话存储与加载」插件未启用，无法导出会话。请先在插件页确认该插件已启用。',
+      };
     }
     const data = await sp.getSessionForExport(req.session_id);
     const safeSessionId = req.session_id.replace(/[^a-zA-Z0-9._-]/g, '_') || 'session';
@@ -739,6 +785,8 @@ export class CordisHost {
         capabilities: rec.meta.capabilities,
         provides: rec.meta.provides ?? [],
         requires: rec.meta.requires ?? [],
+        required: Boolean(rec.meta.required),
+        usedBy: rec.meta.usedBy ? [...rec.meta.usedBy] : [],
         tags: rec.meta.tags ?? [],
         schema: rec.schema,
         config: rec.config,

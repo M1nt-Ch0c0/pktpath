@@ -32,6 +32,10 @@ export interface PluginMeta {
   capabilities: string[];
   provides?: string[];
   requires?: string[];
+  /** True when disabling this plugin would break core Studio workflows; host blocks disabling it. */
+  required?: boolean;
+  /** Human-readable list of features that depend on this plugin (shown in Plugin Manager). */
+  usedBy?: string[];
   tags?: string[];
 }
 
@@ -191,6 +195,8 @@ export interface PluginSnapshotItem {
   capabilities: string[];
   provides: string[];
   requires: string[];
+  required: boolean;
+  usedBy: string[];
   tags: string[];
   schema: ConfigSchema;
   config: Record<string, unknown>;

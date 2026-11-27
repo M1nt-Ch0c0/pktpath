@@ -9,18 +9,20 @@ export function createOfflineTransportPlugin(store?: SessionStore): BuiltinPlugi
   return {
     meta: {
       id: 'builtin.transport.offline',
-      name: '离线会话目录',
+      name: '本地会话存储与加载',
       version: '2.0.0',
       author: 'PktPath',
-      description: '读取本地已采集的 PktPath 会话目录（manifest.json + *.pktb），提供会话列表、概览、单包详情与分析缓存。',
+      description: '管理所有本地会话目录（含手机采集拉回的会话与手动打开的目录），提供会话列表、概览、单包详情与分析缓存。',
       category: 'transport',
       icon: '📂',
       builtin: true,
       capabilities: [
-        '浏览 sessionsRoot 与已打开的外部会话目录',
+        '管理所有本地会话（含手机采集回传落盘与手动打开的目录）',
         '支持跨重启磁盘分析结果缓存与只读目录自动降级',
       ],
       provides: ['transport.offline', 'session.provider'],
+      required: true,
+      usedBy: ['会话列表与概览', '打开本地会话', '手机采集回传落盘', '会话导出'],
       tags: ['offline', 'session', 'disk'],
     },
     schema: {
@@ -48,8 +50,8 @@ export function createOfflineTransportPlugin(store?: SessionStore): BuiltinPlugi
       ctx.registerExtension('transport', {
         id: 'offline',
         plugin_id: 'builtin.transport.offline',
-        name: '离线会话目录',
-        description: '从本地磁盘打开或浏览 PktPath 会话目录',
+        name: '本地会话存储与加载',
+        description: '管理本地会话目录（含手机采集拉回的会话与手动打开的目录）',
         priority: 10,
       })
     },

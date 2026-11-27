@@ -24,6 +24,7 @@ export const oneshotModePlugin: BuiltinPlugin = {
     capabilities: ['capture.mode.oneshot'],
     provides: ['capture.mode.oneshot'],
     requires: ['collector.ebpf'],
+    usedBy: ['短时采集'],
     tags: ['capture', 'oneshot'],
   },
   schema: {

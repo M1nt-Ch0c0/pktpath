@@ -23,6 +23,7 @@ export const dagReconstructPlugin: BuiltinPlugin = {
       '识别 SKB Clone / Copy / Expand 多分支流转',
     ],
     provides: ['analyzer.dag'],
+    usedBy: ['会话分析洞察'],
     tags: ['dag', 'sojourn', 'clone'],
   },
   schema: {
