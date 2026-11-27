@@ -22,8 +22,16 @@ import sys
 from pathlib import Path
 
 CHECKSUM_FILENAME = "SHA256SUMS.txt"
-WINDOWS_BUNDLE_GLOB = "pktpath-windows-x64-*.zip"
+WINDOWS_BUNDLE_GLOBS = (
+    "PktPath-Studio-Setup-*-win-x64.exe",
+    "pktpath-windows-x64-*-setup.exe",
+    "pktpath-windows-x64-*.zip",
+)
 LINUX_BUNDLE_GLOB = "pktpath-linux-x64-*.tar.gz"
+
+
+def is_windows_bundle(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in WINDOWS_BUNDLE_GLOBS)
 
 
 def sha256_file(path: Path) -> str:
@@ -63,7 +71,7 @@ def load_release_assets(json_path: Path) -> list[dict]:
 
 
 def validate_platform_bundles(names: list[str], *, require_both: bool) -> tuple[list[str], list[str]]:
-    win = sorted(n for n in names if fnmatch.fnmatch(n, WINDOWS_BUNDLE_GLOB))
+    win = sorted(n for n in names if is_windows_bundle(n))
     lin = sorted(n for n in names if fnmatch.fnmatch(n, LINUX_BUNDLE_GLOB))
     if len(win) > 1:
         raise SystemExit(f"error: multiple Windows Studio bundles in dist: {win}")
@@ -71,7 +79,9 @@ def validate_platform_bundles(names: list[str], *, require_both: bool) -> tuple[
         raise SystemExit(f"error: multiple Linux Studio bundles in dist: {lin}")
     if require_both:
         if not win:
-            raise SystemExit(f"error: missing Windows Studio bundle matching {WINDOWS_BUNDLE_GLOB}")
+            raise SystemExit(
+                f"error: missing Windows Studio bundle matching one of {WINDOWS_BUNDLE_GLOBS}"
+            )
         if not lin:
             raise SystemExit(f"error: missing Linux Studio bundle matching {LINUX_BUNDLE_GLOB}")
     return win, lin
@@ -122,9 +132,7 @@ def cmd_check_existing(args: argparse.Namespace) -> int:
             "workflow_dispatch input allow_existing_release=true."
         )
 
-    existing_win = sorted(
-        n for n in existing_non_sums if fnmatch.fnmatch(n, WINDOWS_BUNDLE_GLOB)
-    )
+    existing_win = sorted(n for n in existing_non_sums if is_windows_bundle(n))
     existing_lin = sorted(
         n for n in existing_non_sums if fnmatch.fnmatch(n, LINUX_BUNDLE_GLOB)
     )
@@ -134,7 +142,7 @@ def cmd_check_existing(args: argparse.Namespace) -> int:
             raise SystemExit(
                 f"error: existing release already has Windows Studio bundle '{old}', "
                 f"which conflicts with new bundle {new_win}. Refusing to leave two Windows "
-                "zips on the same Release."
+                "packages on the same Release."
             )
     for old in existing_lin:
         if old not in new_lin:

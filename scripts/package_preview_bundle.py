@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tarfile
 import urllib.request
 import zipfile
@@ -567,6 +568,60 @@ def write_launchers(target_os: str, bundle_dir: Path, launchers_dir: Path | None
     return written
 
 
+def copy_tray_exe(tray_exe: Path, bundle_dir: Path) -> str:
+    if tray_exe.is_symlink():
+        raise ValueError(f"Symlink tray executable forbidden: {tray_exe}")
+    if not tray_exe.is_file():
+        raise FileNotFoundError(f"Tray executable not found: {tray_exe}")
+    header = tray_exe.read_bytes()[:2]
+    if header != b"MZ":
+        raise ValueError(f"Tray executable is not a valid Windows PE binary (missing MZ header): {tray_exe}")
+    dst = bundle_dir / "PktPathStudio.exe"
+    shutil.copy2(tray_exe, dst)
+    return dst.name
+
+
+def pack_nsis_installer(
+    bundle_dir: Path,
+    out_dir: Path,
+    bundle_name: str,
+    nsis_script: Path,
+    makensis_bin: str | None,
+    app_version: str,
+) -> Path:
+    if nsis_script.is_symlink():
+        raise ValueError(f"Symlink NSIS script forbidden: {nsis_script}")
+    if not nsis_script.is_file():
+        raise FileNotFoundError(f"NSIS script not found: {nsis_script}")
+    exe = makensis_bin or shutil.which("makensis")
+    if not exe:
+        raise FileNotFoundError("makensis not found in PATH; install NSIS or pass --makensis")
+
+    out_exe = (out_dir / f"{bundle_name}.exe").resolve()
+    if out_exe.exists():
+        out_exe.unlink()
+
+    flag_prefix = "/" if os.name == "nt" else "-"
+    cmd = [
+        exe,
+        f"{flag_prefix}V3",
+        f"{flag_prefix}DSTAGING_DIR={bundle_dir.resolve()}",
+        f"{flag_prefix}DOUT_FILE={out_exe}",
+        f"{flag_prefix}DAPP_VERSION={app_version}",
+        str(nsis_script.resolve()),
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"makensis failed (exit {proc.returncode}):\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+    if not out_exe.is_file():
+        raise FileNotFoundError(f"makensis succeeded but did not produce expected installer: {out_exe}")
+    if out_exe.read_bytes()[:2] != b"MZ":
+        raise ValueError(f"Generated installer is not a valid PE executable: {out_exe}")
+    return out_exe
+
+
 def write_manifest(bundle_dir: Path) -> int:
     entries: list[str] = []
     for path in sorted(p for p in bundle_dir.rglob("*") if p.is_file() or p.is_symlink()):
@@ -629,8 +684,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--download-node", action="store_true", help="Download official Node if not cached")
     parser.add_argument("--out-dir", required=True, help="Output directory for the packaged archive")
     parser.add_argument("--bundle-name", required=True, help="Top-level directory and archive stem")
+    parser.add_argument(
+        "--windows-format",
+        choices=("zip", "installer"),
+        default="zip",
+        help="Windows output format: 'installer' (NSIS Setup.exe with PktPathStudio.exe) or legacy 'zip'",
+    )
+    parser.add_argument(
+        "--tray-exe",
+        default=None,
+        help="Path to compiled PktPathStudio.exe (required when --windows-format installer)",
+    )
+    parser.add_argument(
+        "--nsis-script",
+        default=None,
+        help="Path to NSIS .nsi script (required when --windows-format installer)",
+    )
+    parser.add_argument("--makensis", default=None, help="Optional path to makensis binary")
+    parser.add_argument(
+        "--app-version",
+        default=None,
+        help="Version string passed as APP_VERSION to makensis (defaults to --bundle-name)",
+    )
     parser.add_argument("--keep-dir", action="store_true", help="Keep unpacked staging directory")
     args = parser.parse_args(argv)
+
+    if args.windows_format == "installer":
+        if args.target_os != "windows":
+            parser.error("--windows-format installer is only valid with --os windows")
+        if not args.tray_exe or not args.nsis_script:
+            parser.error("--windows-format installer requires both --tray-exe and --nsis-script")
 
     studio_dir = Path(args.studio_dir).resolve()
     collectors_dir = Path(args.collectors_dir).resolve()
@@ -653,9 +736,28 @@ def main(argv: list[str] | None = None) -> int:
     licenses = collect_licenses(
         repo_license, node_license, bundle_dir / "studio-cordis" / "node_modules", bundle_dir
     )
-    launchers = write_launchers(args.target_os, bundle_dir, launchers_dir)
+    tray_exe_sha256: str | None = None
+    if args.target_os == "windows" and args.windows_format == "installer":
+        tray_path = Path(args.tray_exe).resolve()
+        tray_name = copy_tray_exe(tray_path, bundle_dir)
+        tray_exe_sha256 = sha256_file(bundle_dir / tray_name)
+        launchers = [tray_name]
+    else:
+        launchers = write_launchers(args.target_os, bundle_dir, launchers_dir)
+
     manifest_count = write_manifest(bundle_dir)
-    archive_path = pack_bundle(args.target_os, bundle_dir, out_dir, args.bundle_name)
+
+    if args.target_os == "windows" and args.windows_format == "installer":
+        archive_path = pack_nsis_installer(
+            bundle_dir,
+            out_dir,
+            args.bundle_name,
+            Path(args.nsis_script).resolve(),
+            args.makensis,
+            args.app_version or args.bundle_name,
+        )
+    else:
+        archive_path = pack_bundle(args.target_os, bundle_dir, out_dir, args.bundle_name)
 
     if not args.keep_dir:
         shutil.rmtree(bundle_dir)
@@ -663,10 +765,12 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "ok": True,
         "target_os": args.target_os,
+        "windows_format": args.windows_format if args.target_os == "windows" else None,
         "node_version": NODE_VERSION,
         "node_archive_sha256": OFFICIAL_NODE[args.target_os]["sha256"],
         "collectors": copied_collectors,
         "launchers": launchers,
+        "tray_exe_sha256": tray_exe_sha256,
         "licensed_components": len(licenses),
         "manifest_entries": manifest_count,
         "archive_path": str(archive_path),

@@ -65,7 +65,7 @@ jobs:
             bin/pktpath-linux-arm64
 
   package-studio-windows:
-    name: Package Pure-Cordis Studio Bundle (Windows x64 + Bundled Node v24.22.1)
+    name: Package Pure-Cordis Studio Installer (Windows x64 NSIS + Tray Host + Bundled Node v24.22.1)
     needs: build-collectors
     runs-on: windows-latest
     steps:
@@ -74,6 +74,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
 
       - uses: actions/setup-node@v4
         with:
@@ -92,34 +96,56 @@ jobs:
           npm ci --ignore-scripts --omit=dev
           node --input-type=module -e "await import('@cordisjs/core')"
 
+      - name: Build Windows tray host (PktPathStudio.exe)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "packaging/windows/tray" -PathType Container)) {
+            throw "Missing Windows tray host source directory: packaging/windows/tray"
+          }
+          Push-Location packaging/windows/tray
+          try {
+            $env:CGO_ENABLED = "0"
+            $env:GOOS = "windows"
+            $env:GOARCH = "amd64"
+            go build -trimpath -ldflags "-s -w -H=windowsgui" -o "$env:RUNNER_TEMP/PktPathStudio.exe" .
+          } finally {
+            Pop-Location
+          }
+          if (-not (Test-Path -LiteralPath "$env:RUNNER_TEMP/PktPathStudio.exe" -PathType Leaf)) {
+            throw "Failed to produce PktPathStudio.exe"
+          }
+
       - name: Cache official Windows Node v24.22.1
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/pktpath-node-cache
           key: node-v24.22.1-win-x64-d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5
 
-      - name: Package unified Windows x64 pure-Cordis bundle & standalone collectors
+      - name: Package unified Windows x64 NSIS installer & standalone collectors
         shell: pwsh
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           New-Item -ItemType Directory -Force release_assets_windows | Out-Null
+          $nsisScript = "packaging/windows/installer/pktpath-studio.nsi"
+          if (-not (Test-Path -LiteralPath $nsisScript -PathType Leaf)) {
+            throw "Missing required NSIS installer script: $nsisScript"
+          }
           $bundleArgs = @(
             "scripts/package_preview_bundle.py",
             "--os", "windows",
+            "--windows-format", "installer",
+            "--tray-exe", "$env:RUNNER_TEMP/PktPathStudio.exe",
+            "--nsis-script", $nsisScript,
+            "--app-version", "$env:TAG",
             "--studio-dir", "studio-cordis",
             "--collectors-dir", "bin",
             "--repo-license", "LICENSE",
             "--download-node",
             "--cache-dir", "$env:RUNNER_TEMP/pktpath-node-cache",
             "--out-dir", "release_assets_windows",
-            "--bundle-name", "pktpath-windows-x64-$env:TAG"
+            "--bundle-name", "PktPath-Studio-Setup-$env:TAG-win-x64"
           )
-          if (-not (Test-Path -LiteralPath "studio-cordis/scripts/start-studio.cmd" -PathType Leaf) -or
-              -not (Test-Path -LiteralPath "studio-cordis/scripts/start-studio.ps1" -PathType Leaf)) {
-            throw "Missing required launchers in studio-cordis/scripts (start-studio.cmd / start-studio.ps1)"
-          }
-          $bundleArgs += @("--launchers-dir", "studio-cordis/scripts")
           python -W error @bundleArgs
           Copy-Item bin/pktpath-android-arm64 release_assets_windows/
           Copy-Item bin/pktpath-linux-x86_64 release_assets_windows/
