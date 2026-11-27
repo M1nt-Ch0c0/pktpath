@@ -341,6 +341,30 @@ export interface SyncAllPluginsResult {
   bpfReused: number;
 }
 
+export type SelfCheckLevel = 'green' | 'yellow' | 'red';
+
+export interface SelfCheckItem {
+  id: string;
+  label: string;
+  level: SelfCheckLevel;
+  summary: string;
+  detail?: string;
+}
+
+export interface DeviceSelfCheckResult {
+  ok: boolean;
+  overall: SelfCheckLevel;
+  serial: string;
+  arch?: KernelProbeArch;
+  kernel_release?: string;
+  root_mode: RootMode;
+  btf_available: boolean;
+  drop_reason_enum_count?: number;
+  kptr_restrict?: number;
+  agent_self_check?: Record<string, unknown>;
+  items: SelfCheckItem[];
+}
+
 export class AdbClient {
   readonly adbPath: string | undefined;
   private readonly rootCache = new Map<string, RootMode>();
@@ -856,5 +880,189 @@ export class AdbClient {
       20_000,
     ).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
     return parseMarked(r.stdout).gone === '1';
+  }
+  async selfCheckDevice(serial: string): Promise<DeviceSelfCheckResult> {
+    const items: SelfCheckItem[] = [];
+    const pickOverall = (): SelfCheckLevel => {
+      if (items.some((i) => i.level === 'red')) return 'red';
+      if (items.some((i) => i.level === 'yellow')) return 'yellow';
+      return 'green';
+    };
+
+    // 1. Basic ADB connectivity, kernel release, and architecture
+    let kernelRelease = '';
+    let arch: KernelProbeArch | undefined;
+    try {
+      const info = await this.shell(
+        serial,
+        'echo "@@kernel=$(uname -r)"; echo "@@arch=$(uname -m)"',
+        10_000,
+      );
+      const parsed = parseMarked(info.stdout);
+      kernelRelease = (parsed.kernel ?? '').trim();
+      arch = normalizeDeviceArch(parsed.arch ?? '');
+      items.push({
+        id: 'adb_connect',
+        label: '设备连接与架构',
+        level: arch ? 'green' : 'yellow',
+        summary: arch
+          ? `已连接（${arch}${kernelRelease ? `，内核 ${kernelRelease}` : ''}）`
+          : `已连接，但架构未识别（${parsed.arch ?? 'unknown'}）`,
+      });
+    } catch (err) {
+      items.push({
+        id: 'adb_connect',
+        label: '设备连接与架构',
+        level: 'red',
+        summary: '无法通过 ADB 连接设备',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+      return {
+        ok: false,
+        overall: 'red',
+        serial,
+        root_mode: 'none',
+        btf_available: false,
+        items,
+      };
+    }
+
+    // 2. Root access check
+    let rootMode: RootMode = 'none';
+    try {
+      rootMode = await this.ensureRoot(serial);
+    } catch {
+      rootMode = 'none';
+    }
+    if (rootMode === 'none') {
+      items.push({
+        id: 'root_access',
+        label: 'Root 权限',
+        level: 'red',
+        summary: '设备无 root 权限（adbd-root / adb-root / su 均不可用）',
+        detail: 'eBPF 加载与内核探针挂接需要 root 权限。',
+      });
+      return {
+        ok: false,
+        overall: 'red',
+        serial,
+        arch,
+        kernel_release: kernelRelease || undefined,
+        root_mode: rootMode,
+        btf_available: false,
+        items,
+      };
+    }
+    items.push({
+      id: 'root_access',
+      label: 'Root 权限',
+      level: 'green',
+      summary: `可用（${rootMode}）`,
+    });
+
+    // 3. Try pktpath-agent --self-check JSON first; fall back to direct shell probes if older binary
+    let agentSelfCheck: Record<string, unknown> | undefined;
+    const agentRes = await this.priv(serial, `${REMOTE_AGENT} --self-check 2>/dev/null`, 20_000).catch(() => ({
+      stdout: '',
+      stderr: '',
+      exitCode: 1,
+    }));
+    if (agentRes.exitCode === 0) {
+      agentSelfCheck = extractJsonObject(agentRes.stdout);
+    }
+
+    let btfAvailable = false;
+    let dropReasonEnumCount: number | undefined;
+    let kptrRestrict: number | undefined;
+    let coreTracepointOk: boolean | undefined;
+
+    if (agentSelfCheck) {
+      const btfVal = agentSelfCheck.btf_available ?? agentSelfCheck.vmlinux_btf_readable;
+      btfAvailable = Boolean(btfVal);
+      const enumRaw = agentSelfCheck.drop_reason_enum_count ?? agentSelfCheck.skb_drop_reason_count;
+      if (typeof enumRaw === 'number' && Number.isFinite(enumRaw)) {
+        dropReasonEnumCount = Math.trunc(enumRaw);
+      }
+      if (typeof agentSelfCheck.kptr_restrict === 'number' && Number.isFinite(agentSelfCheck.kptr_restrict)) {
+        kptrRestrict = Math.trunc(agentSelfCheck.kptr_restrict);
+      }
+      if (typeof agentSelfCheck.core_tracepoint_ok === 'boolean') {
+        coreTracepointOk = agentSelfCheck.core_tracepoint_ok;
+      }
+    } else {
+      const fallbackCmd = [
+        '[ -r /sys/kernel/btf/vmlinux ] && echo "@@btf=1" || echo "@@btf=0"',
+        'echo "@@kptr=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null || echo -1)"',
+        '([ -d /sys/kernel/tracing/events/skb/kfree_skb ] || [ -d /sys/kernel/debug/tracing/events/skb/kfree_skb ]) && echo "@@tp=1" || echo "@@tp=0"',
+      ].join('; ');
+      const fb = await this.priv(serial, fallbackCmd, 15_000).catch(() => ({
+        stdout: '',
+        stderr: '',
+        exitCode: 1,
+      }));
+      const m = parseMarked(fb.stdout);
+      btfAvailable = m.btf === '1';
+      const kp = Number.parseInt(m.kptr ?? '-1', 10);
+      if (Number.isInteger(kp) && kp >= 0) {
+        kptrRestrict = kp;
+      }
+      coreTracepointOk = m.tp === '1';
+    }
+
+    if (btfAvailable) {
+      items.push({
+        id: 'vmlinux_btf',
+        label: '内核 BTF (/sys/kernel/btf/vmlinux)',
+        level: 'green',
+        summary: dropReasonEnumCount !== undefined
+          ? `可读（已识别 ${dropReasonEnumCount} 个丢包原因枚举）`
+          : '可读，支持按目标内核 BTF 解析丢包原因与结构偏移',
+      });
+    } else {
+      items.push({
+        id: 'vmlinux_btf',
+        label: '内核 BTF (/sys/kernel/btf/vmlinux)',
+        level: 'yellow',
+        summary: '不可读或缺失：采集可降级运行，但丢包原因仅显示原始数值',
+        detail: '未检测到可读的 /sys/kernel/btf/vmlinux，无法加载目标内核丢包原因枚举表。',
+      });
+    }
+
+    if (kptrRestrict !== undefined) {
+      items.push({
+        id: 'kptr_restrict',
+        label: '内核符号可见性 (kptr_restrict)',
+        level: kptrRestrict >= 2 ? 'yellow' : 'green',
+        summary: kptrRestrict >= 2
+          ? `kptr_restrict=${kptrRestrict}（丢包调用栈可能仅显示地址）`
+          : `kptr_restrict=${kptrRestrict}（允许内核符号化）`,
+      });
+    }
+
+    if (coreTracepointOk !== undefined) {
+      items.push({
+        id: 'core_tracepoints',
+        label: '核心丢包探针 (skb:kfree_skb)',
+        level: coreTracepointOk ? 'green' : 'red',
+        summary: coreTracepointOk
+          ? '核心 tracepoint 可用'
+          : '未检测到 skb:kfree_skb tracepoint，基础采集可能无法挂接',
+      });
+    }
+
+    const overall = pickOverall();
+    return {
+      ok: overall !== 'red',
+      overall,
+      serial,
+      arch,
+      kernel_release: kernelRelease || undefined,
+      root_mode: rootMode,
+      btf_available: btfAvailable,
+      ...(dropReasonEnumCount !== undefined ? { drop_reason_enum_count: dropReasonEnumCount } : {}),
+      ...(kptrRestrict !== undefined ? { kptr_restrict: kptrRestrict } : {}),
+      ...(agentSelfCheck ? { agent_self_check: agentSelfCheck } : {}),
+      items,
+    };
   }
 }

@@ -4,11 +4,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import {
+  exportExternalPackageZip,
+  installExternalPackage,
   parseExternalPluginDir,
   previewExternalPackage,
   validateBpfObjectFile,
 } from '../src/kernel/external-loader.ts';
+import {
+  generateEd25519KeyPair,
+  signPluginPackageDir,
+  verifyPluginPackageSignature,
+} from '../src/kernel/plugin-signature.ts';
 import { CordisHost } from '../src/kernel/host.ts';
 import {
   AdbClient,
@@ -467,6 +475,171 @@ describe('Wave 3 Slice 2: ConfigSchema, ebpf-tc probes/presets, external BPF pac
         () => adb.syncAllPlugins('wave3dev1', [], [badBundle]),
         /sha256 mismatch/,
       );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('Ed25519 whole-package signature + ZIP export: distinguishes unsigned/verified/invalid and rejects tampered JS/hooks/files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-w3-sig-'));
+    try {
+      const srcRoot = path.join(root, 'src');
+      const pluginsDir = path.join(root, 'installed');
+      const { pluginDir } = createExternalBpfPluginDir(srcRoot, { id: 'pktpath.sig-test', arches: ['arm64'] });
+
+      // 1. Unsigned package
+      const unsignedPreview = previewExternalPackage(pluginDir);
+      assert.equal(unsignedPreview.signature_status, 'unsigned');
+      assert.equal(unsignedPreview.signature_trust, 'none');
+
+      // 2. Generate Ed25519 keypair, export signed ZIP, preview & install
+      const kp = generateEd25519KeyPair();
+      const zipPath = path.join(root, 'dist', 'sig-test.zip');
+      const exp = exportExternalPackageZip(pluginDir, zipPath, { signPrivateKeyPem: kp.privateKeyPem });
+      assert.equal(exp.signed, true);
+      assert.equal(exp.keyFingerprint, kp.fingerprint);
+      assert.ok(fs.existsSync(zipPath));
+
+      const signedPreview = previewExternalPackage(zipPath);
+      assert.equal(signedPreview.signature_status, 'verified');
+      assert.equal(signedPreview.signature_trust, 'self_declared');
+      assert.equal(signedPreview.signature_key_fingerprint, kp.fingerprint);
+      assert.equal(signedPreview.has_kernel_bpf, true);
+
+      const trustedPreview = previewExternalPackage(zipPath, { trustedFingerprints: [kp.fingerprint] });
+      assert.equal(trustedPreview.signature_trust, 'trusted_key');
+
+      const installed = installExternalPackage(zipPath, pluginsDir);
+      assert.equal(installed.manifest.id, 'pktpath.sig-test');
+
+      // 3. Adversarial: sign dir, then tamper with index.mjs (even though .bpf.o and manifest.json are untouched)
+      signPluginPackageDir(pluginDir, kp.privateKeyPem);
+      assert.equal(verifyPluginPackageSignature(pluginDir).status, 'verified');
+
+      const indexPath = path.join(pluginDir, 'index.mjs');
+      const origIndex = fs.readFileSync(indexPath, 'utf8');
+      fs.writeFileSync(indexPath, origIndex + '// tampered\n', 'utf8');
+      const tamperedJsPreview = previewExternalPackage(pluginDir);
+      assert.equal(tamperedJsPreview.signature_status, 'invalid');
+      assert.throws(() => installExternalPackage(pluginDir, pluginsDir), /signature invalid/);
+      fs.writeFileSync(indexPath, origIndex, 'utf8');
+
+      // 4. Adversarial: add an extra unsigned file
+      const extraFile = path.join(pluginDir, 'sneaky.js');
+      fs.writeFileSync(extraFile, 'export const x = 1;\n', 'utf8');
+      assert.equal(verifyPluginPackageSignature(pluginDir).status, 'invalid');
+      assert.throws(() => installExternalPackage(pluginDir, pluginsDir), /signature invalid/);
+      fs.rmSync(extraFile);
+
+      // 5. Adversarial: forge signature bytes
+      const sigPath = path.join(pluginDir, 'signature.json');
+      const sigDoc = JSON.parse(fs.readFileSync(sigPath, 'utf8'));
+      sigDoc.signature = Buffer.alloc(64, 0xaa).toString('base64');
+      fs.writeFileSync(sigPath, JSON.stringify(sigDoc, null, 2), 'utf8');
+      assert.equal(verifyPluginPackageSignature(pluginDir).status, 'invalid');
+      assert.throws(() => installExternalPackage(pluginDir, pluginsDir), /signature invalid/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('selfCheckDevice produces green/yellow/red checklists for healthy BTF, missing BTF fallback, and unrooted devices', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-w3-sc-'));
+    try {
+      // Case A: Full green via pktpath-agent --self-check JSON
+      const adbGreen = path.join(root, 'adb-green.sh');
+      fs.writeFileSync(adbGreen, `#!/usr/bin/env bash
+if [ "$1" = "start-server" ]; then exit 0; fi
+if [ "$1" = "-s" ]; then shift 2; fi
+if [ "$1" = "shell" ]; then
+  case "$2" in
+    *"@@kernel="*) echo "@@kernel=6.6.30-android15"; echo "@@arch=aarch64"; exit 0 ;;
+    "id -u") echo "0"; exit 0 ;;
+    *"--self-check"*) echo '{"btf_available":true,"drop_reason_enum_count":87,"kptr_restrict":0,"core_tracepoint_ok":true}'; exit 0 ;;
+  esac
+fi
+exit 0
+`, { mode: 0o755 });
+      const resGreen = await new AdbClient(adbGreen).selfCheckDevice('dev-green');
+      assert.equal(resGreen.ok, true);
+      assert.equal(resGreen.overall, 'green');
+      assert.equal(resGreen.arch, 'arm64');
+      assert.equal(resGreen.btf_available, true);
+      assert.equal(resGreen.drop_reason_enum_count, 87);
+      assert.equal(resGreen.kptr_restrict, 0);
+
+      // Case B: Missing BTF + kptr_restrict=2 via fallback probe -> yellow (degraded but usable)
+      const adbYellow = path.join(root, 'adb-yellow.sh');
+      fs.writeFileSync(adbYellow, `#!/usr/bin/env bash
+if [ "$1" = "start-server" ]; then exit 0; fi
+if [ "$1" = "-s" ]; then shift 2; fi
+if [ "$1" = "shell" ]; then
+  case "$2" in
+    *"@@kernel="*) echo "@@kernel=5.15.104"; echo "@@arch=x86_64"; exit 0 ;;
+    "id -u") echo "0"; exit 0 ;;
+    *"--self-check"*) exit 1 ;;
+    *"@@btf="*) echo "@@btf=0"; echo "@@kptr=2"; echo "@@tp=1"; exit 0 ;;
+  esac
+fi
+exit 0
+`, { mode: 0o755 });
+      const resYellow = await new AdbClient(adbYellow).selfCheckDevice('dev-yellow');
+      assert.equal(resYellow.ok, true);
+      assert.equal(resYellow.overall, 'yellow');
+      assert.equal(resYellow.arch, 'x86_64');
+      assert.equal(resYellow.btf_available, false);
+      assert.equal(resYellow.kptr_restrict, 2);
+
+      // Case C: Unrooted device -> red, never throws
+      const adbRed = path.join(root, 'adb-red.sh');
+      fs.writeFileSync(adbRed, `#!/usr/bin/env bash
+if [ "$1" = "start-server" ]; then exit 0; fi
+if [ "$1" = "-s" ]; then shift 2; fi
+if [ "$1" = "root" ]; then echo "adbd cannot run as root in production builds"; exit 1; fi
+if [ "$1" = "shell" ]; then
+  case "$2" in
+    *"@@kernel="*) echo "@@kernel=6.1.0"; echo "@@arch=aarch64"; exit 0 ;;
+    *) echo "2000"; exit 0 ;;
+  esac
+fi
+exit 0
+`, { mode: 0o755 });
+      const resRed = await new AdbClient(adbRed).selfCheckDevice('dev-red');
+      assert.equal(resRed.ok, false);
+      assert.equal(resRed.overall, 'red');
+      assert.equal(resRed.root_mode, 'none');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('templates/pktpath-bpf-plugin-template sign-and-pack.mjs produces a verified BPF plugin ZIP', () => {
+    const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
+    const templateDir = path.join(repoRoot, 'templates', 'pktpath-bpf-plugin-template');
+    assert.ok(fs.existsSync(path.join(templateDir, 'manifest.json')));
+    assert.ok(fs.existsSync(path.join(templateDir, 'scripts', 'sign-and-pack.mjs')));
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-w3-tpl-'));
+    try {
+      const workTpl = path.join(root, 'tpl');
+      fs.cpSync(templateDir, workTpl, { recursive: true });
+      fs.mkdirSync(path.join(workTpl, 'bpf', 'arm64'), { recursive: true });
+      fs.writeFileSync(path.join(workTpl, 'bpf', 'arm64', 'example_probe.bpf.o'), makeElf64Bpf());
+
+      const script = path.join(workTpl, 'scripts', 'sign-and-pack.mjs');
+      execFileSync(process.execPath, [script, 'keygen', '--out-dir', path.join(workTpl, 'keys')], { stdio: 'pipe' });
+      const outZip = path.join(workTpl, 'dist', 'tpl.zip');
+      execFileSync(
+        process.execPath,
+        [script, 'pack', '--dir', workTpl, '--out', outZip, '--key', path.join(workTpl, 'keys', 'private.pem')],
+        { stdio: 'pipe' },
+      );
+
+      const preview = previewExternalPackage(outZip);
+      assert.equal(preview.id, 'community.example-bpf-probe');
+      assert.equal(preview.has_kernel_bpf, true);
+      assert.equal(preview.signature_status, 'verified');
+      assert.equal(preview.signature_trust, 'self_declared');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

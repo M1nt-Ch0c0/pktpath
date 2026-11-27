@@ -19,6 +19,13 @@ import type {
   PluginMeta,
 } from './types.ts';
 import { normalizeU64String } from './u64-json.ts';
+import {
+  createZipFromDir,
+  signPluginPackageDir,
+  verifyPluginPackageSignature,
+  type PluginSignatureStatus,
+  type PluginSignatureTrust,
+} from './plugin-signature.ts';
 import { extractZipSafe } from './zip-extract.ts';
 
 export interface ExternalAnalyzerDecl {
@@ -366,7 +373,10 @@ function copyDirRecursive(srcDir: string, dstDir: string): void {
   }
 }
 
-export function previewExternalPackage(sourcePath: string): {
+export function previewExternalPackage(
+  sourcePath: string,
+  opts?: { trustedFingerprints?: readonly string[] },
+): {
   id: string;
   name: string;
   version: string;
@@ -378,6 +388,11 @@ export function previewExternalPackage(sourcePath: string): {
   entrypoint_module: string;
   has_kernel_bpf: boolean;
   kernel_bpf_objects: Array<{ arch: string; path: string; sha256: string }>;
+  signature_status: PluginSignatureStatus;
+  signature_trust: PluginSignatureTrust;
+  signature_key_fingerprint?: string;
+  signature_message: string;
+  signature_reason?: string;
 } {
   const resolved = path.resolve(sourcePath);
   if (!fs.existsSync(resolved)) {
@@ -397,6 +412,7 @@ export function previewExternalPackage(sourcePath: string): {
       throw new Error('plugin source must be a directory or .zip archive');
     }
     const parsed = parseExternalPluginDir(pkgRoot);
+    const sig = verifyPluginPackageSignature(pkgRoot, opts?.trustedFingerprints);
     return {
       id: parsed.manifest.id,
       name: parsed.manifest.name,
@@ -413,6 +429,11 @@ export function previewExternalPackage(sourcePath: string): {
             .filter(([, v]) => Boolean(v))
             .map(([arch, v]) => ({ arch, path: v!.path, sha256: v!.sha256 }))
         : [],
+      signature_status: sig.status,
+      signature_trust: sig.trust,
+      ...(sig.key_fingerprint ? { signature_key_fingerprint: sig.key_fingerprint } : {}),
+      signature_message: sig.message,
+      ...(sig.reason ? { signature_reason: sig.reason } : {}),
     };
   } finally {
     if (tempDir) {
@@ -442,6 +463,10 @@ export function installExternalPackage(sourcePath: string, pluginsDir: string): 
     }
 
     const parsed = parseExternalPluginDir(pkgRoot);
+    const sig = verifyPluginPackageSignature(pkgRoot);
+    if (sig.status === 'invalid') {
+      throw new Error(`plugin signature invalid: ${sig.reason ?? sig.message}`);
+    }
     const targetDir = path.join(pluginsDir, parsed.manifest.id);
     const stagingDir = path.join(pluginsDir, `.staging-${parsed.manifest.id}-${Date.now()}`);
     try {
@@ -455,6 +480,56 @@ export function installExternalPackage(sourcePath: string, pluginsDir: string): 
     return parseExternalPluginDir(targetDir);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+
+export function exportExternalPackageZip(
+  pluginDir: string,
+  outZipPath: string,
+  opts?: { signPrivateKeyPem?: string },
+): {
+  outPath: string;
+  pluginId: string;
+  version: string;
+  signed: boolean;
+  keyFingerprint?: string;
+  fileCount: number;
+  bytes: number;
+} {
+  const parsed = parseExternalPluginDir(pluginDir);
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-export-pkg-'));
+  try {
+    copyDirRecursive(pluginDir, staging);
+    let signed = false;
+    let keyFingerprint: string | undefined;
+    if (opts?.signPrivateKeyPem) {
+      const doc = signPluginPackageDir(staging, opts.signPrivateKeyPem);
+      signed = true;
+      keyFingerprint = doc.key_fingerprint;
+    } else {
+      const existingSig = verifyPluginPackageSignature(staging);
+      if (existingSig.status === 'invalid') {
+        throw new Error(`cannot export plugin with invalid signature: ${existingSig.reason ?? existingSig.message}`);
+      }
+      if (existingSig.status === 'verified') {
+        signed = true;
+        keyFingerprint = existingSig.key_fingerprint;
+      }
+    }
+    const resolvedOut = path.resolve(outZipPath);
+    const { fileCount, bytes } = createZipFromDir(staging, resolvedOut);
+    return {
+      outPath: resolvedOut,
+      pluginId: parsed.manifest.id,
+      version: parsed.manifest.version,
+      signed,
+      ...(keyFingerprint ? { keyFingerprint } : {}),
+      fileCount,
+      bytes,
+    };
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
   }
 }
 
