@@ -887,3 +887,29 @@ details[open] > summary::before { transform: rotate(90deg); }
 body.density-compact .card { padding: 10px; }
 body.density-compact .tbl td, body.density-compact .tbl th { padding: 4px 8px; }
 body.density-compact .pc-item { padding: 8px 10px; }
+
+/* Core required plugin lock & dependency pills */
+.switch.is-locked { cursor: not-allowed; opacity: .78; }
+.switch.is-locked .switch-slider { cursor: not-allowed; }
+.badge-accent {
+  background: color-mix(in srgb, var(--accent, #2563eb) 14%, transparent);
+  color: var(--accent, #2563eb);
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 28%, transparent);
+}
+.pc-item-usedby {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted, #64748b);
+  line-height: 1.35;
+}
+.pc-used-by {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border, rgba(128,128,128,.2));
+}
+.pc-used-by-label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  margin-bottom: 6px;
+}

@@ -16,6 +16,22 @@
     if (!raw || /^[a-z0-9][a-z0-9_-]*$/i.test(raw)) return fb;
     return raw;
   }
+  function isRequiredPlugin(p) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.isRequiredPlugin === 'function') return w1.isRequiredPlugin(p);
+    return !!(p && (p.required || (p.meta && p.meta.required)));
+  }
+  function usedByLabels(p) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.pluginUsedByLabels === 'function') return w1.pluginUsedByLabels(p);
+    const list = (p && (p.usedBy || p.used_by || (p.meta && (p.meta.usedBy || p.meta.used_by)))) || [];
+    return Array.isArray(list) ? list.map(String).filter(Boolean) : [];
+  }
+  function friendlyErr(raw) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.formatUserError === 'function') return w1.formatUserError(raw);
+    return String(raw || '');
+  }
   function normalizePreview(resp) {
     const w1 = Wave1();
     if (w1 && typeof w1.normalizeInstallPreview === 'function') return w1.normalizeInstallPreview(resp);
@@ -387,7 +403,7 @@
         timeout: 180000,
       });
       if (!res || !res.ok) {
-        throw new Error((res && res.error) || '导出失败');
+        throw new Error(friendlyErr((res && res.error) || '导出失败'));
       }
       if (B().showSavedBar) B().showSavedBar(res.out_path, `${pluginIcon(ex.icon, '✔')} ${res.summary || '已保存'}：`);
       toast(res.summary || `已保存：${res.out_path}`, 'ok', 5500);
@@ -555,9 +571,23 @@
     listEl.innerHTML = list.map((p) => {
       const m = p.meta;
       const sel = m.id === PC.selectedId;
+      const req = isRequiredPlugin(p);
+      const deps = usedByLabels(p);
       const dotCls = p.status === 'active' ? 'dot-ok' : p.status === 'error' ? 'dot-bad' : 'dot-off';
+      const originBadge = req
+        ? '<span class="badge badge-accent">核心内置 · 不可关闭</span>'
+        : `<span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置' : '外部'}</span>`;
+      const toggleHtml = req
+        ? `<label class="switch is-locked" title="核心内置插件不可关闭" onclick="event.stopPropagation()">
+              <input type="checkbox" class="pc-item-toggle" data-pid="${esc(m.id)}" checked disabled aria-disabled="true">
+              <span class="switch-slider"></span>
+            </label>`
+        : `<label class="switch" title="${p.enabled ? '点击停用' : '点击启用'}" onclick="event.stopPropagation()">
+              <input type="checkbox" class="pc-item-toggle" data-pid="${esc(m.id)}" ${p.enabled ? 'checked' : ''}>
+              <span class="switch-slider"></span>
+            </label>`;
       return `
-        <div class="pc-item ${sel ? 'active' : ''} ${p.enabled ? '' : 'is-disabled'}" data-pid="${esc(m.id)}">
+        <div class="pc-item ${sel ? 'active' : ''} ${p.enabled || req ? '' : 'is-disabled'}" data-pid="${esc(m.id)}"${req ? ' data-required="1"' : ''}>
           <div class="pc-item-head">
             <span class="pc-icon">${esc(pluginIcon(m.icon, '🧩'))}</span>
             <div class="pc-item-titles">
@@ -566,17 +596,15 @@
                 <span>${esc(m.name)}</span>
               </div>
               <div class="pc-item-meta">
-                <span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置' : '外部'}</span>
+                ${originBadge}
                 <span class="muted">v${esc(m.version || '1.0')}</span>
                 ${(p.extension_points || []).length ? `<span class="muted">· ${p.extension_points.length} 扩展点</span>` : ''}
               </div>
             </div>
-            <label class="switch" title="${p.enabled ? '点击停用' : '点击启用'}" onclick="event.stopPropagation()">
-              <input type="checkbox" class="pc-item-toggle" data-pid="${esc(m.id)}" ${p.enabled ? 'checked' : ''}>
-              <span class="switch-slider"></span>
-            </label>
+            ${toggleHtml}
           </div>
           <div class="pc-item-desc">${esc(m.description)}</div>
+          ${deps.length ? `<div class="pc-item-usedby">${req ? '核心依赖：' : '依赖功能：'}${esc(deps.join(' · '))}</div>` : ''}
         </div>`;
     }).join('');
 
@@ -594,9 +622,26 @@
         ? '<span class="badge badge-bad">失败</span>'
         : '<span class="badge badge-muted">已停用</span>';
 
+    const req = isRequiredPlugin(p);
+    const deps = usedByLabels(p);
     const capsHtml = (m.capabilities || []).map((c) => `<li>${esc(c)}</li>`).join('') || '<li class="muted">无</li>';
     const ptsHtml = (p.extension_points || []).map((pt) => `<span class="chip chip-accent">${esc(EXT_POINT_ZH[pt] || pt)}</span>`).join('');
     const reqsHtml = (m.requires || []).map((r) => `<span class="chip">依赖 ${esc(r)}</span>`).join('');
+    const usedByHtml = deps.length
+      ? `<div class="pc-used-by"><span class="pc-used-by-label">${req ? '被以下核心功能依赖：' : '被以下功能依赖：'}</span><div class="pc-meta-chips">${deps.map((u) => `<span class="chip chip-accent">${esc(u)}</span>`).join('')}</div></div>`
+      : (req ? '<div class="pc-used-by"><span class="pc-used-by-label">核心底座插件，不可关闭，以保障工作台基础能力正常运转。</span></div>' : '');
+    const detOriginBadge = req
+      ? '<span class="badge badge-accent">核心内置 · 不可关闭</span>'
+      : `<span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置' : '外部'}</span>`;
+    const detToggleHtml = req
+      ? `<label class="switch switch-lg is-locked" title="核心内置插件不可关闭">
+            <input type="checkbox" id="pcDetToggle" data-pid="${esc(m.id)}" checked disabled aria-disabled="true">
+            <span class="switch-slider"></span>
+          </label>`
+      : `<label class="switch switch-lg" title="${p.enabled ? '停用' : '启用'}">
+            <input type="checkbox" id="pcDetToggle" data-pid="${esc(m.id)}" ${p.enabled ? 'checked' : ''}>
+            <span class="switch-slider"></span>
+          </label>`;
 
     const schemaHtml = renderSchemaForm(p.schema, PC.draftCfg);
     const hasFields = !!(p.schema && p.schema.fields && p.schema.fields.length);
@@ -608,7 +653,7 @@
           <div class="pc-det-name-row">
             <h2>${esc(m.name)}</h2>
             ${statusBadge}
-            <span class="badge ${m.builtin ? 'badge-muted' : 'badge-violet'}">${m.builtin ? '内置' : '外部'}</span>
+            ${detOriginBadge}
           </div>
           <div class="pc-det-sub">
             <code>${esc(m.id)}</code> · v${esc(m.version || '1.0')}
@@ -616,20 +661,18 @@
           <p class="pc-det-desc">${esc(m.description)}</p>
         </div>
         <div class="pc-det-actions">
-          <label class="switch switch-lg" title="${p.enabled ? '停用' : '启用'}">
-            <input type="checkbox" id="pcDetToggle" data-pid="${esc(m.id)}" ${p.enabled ? 'checked' : ''}>
-            <span class="switch-slider"></span>
-          </label>
+          ${detToggleHtml}
           <button class="btn btn-ghost btn-sm" id="pcDetReload" data-pid="${esc(m.id)}">重载</button>
-          ${p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">卸载</button>` : ''}
+          ${!req && p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">卸载</button>` : ''}
         </div>
       </div>
 
-      ${p.error ? `<div class="pc-alert-bad">${esc(p.error)}</div>` : ''}
+      ${p.error ? `<div class="pc-alert-bad">${esc(friendlyErr(p.error))}</div>` : ''}
 
       <section class="pc-section card">
         <h3>能力</h3>
         <ul class="pc-cap-list">${capsHtml}</ul>
+        ${usedByHtml}
         ${(ptsHtml || reqsHtml) ? `<div class="pc-meta-chips">${ptsHtml} ${reqsHtml}</div>` : ''}
       </section>
 
@@ -802,6 +845,12 @@
    * 5. Plugin Actions (Toggle, Save Config, Reset, Reload, Install, Uninstall)
    * ===================================================================== */
   async function togglePluginById(id, enabled) {
+    const rec = ((PC.state && PC.state.plugins) || []).find((p) => p.meta && p.meta.id === id);
+    if (rec && isRequiredPlugin(rec) && !enabled) {
+      toast(`「${rec.meta.name}」为核心内置插件，不可关闭`, 'warn');
+      renderPluginCenter();
+      return;
+    }
     try {
       const r = await api('/api/kernel/plugins/toggle', { body: { id, enabled: !!enabled } });
       if (r && r.state) {
@@ -810,14 +859,15 @@
         renderPluginCenter();
       }
       if (!r || !r.ok) {
-        toast(`插件状态切换异常：${(r && r.error) || '未知错误'}`, 'bad');
+        toast(`插件状态切换异常：${friendlyErr((r && r.error) || '未知错误')}`, 'bad');
       } else {
         toast(`已${enabled ? '启用' : '停用'}插件并热更新工作台`, 'ok');
         if (B().refreshDevices) B().refreshDevices(false);
         if (B().reloadCurrentSession) B().reloadCurrentSession();
       }
     } catch (e) {
-      toast('切换插件状态失败：' + e.message, 'bad');
+      toast('切换插件状态失败：' + friendlyErr(e.message), 'bad');
+      renderPluginCenter();
     }
   }
 
