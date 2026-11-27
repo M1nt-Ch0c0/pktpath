@@ -249,7 +249,7 @@ struct btf_db *btf_db_load(const char *path, char *err_buf, size_t err_cap) {
         db->types[id].name_off = rt.name_off;
         db->types[id].info = rt.info;
         db->types[id].size_or_type = rt.size_or_type;
-        db->types[id].members_byte_off = (kind == 4 || kind == 5) ? (uint32_t)off : 0;
+        db->types[id].members_byte_off = (kind == 4 || kind == 5 || kind == 6 || kind == 19) ? (uint32_t)off : 0;
         off += extra;
     }
 
@@ -525,4 +525,72 @@ int btf_resolve_all_offsets(const struct btf_db *db, struct dev_btf_resolved *ou
 
     out->loaded = true;
     return 0;
+}
+
+/* ==========================================================================
+ * Wave 3: Export kernel enum (BTF_KIND_ENUM / BTF_KIND_ENUM64) for e.g.
+ * `enum skb_drop_reason` from /sys/kernel/btf/vmlinux.
+ * ========================================================================== */
+
+struct btf_raw_enum {
+    uint32_t name_off;
+    int32_t  val;
+};
+
+struct btf_raw_enum64 {
+    uint32_t name_off;
+    uint32_t val_lo32;
+    uint32_t val_hi32;
+};
+
+int btf_export_enum(const struct btf_db *db, const char *enum_name,
+                    struct btf_enum_entry *out, size_t max_entries, size_t *out_count) {
+    if (out_count) *out_count = 0;
+    if (!db || !enum_name || !enum_name[0] || !out || max_entries == 0)
+        return -1;
+
+    for (uint32_t id = 1; id <= db->nr_types; id++) {
+        const struct btf_type_idx *t = &db->types[id];
+        uint32_t kind = btf_info_kind(t->info);
+        if (kind != 6U && kind != 19U) /* BTF_KIND_ENUM or BTF_KIND_ENUM64 */
+            continue;
+        const char *name = btf_str(db, t->name_off);
+        if (strcmp(name, enum_name) != 0)
+            continue;
+
+        uint32_t vlen = btf_info_vlen(t->info);
+        uint32_t kflag = btf_info_kflag(t->info);
+        size_t off = (size_t)t->members_byte_off;
+        size_t elem_sz = (kind == 19U) ? sizeof(struct btf_raw_enum64) : sizeof(struct btf_raw_enum);
+        if (off > db->data_len || (size_t)vlen * elem_sz > db->data_len - off)
+            return -1;
+
+        size_t cnt = 0;
+        for (uint32_t i = 0; i < vlen && cnt < max_entries; i++) {
+            const uint8_t *p = db->data + off + (size_t)i * elem_sz;
+            uint32_t e_name_off = 0;
+            int64_t val = 0;
+            if (kind == 6U) {
+                struct btf_raw_enum e;
+                memcpy(&e, p, sizeof(e));
+                e_name_off = e.name_off;
+                val = kflag ? (int64_t)e.val : (int64_t)(uint32_t)e.val;
+            } else {
+                struct btf_raw_enum64 e64;
+                memcpy(&e64, p, sizeof(e64));
+                e_name_off = e64.name_off;
+                uint64_t u64 = ((uint64_t)e64.val_hi32 << 32) | (uint64_t)e64.val_lo32;
+                val = (int64_t)u64;
+            }
+            const char *ename = btf_str(db, e_name_off);
+            if (!ename || !ename[0])
+                continue;
+            out[cnt].value = val;
+            snprintf(out[cnt].name, sizeof(out[cnt].name), "%s", ename);
+            cnt++;
+        }
+        if (out_count) *out_count = cnt;
+        return 0;
+    }
+    return -1;
 }

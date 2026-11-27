@@ -21,6 +21,7 @@ static void print_usage(FILE *fp) {
         "    [--mem-budget MB] [--disk-budget MB]\n"
         "    [--trigger 'sojourn_us>X,drop_burst>Y'] [--pre-window Ns] [--post-window Ns]\n"
         "    [--profile sendmsg] [--plugin <file.json>]... [--plugin-dir <dir>]\n"
+        "    [--probe-groups <csv>] [--preset <egress|drop-pwru|full-path|tcp-diag>] [--preset-label <name>]\n"
         "    [--capture-hdr N] [--allow-partial] --out <dir>\n");
 }
 
@@ -369,6 +370,31 @@ int main(int argc, char **argv) {
             }
             if (cl > 128U) cl = 128U; /* preserve existing saturation */
             opts.capture_hdr_len = (uint32_t)cl;
+        } else if (strcmp(arg, "--probe-groups") == 0 && i + 1 < argc) {
+            char gerr[128] = {0};
+            if (pkt_parse_probe_groups_csv(argv[++i], &opts.requested_groups_mask,
+                                           gerr, sizeof(gerr)) != 0) {
+                fprintf(stderr, "error: invalid --probe-groups: %s\n", gerr);
+                return 2;
+            }
+            opts.has_probe_groups = true;
+        } else if (strcmp(arg, "--preset") == 0 && i + 1 < argc) {
+            const char *ps = argv[++i];
+            if (pkt_preset_mask_from_name(ps, &opts.requested_groups_mask) != 0) {
+                fprintf(stderr, "error: invalid --preset '%s' (expected egress|drop-pwru|full-path|tcp-diag)\n", ps);
+                return 2;
+            }
+            snprintf(opts.probe_preset, sizeof(opts.probe_preset), "%s", ps);
+            opts.has_preset = true;
+        } else if (strcmp(arg, "--preset-label") == 0 && i + 1 < argc) {
+            const char *pl = argv[++i];
+            if (strcmp(pl, "egress") != 0 && strcmp(pl, "drop-pwru") != 0 &&
+                strcmp(pl, "full-path") != 0 && strcmp(pl, "tcp-diag") != 0 &&
+                strcmp(pl, "custom") != 0) {
+                fprintf(stderr, "error: invalid --preset-label '%s'\n", pl);
+                return 2;
+            }
+            snprintf(opts.probe_preset, sizeof(opts.probe_preset), "%s", pl);
         } else if (strcmp(arg, "--out") == 0 && i + 1 < argc) {
             snprintf(opts.out_dir, sizeof(opts.out_dir), "%s", argv[++i]);
         } else {
@@ -377,6 +403,21 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+
+    /* Wave 3 CLI mutual exclusion: --preset and --probe-groups cannot be combined */
+    if (opts.has_preset && opts.has_probe_groups) {
+        fprintf(stderr, "error: --preset and --probe-groups are mutually exclusive\n");
+        return 2;
+    }
+    if (!opts.has_preset && !opts.has_probe_groups) {
+        opts.requested_groups_mask = PKT_PRESET_EGRESS_MASK;
+        if (!opts.probe_preset[0])
+            snprintf(opts.probe_preset, sizeof(opts.probe_preset), "egress");
+    } else if (!opts.probe_preset[0]) {
+        snprintf(opts.probe_preset, sizeof(opts.probe_preset), "custom");
+    }
+    /* core_drop is always required in effective_groups */
+    opts.effective_groups_mask = opts.requested_groups_mask | PKT_GRP_CORE_DROP;
 
     if (!opts.dev_name[0]) {
         fprintf(stderr, "error: --dev <ifname> is required\n");

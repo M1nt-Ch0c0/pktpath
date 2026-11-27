@@ -32,3 +32,4 @@ Thumbs.db
 
 # Optional Cordis3 analyzer candidate dependencies
 studio/cordis-analyzer-host/node_modules/
+!plugins/official/**/*.bpf.o

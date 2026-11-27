@@ -97,7 +97,39 @@ struct dev_cli_opts {
     char     plugin_dir[512];    /* --plugin-dir <dir> */
     uint32_t capture_hdr_len;    /* --capture-hdr N (0..128) */
     bool     allow_partial;      /* --allow-partial */
+
+    /* Wave 3 probe groups & presets */
+    bool     has_probe_groups;
+    bool     has_preset;
+    uint32_t requested_groups_mask;
+    uint32_t effective_groups_mask;
+    char     probe_preset[32];   /* egress|drop-pwru|full-path|tcp-diag|custom */
 };
+
+/* ==========================================================================
+ * Wave 3 Probe Groups (9 groups) & Presets (4 + custom)
+ * ========================================================================== */
+
+#define PKT_GRP_CORE_DROP      (1U << 0)
+#define PKT_GRP_EGRESS_TC      (1U << 1)
+#define PKT_GRP_SOCK_APP       (1U << 2)
+#define PKT_GRP_INGRESS_RX     (1U << 3)
+#define PKT_GRP_L3_ROUTE       (1U << 4)
+#define PKT_GRP_NETFILTER_NAT  (1U << 5)
+#define PKT_GRP_TCP_DIAG       (1U << 6)
+#define PKT_GRP_DROP_STACK     (1U << 7)
+#define PKT_GRP_TCP_PROBE      (1U << 8)
+#define PKT_GRP_COUNT          9U
+
+#define PKT_PRESET_EGRESS_MASK    (PKT_GRP_CORE_DROP | PKT_GRP_EGRESS_TC | PKT_GRP_SOCK_APP)
+#define PKT_PRESET_DROP_PWRU_MASK (PKT_GRP_CORE_DROP | PKT_GRP_DROP_STACK | PKT_GRP_INGRESS_RX | PKT_GRP_NETFILTER_NAT)
+#define PKT_PRESET_FULL_PATH_MASK (PKT_GRP_CORE_DROP | PKT_GRP_EGRESS_TC | PKT_GRP_INGRESS_RX | PKT_GRP_L3_ROUTE | PKT_GRP_NETFILTER_NAT | PKT_GRP_SOCK_APP)
+#define PKT_PRESET_TCP_DIAG_MASK  (PKT_GRP_CORE_DROP | PKT_GRP_TCP_DIAG | PKT_GRP_EGRESS_TC | PKT_GRP_SOCK_APP)
+
+uint32_t pkt_group_bit_from_name(const char *name);
+const char *pkt_group_name_from_index(unsigned idx);
+int pkt_preset_mask_from_name(const char *preset, uint32_t *mask_out);
+int pkt_parse_probe_groups_csv(const char *csv, uint32_t *mask_out, char *err_buf, size_t err_cap);
 
 /* ==========================================================================
  * BTF Parser Module (btf_parse.c)
@@ -156,6 +188,13 @@ int btf_resolve_all_offsets(const struct btf_db *db, struct dev_btf_resolved *ou
 int btf_resolve_field(const struct btf_db *db, const char *struct_name,
                       const char *field_path, uint32_t *byte_off_out);
 int btf_find_func_id(const struct btf_db *db, const char *func_name);
+
+struct btf_enum_entry {
+    int64_t value;
+    char    name[96];
+};
+int btf_export_enum(const struct btf_db *db, const char *enum_name,
+                    struct btf_enum_entry *out, size_t max_entries, size_t *out_count);
 
 /* ==========================================================================
  * Kallsyms & Tracefs Kprobe Manager (kallsyms.c)
@@ -352,6 +391,81 @@ void sample_clock_calibration(struct clock_calibration *cal);
 
 const char *scope_to_str(enum dev_scope s);
 const char *mode_to_str(enum dev_mode m);
+
+/* ==========================================================================
+ * Wave 3 External ELF64-BPF Loader, SHA-256 & Four-State Probe Inventory
+ * (device/bpf_elf.c)
+ * ========================================================================== */
+
+#define DEV_MAX_EXT_BUNDLES     16
+#define DEV_MAX_EXT_HOOKS       32
+#define DEV_MAX_BPF_OBJ_BYTES   (2U * 1024U * 1024U)
+#define DEV_MAX_PROBE_INV       256
+
+enum probe_inv_status {
+    PROBE_ST_ATTACHED = 0,
+    PROBE_ST_DISABLED_BY_USER = 1,
+    PROBE_ST_UNAVAILABLE_IN_KERNEL = 2,
+    PROBE_ST_ATTACH_FAILED = 3,
+};
+
+struct probe_inv_entry {
+    char id[96];
+    char group[32];
+    char source[24];      /* "builtin" | "external_bpf" */
+    char plugin_id[64];
+    char bpf_sha256[65];
+    char target[128];
+    enum probe_inv_status status;
+    char reason[256];
+};
+
+struct ext_bpf_hook {
+    char     id[96];
+    char     group[32];
+    uint32_t group_bit;
+    char     sec[96];
+    char     type[24];    /* "tracepoint" | "kprobe" | "kretprobe" */
+    char     target[128];
+    char     stage[32];
+    uint16_t assigned_site_id;
+};
+
+struct ext_bpf_bundle {
+    char     plugin_id[64];
+    uint32_t abi_version;
+    char     arch[32];
+    char     object_rel[128];
+    char     object_path[600];
+    char     expected_sha256[65];
+    char     actual_sha256[65];
+    uint32_t enabled_groups_mask;
+    int      num_hooks;
+    struct ext_bpf_hook hooks[DEV_MAX_EXT_HOOKS];
+    bool     valid;
+    char     error[256];
+};
+
+struct ext_bpf_prog_buf {
+    void    *insns;       /* struct bpf_insn * (caller frees) */
+    uint32_t insn_cnt;
+    uint32_t reloc_applied;
+    uint32_t site_patched;
+};
+
+void pkt_sha256_bytes(const uint8_t *data, size_t len, char hex_out[65]);
+int pkt_sha256_file(const char *path, char hex_out[65], size_t *size_out, char *err_buf, size_t err_cap);
+const char *probe_inv_status_str(enum probe_inv_status st);
+
+int bpf_elf_extract_and_relocate(const uint8_t *elf_data, size_t elf_len,
+                                 const char *sec_name,
+                                 int rb_fd, int btf_off_fd, int plugin_cfg_fd,
+                                 uint16_t site_id,
+                                 struct ext_bpf_prog_buf *out,
+                                 char *err_buf, size_t err_cap);
+
+int bpf_bundle_scan_dir(const char *plugin_dir, const char *host_arch,
+                        struct ext_bpf_bundle *out, int max_bundles);
 
 int run_inspect(const struct dev_cli_opts *opts);
 int run_record(const struct dev_cli_opts *opts);

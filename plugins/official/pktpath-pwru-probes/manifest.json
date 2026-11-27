@@ -1,0 +1,173 @@
+{
+  "id": "pktpath.pwru-probes",
+  "name": "PktPath pwru 扩展探针包",
+  "version": "1.0.0",
+  "description": "官方外置 eBPF 探针包（ABI v1）：覆盖收包入口、L3 路由、Netfilter/NAT、TCP 重传/状态迁移及可选高噪 tcp_probe，均仅依赖只读 btf_off/plugin_cfg 与 ringbuf。",
+  "kernel_probes": {
+    "abi_version": 1,
+    "objects": {
+      "arm64": {
+        "path": "bpf/arm64/pwru_probes.bpf.o",
+        "sha256": "2aa06ec1c80b088a2993a5d4982ea14db856df507a4bdabeb3ef3fcbfed6c361"
+      },
+      "x86_64": {
+        "path": "bpf/x86_64/pwru_probes.bpf.o",
+        "sha256": "052c345a44320a05f6bc0c098f3b52fcac09ced009b63c836b166fe0b3180eff"
+      }
+    },
+    "hooks": [
+      {
+        "id": "ext.ingress.netif_receive_skb",
+        "group": "ingress_rx",
+        "sec": "tp_netif_receive_skb",
+        "type": "tracepoint",
+        "target": "net:netif_receive_skb",
+        "stage": "rx_ingress"
+      },
+      {
+        "id": "ext.ingress.ip_rcv",
+        "group": "ingress_rx",
+        "sec": "kp_ip_rcv",
+        "type": "kprobe",
+        "target": "ip_rcv",
+        "stage": "rx_l3"
+      },
+      {
+        "id": "ext.ingress.ipv6_rcv",
+        "group": "ingress_rx",
+        "sec": "kp_ipv6_rcv",
+        "type": "kprobe",
+        "target": "ipv6_rcv",
+        "stage": "rx_l3"
+      },
+      {
+        "id": "ext.ingress.tcp_v4_rcv",
+        "group": "ingress_rx",
+        "sec": "kp_tcp_v4_rcv",
+        "type": "kprobe",
+        "target": "tcp_v4_rcv",
+        "stage": "rx_l4"
+      },
+      {
+        "id": "ext.ingress.udp_rcv",
+        "group": "ingress_rx",
+        "sec": "kp_udp_rcv",
+        "type": "kprobe",
+        "target": "udp_rcv",
+        "stage": "rx_l4"
+      },
+      {
+        "id": "ext.l3.ip_route_input_noref",
+        "group": "l3_route",
+        "sec": "kp_ip_route_input_noref",
+        "type": "kprobe",
+        "target": "ip_route_input_noref",
+        "stage": "l3_route"
+      },
+      {
+        "id": "ext.l3.ip_route_output_flow",
+        "group": "l3_route",
+        "sec": "kp_ip_route_output_flow",
+        "type": "kprobe",
+        "target": "ip_route_output_flow",
+        "stage": "l3_route"
+      },
+      {
+        "id": "ext.l3.ip_forward",
+        "group": "l3_route",
+        "sec": "kp_ip_forward",
+        "type": "kprobe",
+        "target": "ip_forward",
+        "stage": "l3_forward"
+      },
+      {
+        "id": "ext.l3.ip_output",
+        "group": "l3_route",
+        "sec": "kp_ip_output",
+        "type": "kprobe",
+        "target": "ip_output",
+        "stage": "tx_l3"
+      },
+      {
+        "id": "ext.l3.ip6_output",
+        "group": "l3_route",
+        "sec": "kp_ip6_output",
+        "type": "kprobe",
+        "target": "ip6_output",
+        "stage": "tx_l3"
+      },
+      {
+        "id": "ext.l3.xfrm_output",
+        "group": "l3_route",
+        "sec": "kp_xfrm_output",
+        "type": "kprobe",
+        "target": "xfrm_output",
+        "stage": "tx_xfrm"
+      },
+      {
+        "id": "ext.l3.xfrm_input",
+        "group": "l3_route",
+        "sec": "kp_xfrm_input",
+        "type": "kprobe",
+        "target": "xfrm_input",
+        "stage": "rx_xfrm"
+      },
+      {
+        "id": "ext.nf.nf_hook_slow",
+        "group": "netfilter_nat",
+        "sec": "kp_nf_hook_slow",
+        "type": "kprobe",
+        "target": "nf_hook_slow",
+        "stage": "netfilter"
+      },
+      {
+        "id": "ext.nf.nf_hook_slow_ret",
+        "group": "netfilter_nat",
+        "sec": "kr_nf_hook_slow",
+        "type": "kretprobe",
+        "target": "nf_hook_slow",
+        "stage": "netfilter_ret"
+      },
+      {
+        "id": "ext.nf.nf_conntrack_in",
+        "group": "netfilter_nat",
+        "sec": "kp_nf_conntrack_in",
+        "type": "kprobe",
+        "target": "nf_conntrack_in",
+        "stage": "conntrack"
+      },
+      {
+        "id": "ext.nf.nf_nat_packet",
+        "group": "netfilter_nat",
+        "sec": "kp_nf_nat_packet",
+        "type": "kprobe",
+        "target": "nf_nat_packet",
+        "stage": "nat"
+      },
+      {
+        "id": "ext.tcp.retransmit_skb",
+        "group": "tcp_diag",
+        "sec": "tp_tcp_retransmit_skb",
+        "type": "tracepoint",
+        "target": "tcp:tcp_retransmit_skb",
+        "stage": "tcp_retransmit"
+      },
+      {
+        "id": "ext.tcp.inet_sock_set_state",
+        "group": "tcp_diag",
+        "sec": "tp_inet_sock_set_state",
+        "type": "tracepoint",
+        "target": "sock:inet_sock_set_state",
+        "stage": "tcp_state"
+      },
+      {
+        "id": "ext.tcp.tcp_probe",
+        "group": "tcp_probe",
+        "sec": "tp_tcp_probe",
+        "type": "tracepoint",
+        "target": "tcp:tcp_probe",
+        "stage": "tcp_probe"
+      }
+    ]
+  }
+}
