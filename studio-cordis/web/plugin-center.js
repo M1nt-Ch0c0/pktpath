@@ -84,6 +84,7 @@
     pendingPreview: null,
     loadedAssets: new Set(),
     slotRenderers: new Map(), // slotSpecId -> fn(container, ctx)
+    groupOpenState: new Map(), // `${pluginId}:${groupId}` -> boolean
   };
 
   // Global SDK exposed to external UI slot scripts
@@ -109,7 +110,7 @@
   /* =====================================================================
    * 1. Main Workspace View Switcher (Workbench <-> Plugin Center)
    * ===================================================================== */
-  function setMainView(view) {
+  function setMainView(view, targetPluginId) {
     PC.view = view === 'plugins' ? 'plugins' : 'workbench';
     const wb = $('#workbenchView');
     const pc = $('#pluginCenterView');
@@ -121,6 +122,19 @@
       btn.setAttribute('aria-selected', act ? 'true' : 'false');
     });
     if (PC.view === 'plugins') {
+      if (targetPluginId && typeof targetPluginId === 'string') {
+        PC.cat = 'all';
+        PC.search = '';
+        const catBar = $('#pcCatBar');
+        if (catBar) {
+          $$('.pc-cat', catBar).forEach((x) => x.classList.toggle('active', x.dataset.cat === 'all'));
+        }
+        const searchEl = $('#pcSearch');
+        if (searchEl) searchEl.value = '';
+        PC.selectedId = targetPluginId;
+        const rec = ((PC.state && PC.state.plugins) || []).find((p) => p.meta && p.meta.id === targetPluginId);
+        if (rec) PC.draftCfg = JSON.parse(JSON.stringify(rec.config || {}));
+      }
       loadKernelState(false);
     }
   }
@@ -207,6 +221,7 @@
     renderDynamicTransports(st.transports || []);
     renderDynamicCaptureModes(st.capture_modes || []);
     syncWorkbenchVisibility(st);
+    renderWorkbenchProbeSummary(st);
 
     // 5. Rebuild Dynamic Exporter Buttons from active exporter plugins
     renderDynamicExporters(st.exporters || []);
@@ -357,6 +372,37 @@
         emptyDesc.textContent = '采集器或采集模式插件已关闭，可在插件中心开启。';
       }
     }
+  }
+
+  function renderWorkbenchProbeSummary(st) {
+    const box = $('#probePresetSummary');
+    if (!box) return;
+    const w1 = Wave1();
+    const sum = w1 && typeof w1.summarizeCollectorPreset === 'function'
+      ? w1.summarizeCollectorPreset(st)
+      : null;
+    if (!sum || !sum.available) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    const groupsText = sum.enabledGroupLabels.length
+      ? `已启用 ${sum.enabledGroupLabels.length} 组：${sum.enabledGroupLabels.join(' · ')}`
+      : '使用默认探针组合';
+    const warnBadge = sum.highOverhead
+      ? `<span class="badge badge-warn" title="包含高开销探针组：${esc(sum.highOverheadLabels.join('、'))}">高开销</span>`
+      : '';
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="probe-summary-head">
+        <span class="probe-summary-label">探针组合</span>
+        <span class="badge ${sum.isCustom ? 'badge-warn' : 'badge-accent'}" id="probePresetName">${esc(sum.presetLabel)}</span>
+        ${warnBadge}
+        <span class="spacer"></span>
+        <button type="button" class="link-btn" id="btnOpenProbeSettings" data-pid="${esc(sum.pluginId)}">去插件设置调整</button>
+      </div>
+      <div class="probe-summary-groups muted" title="${esc(groupsText)}">${esc(groupsText)}</div>
+    `;
   }
 
   function renderDynamicExporters(exporters) {
@@ -643,7 +689,7 @@
             <span class="switch-slider"></span>
           </label>`;
 
-    const schemaHtml = renderSchemaForm(p.schema, PC.draftCfg);
+    const schemaHtml = renderSchemaForm(p.schema, PC.draftCfg, m.id);
     const hasFields = !!(p.schema && p.schema.fields && p.schema.fields.length);
 
     el.innerHTML = `
@@ -662,6 +708,7 @@
         </div>
         <div class="pc-det-actions">
           ${detToggleHtml}
+          <button class="btn btn-ghost btn-sm" id="pcDetExport" data-pid="${esc(m.id)}" title="将插件打包导出为 .zip">导出 .zip</button>
           <button class="btn btn-ghost btn-sm" id="pcDetReload" data-pid="${esc(m.id)}">重载</button>
           ${!req && p.can_uninstall ? `<button class="btn btn-danger btn-sm" id="pcDetUninstall" data-pid="${esc(m.id)}">卸载</button>` : ''}
         </div>
@@ -691,26 +738,131 @@
   }
 
   /* ---- Schemastery-style Visual Schema-Form Renderer ---- */
-  function renderSchemaForm(schema, cfg) {
+  function fieldVal(f, cfg) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.effectiveFieldValue === 'function') return w1.effectiveFieldValue(f, cfg);
+    return (cfg && cfg[f.key] !== undefined) ? cfg[f.key] : f.default;
+  }
+
+  function isFieldReadOnly(f) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.isReadOnlyField === 'function') return w1.isReadOnlyField(f);
+    return Boolean(f && (f.readOnly === true || f.readonly === true));
+  }
+
+  function isRiskBadge(b) {
+    const w1 = Wave1();
+    if (w1 && typeof w1.isHighRiskBadge === 'function') return w1.isHighRiskBadge(b);
+    return /高开销|高噪|丢样|风险|root/i.test(String(b || ''));
+  }
+
+  function renderPresetsBar(schema, cfg) {
+    const presets = Array.isArray(schema && schema.presets) ? schema.presets.filter((p) => p && p.id && p.id !== 'custom') : [];
+    if (!presets.length) return '';
+    const w1 = Wave1();
+    const activeId = w1 && typeof w1.resolveActivePreset === 'function'
+      ? w1.resolveActivePreset(schema, cfg)
+      : 'custom';
+    const activeObj = presets.find((p) => String(p.id) === activeId);
+    const activeLabel = activeObj ? activeObj.label : '自定义';
+    const isCustom = activeId === 'custom';
+    const cardsHtml = presets.map((pr) => {
+      const isAct = String(pr.id) === activeId;
+      const badgeHtml = pr.badge
+        ? `<span class="badge ${isRiskBadge(pr.badge) ? 'badge-warn' : 'badge-accent'} sf-preset-badge">${esc(pr.badge)}</span>`
+        : '';
+      return `
+        <button type="button" class="sf-preset-card ${isAct ? 'active' : ''}" data-preset-id="${esc(pr.id)}" aria-pressed="${isAct ? 'true' : 'false'}">
+          <div class="sf-preset-head">
+            <span class="sf-preset-title">${esc(pr.label || pr.id)}</span>
+            ${badgeHtml}
+          </div>
+          ${pr.description ? `<div class="sf-preset-desc">${esc(pr.description)}</div>` : ''}
+        </button>`;
+    }).join('');
+    return `
+      <div class="sf-presets" id="sfPresetsBar">
+        <div class="sf-presets-head">
+          <span class="sf-presets-title">推荐组合预设</span>
+          <span class="badge ${isCustom ? 'badge-warn' : 'badge-accent'}" id="sfPresetStatus">当前：${esc(activeLabel)}</span>
+        </div>
+        <div class="sf-preset-grid">${cardsHtml}</div>
+        <div class="sf-custom-note muted" id="sfCustomNote"${isCustom ? '' : ' hidden'}>已手动调整开关，当前处于「自定义」组合；点击上方卡片可一键恢复推荐组合。</div>
+      </div>`;
+  }
+
+  function groupBoolCountText(fields, cfg) {
+    const bools = (fields || []).filter((f) => f && f.type === 'boolean');
+    if (!bools.length) return '';
+    const on = bools.filter((f) => Boolean(fieldVal(f, cfg))).length;
+    return `${on}/${bools.length} 已开启`;
+  }
+
+  function renderSchemaForm(schema, cfg, pluginId) {
     if (!schema || !Array.isArray(schema.fields) || !schema.fields.length) {
       return '<div class="empty-mini" style="padding:18px">该插件无需额外配置，启用即可自动工作。</div>';
     }
-    return schema.fields.map((f) => renderFieldControl(f, cfg ? cfg[f.key] : f.default, f.key)).join('');
+    const w1 = Wave1();
+    const sections = w1 && typeof w1.groupSchemaFields === 'function'
+      ? w1.groupSchemaFields(schema)
+      : [{ id: '', label: '', description: '', collapsible: false, defaultCollapsed: false, fields: schema.fields }];
+    const presetsHtml = renderPresetsBar(schema, cfg);
+    const sectionsHtml = sections.map((sec) => {
+      const fieldsHtml = sec.fields.map((f) => renderFieldControl(f, fieldVal(f, cfg), f.key)).join('');
+      if (!sec.id) {
+        return `<div class="sf-ungrouped">${fieldsHtml}</div>`;
+      }
+      const stateKey = `${pluginId || ''}:${sec.id}`;
+      const isOpen = PC.groupOpenState.has(stateKey) ? PC.groupOpenState.get(stateKey) : !sec.defaultCollapsed;
+      const countText = groupBoolCountText(sec.fields, cfg);
+      const countHtml = countText ? `<span class="badge badge-muted sf-group-count" data-group-count="${esc(sec.id)}">${esc(countText)}</span>` : '';
+      const descHtml = sec.description ? `<span class="sf-group-desc muted">${esc(sec.description)}</span>` : '';
+      if (sec.collapsible) {
+        return `
+          <details class="sf-group" data-group-id="${esc(sec.id)}" data-plugin-id="${esc(pluginId || '')}"${isOpen ? ' open' : ''}>
+            <summary class="sf-group-summary">
+              <span class="sf-group-title">${esc(sec.label)}</span>
+              ${countHtml}
+              <span class="spacer"></span>
+              ${descHtml}
+            </summary>
+            <div class="sf-group-body">${fieldsHtml}</div>
+          </details>`;
+      }
+      return `
+        <div class="sf-group sf-group-static" data-group-id="${esc(sec.id)}">
+          <div class="sf-group-summary sf-group-summary-static">
+            <span class="sf-group-title">${esc(sec.label)}</span>
+            ${countHtml}
+            <span class="spacer"></span>
+            ${descHtml}
+          </div>
+          <div class="sf-group-body">${fieldsHtml}</div>
+        </div>`;
+    }).join('');
+    return presetsHtml + sectionsHtml;
   }
 
   function renderFieldControl(f, val, pathKey) {
     const desc = f.description ? `<div class="sf-desc">${esc(f.description)}</div>` : '';
     const req = f.required ? '<span class="sf-req">*</span>' : '';
+    const ro = isFieldReadOnly(f);
+    const roBadge = ro ? '<span class="badge badge-accent sf-badge-readonly">必选底座</span>' : '';
+    const fieldBadge = f.badge
+      ? `<span class="badge ${isRiskBadge(f.badge) ? 'badge-warn' : 'badge-muted'} sf-field-badge">${esc(f.badge)}</span>`
+      : '';
+    const labelLine = `<label class="sf-label">${esc(f.label)}${req}${roBadge}${fieldBadge}</label>`;
+    const roAttr = ro ? ' disabled aria-disabled="true"' : '';
 
     if (f.type === 'boolean') {
       return `
-        <div class="sf-row sf-row-bool">
+        <div class="sf-row sf-row-bool${ro ? ' sf-row-readonly' : ''}">
           <div class="sf-info">
-            <label class="sf-label">${esc(f.label)}${req}</label>
+            ${labelLine}
             ${desc}
           </div>
-          <label class="switch">
-            <input type="checkbox" class="sf-input" data-key="${esc(pathKey)}" data-type="boolean" ${val ? 'checked' : ''}>
+          <label class="switch${ro ? ' is-locked' : ''}"${ro ? ' title="必选底座，不可关闭"' : ''}>
+            <input type="checkbox" class="sf-input" data-key="${esc(pathKey)}" data-type="boolean" ${val ? 'checked' : ''}${roAttr}>
             <span class="switch-slider"></span>
           </label>
         </div>`;
@@ -722,25 +874,25 @@
         `<option value="${esc(o.value)}" ${String(o.value) === cur ? 'selected' : ''}>${esc(o.label || o.value)}</option>`
       ).join('');
       return `
-        <div class="sf-row">
-          <label class="sf-label">${esc(f.label)}${req}</label>
+        <div class="sf-row${ro ? ' sf-row-readonly' : ''}">
+          ${labelLine}
           ${desc}
-          <select class="sf-input" data-key="${esc(pathKey)}" data-type="select">${opts}</select>
+          <select class="sf-input" data-key="${esc(pathKey)}" data-type="select"${roAttr}>${opts}</select>
         </div>`;
     }
 
     if (f.type === 'number') {
       const numVal = val !== undefined && val !== null ? val : (f.default ?? 0);
       return `
-        <div class="sf-row">
-          <label class="sf-label">${esc(f.label)}${req}</label>
+        <div class="sf-row${ro ? ' sf-row-readonly' : ''}">
+          ${labelLine}
           ${desc}
           <div class="sf-num-wrap">
             <input type="number" class="sf-input" data-key="${esc(pathKey)}" data-type="number"
               value="${esc(numVal)}"
               ${f.min !== undefined ? `min="${esc(f.min)}"` : ''}
               ${f.max !== undefined ? `max="${esc(f.max)}"` : ''}
-              ${f.step !== undefined ? `step="${esc(f.step)}"` : ''}>
+              ${f.step !== undefined ? `step="${esc(f.step)}"` : ''}${roAttr}>
             ${f.unit ? `<span class="sf-unit">${esc(f.unit)}</span>` : ''}
           </div>
         </div>`;
@@ -749,12 +901,12 @@
     if (f.type === 'file' || f.type === 'dir') {
       const strVal = val !== undefined && val !== null ? String(val) : '';
       return `
-        <div class="sf-row">
-          <label class="sf-label">${esc(f.label)}${req}</label>
+        <div class="sf-row${ro ? ' sf-row-readonly' : ''}">
+          ${labelLine}
           ${desc}
           <div class="sf-path-wrap">
-            <input type="text" class="sf-input" data-key="${esc(pathKey)}" data-type="string" value="${esc(strVal)}" placeholder="${esc(f.placeholder || '')}">
-            <button type="button" class="btn btn-ghost btn-sm sf-browse-btn" data-key="${esc(pathKey)}" data-browse="${esc(f.type)}" data-filter="${esc(f.file_filter || '')}">浏览…</button>
+            <input type="text" class="sf-input" data-key="${esc(pathKey)}" data-type="string" value="${esc(strVal)}" placeholder="${esc(f.placeholder || '')}"${roAttr}>
+            ${ro ? '' : `<button type="button" class="btn btn-ghost btn-sm sf-browse-btn" data-key="${esc(pathKey)}" data-browse="${esc(f.type)}" data-filter="${esc(f.file_filter || '')}">浏览…</button>`}
           </div>
         </div>`;
     }
@@ -794,10 +946,10 @@
     // string / path
     const strVal = val !== undefined && val !== null ? String(val) : '';
     return `
-      <div class="sf-row">
-        <label class="sf-label">${esc(f.label)}${req}</label>
+      <div class="sf-row${ro ? ' sf-row-readonly' : ''}">
+        ${labelLine}
         ${desc}
-        <input type="text" class="sf-input" data-key="${esc(pathKey)}" data-type="string" value="${esc(strVal)}" placeholder="${esc(f.placeholder || '')}">
+        <input type="text" class="sf-input" data-key="${esc(pathKey)}" data-type="string" value="${esc(strVal)}" placeholder="${esc(f.placeholder || '')}"${roAttr}>
       </div>`;
   }
 
@@ -819,13 +971,51 @@
       <input type="${sf.type === 'number' ? 'number' : 'text'}" class="sf-sub-input" data-list-key="${esc(listKey)}" data-idx="${idx}" data-sub-key="${esc(sf.key)}" data-type="${esc(sf.type)}" value="${esc(strVal)}" placeholder="${esc(sf.placeholder || '')}"></label>`;
   }
 
+  function refreshSchemaLiveState(rec) {
+    if (!rec || !rec.schema) return;
+    const w1 = Wave1();
+    const schema = rec.schema;
+    if (Array.isArray(schema.presets) && schema.presets.length && w1 && typeof w1.resolveActivePreset === 'function') {
+      const activeId = w1.resolveActivePreset(schema, PC.draftCfg);
+      if (Object.prototype.hasOwnProperty.call(PC.draftCfg, 'probe_preset')) PC.draftCfg.probe_preset = activeId;
+      if (Object.prototype.hasOwnProperty.call(PC.draftCfg, 'preset')) PC.draftCfg.preset = activeId;
+      const activeObj = schema.presets.find((p) => p && String(p.id) === activeId);
+      const activeLabel = activeObj ? activeObj.label : '自定义';
+      const isCustom = activeId === 'custom';
+      $$('#sfPresetsBar .sf-preset-card').forEach((card) => {
+        const hit = card.dataset.presetId === activeId;
+        card.classList.toggle('active', hit);
+        card.setAttribute('aria-pressed', hit ? 'true' : 'false');
+      });
+      const stEl = $('#sfPresetStatus');
+      if (stEl) {
+        stEl.textContent = `当前：${activeLabel}`;
+        stEl.className = `badge ${isCustom ? 'badge-warn' : 'badge-accent'}`;
+      }
+      const noteEl = $('#sfCustomNote');
+      if (noteEl) noteEl.hidden = !isCustom;
+    }
+    if (w1 && typeof w1.groupSchemaFields === 'function') {
+      for (const sec of w1.groupSchemaFields(schema)) {
+        if (!sec.id) continue;
+        const cntEl = $(`[data-group-count="${CSS.escape(sec.id)}"]`);
+        if (cntEl) cntEl.textContent = groupBoolCountText(sec.fields, PC.draftCfg);
+      }
+    }
+  }
+
   function syncDraftFromEvent(target) {
+    if (target.disabled) return;
     if (target.classList.contains('sf-input')) {
       const key = target.dataset.key;
       const typ = target.dataset.type;
+      const rec = ((PC.state && PC.state.plugins) || []).find((p) => p.meta && p.meta.id === PC.selectedId);
+      const field = rec && rec.schema && (rec.schema.fields || []).find((f) => f.key === key);
+      if (field && isFieldReadOnly(field)) return;
       if (typ === 'boolean') PC.draftCfg[key] = target.checked;
       else if (typ === 'number') PC.draftCfg[key] = target.value === '' ? 0 : Number(target.value);
       else PC.draftCfg[key] = target.value;
+      refreshSchemaLiveState(rec);
       return;
     }
     if (target.classList.contains('sf-sub-input')) {
@@ -908,6 +1098,54 @@
     }
   }
 
+  async function exportPluginZip(id, btnEl) {
+    if (!id) return;
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const url = `/api/plugins/${encodeURIComponent(id)}/export`;
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          if (ct.includes('application/json')) {
+            const errJson = await res.json();
+            if (errJson && errJson.error) msg = errJson.error;
+          } else {
+            const txt = (await res.text()).trim();
+            if (txt) msg = txt;
+          }
+        } catch {}
+        throw new Error(msg);
+      }
+      if (ct.includes('application/zip') || ct.includes('application/octet-stream')) {
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        const objUrl = URL.createObjectURL(blob);
+        a.href = objUrl;
+        a.download = `${id.replace(/[^a-zA-Z0-9._-]/g, '_')}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+        toast(`已导出插件包 ${a.download}`, 'ok');
+        return;
+      }
+      const data = await res.json();
+      if (data && data.ok === false) {
+        throw new Error(data.error || '导出失败');
+      }
+      const kb = data && data.size_bytes ? `${(Number(data.size_bytes) / 1024).toFixed(1)} KB` : '';
+      const count = data && data.file_count ? `${data.file_count} 个文件` : '';
+      const metaStr = [count, kb].filter(Boolean).join('，');
+      toast(`插件包已导出${data && data.path ? '：' + data.path : ''}${metaStr ? '（' + metaStr + '）' : ''}`, 'ok');
+    } catch (e) {
+      toast('导出插件失败：' + friendlyErr(e.message), 'bad');
+    } finally {
+      if (btnEl) btnEl.disabled = false;
+    }
+  }
+
   async function reloadPluginById(id) {
     try {
       const r = await api('/api/kernel/plugins/reload', { body: { id } });
@@ -972,13 +1210,51 @@
     } else {
       const caps = (pv.capabilities || []).map((c) => `<li>${esc(c)}</li>`).join('');
       const warns = (pv.warnings || []).map((w) => `<div class="pc-alert-warn">⚠ ${esc(w)}</div>`).join('');
+      const hasBpf = Boolean(pv.has_kernel_bpf);
+      const bpfObjects = Array.isArray(pv.kernel_bpf_objects) ? pv.kernel_bpf_objects : [];
+      const bpfHooks = Array.isArray(pv.kernel_bpf_hooks) ? pv.kernel_bpf_hooks : [];
+      const sig = (Wave1() && typeof Wave1().describePluginSignature === 'function')
+        ? Wave1().describePluginSignature(pv)
+        : { status: 'unsigned', trust: 'none', label: '未签名', badgeClass: 'badge-muted', boxClass: 'is-muted', blocked: false, detail: '', fingerprint: null };
       const badges = [];
+      badges.push(`<span class="badge ${esc(sig.badgeClass)}" id="instSigBadge">${esc(sig.label)}</span>`);
+      if (hasBpf) badges.push('<span class="badge badge-bad">含内核 eBPF 字节码</span>');
       if ((pv.sock_fields || []).length) badges.push(`<span class="badge">BTF 字段 ×${pv.sock_fields.length}</span>`);
       if ((pv.qdiscs || []).length) badges.push(`<span class="badge">自定义队列 ×${pv.qdiscs.length}</span>`);
       if (pv.analyzer_count) badges.push(`<span class="badge badge-ok">后分析 Hook ×${pv.analyzer_count}</span>`);
       if (pv.exporter_count) badges.push(`<span class="badge badge-ok">导出器 ×${pv.exporter_count}</span>`);
       if (pv.ui_slot_count) badges.push(`<span class="badge badge-violet">界面插槽 ×${pv.ui_slot_count}</span>`);
       if (pv.schema_fields) badges.push(`<span class="badge badge-muted">可视化配置项 ×${pv.schema_fields}</span>`);
+
+      let bpfWarningHtml = '';
+      if (hasBpf) {
+        const objRows = bpfObjects.length
+          ? bpfObjects.map((o) => {
+              const shortSha = o.sha256 ? `${o.sha256.slice(0, 12)}…` : '未提供';
+              return `<li><code>${esc(o.arch || 'unknown')}</code> · <code>${esc(o.path || '')}</code> <span class="muted" title="${esc(o.sha256 || '')}">(SHA256: ${esc(shortSha)})</span></li>`;
+            }).join('')
+          : '<li class="muted">未列出目标架构 .bpf.o 文件清单</li>';
+        const hookRows = bpfHooks.length
+          ? `<div class="inst-bpf-sub">声明内核挂点（${bpfHooks.length} 个）：</div><ul class="inst-bpf-list">${bpfHooks.map((h) =>
+              `<li><code>${esc(h.type ? `${h.type}:${h.target}` : (h.target || h.id))}</code>${h.group ? ` <span class="badge badge-muted">${esc(h.group)}</span>` : ''}</li>`
+            ).join('')}</ul>`
+          : '';
+        bpfWarningHtml = `
+          <div class="inst-bpf-warning" id="instBpfWarning">
+            <div class="inst-bpf-title">⚠️ 内核级权限提示</div>
+            <p class="inst-bpf-msg">包含将在设备内核态以 root 权限加载的 eBPF 字节码，仅安装信任来源。</p>
+            <label class="inst-bpf-ack">
+              <input type="checkbox" id="instBpfConfirm">
+              <span>我确认来源可信，同意在设备内核加载此插件</span>
+            </label>
+            <details class="tech-details" id="instBpfTechDetails">
+              <summary>查看技术详情（${bpfObjects.length} 个字节码文件${bpfHooks.length ? ` · ${bpfHooks.length} 个内核挂点` : ''}）</summary>
+              <div class="inst-bpf-sub">目标架构字节码文件：</div>
+              <ul class="inst-bpf-list">${objRows}</ul>
+              ${hookRows}
+            </details>
+          </div>`;
+      }
 
       body.innerHTML = `
         <div class="inst-summary">
@@ -990,11 +1266,25 @@
           </div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">${badges.join('')}</div>
+        <div class="inst-sig-box ${esc(sig.boxClass)}" id="instSigBox">
+          <div class="inst-sig-head">
+            <span class="inst-sig-title">${esc(sig.label)}</span>
+          </div>
+          ${sig.detail ? `<div class="inst-sig-detail">${esc(sig.detail)}</div>` : ''}
+          ${(sig.fingerprint || pv.signature_reason) ? `
+            <details class="tech-details" id="instSigTechDetails">
+              <summary>查看签名技术详情</summary>
+              ${sig.fingerprint ? `<div class="tech-kv"><span>公钥指纹</span><code class="inst-sig-fp">${esc(sig.fingerprint)}</code></div>` : ''}
+              ${pv.signature_reason ? `<div class="tech-kv"><span>校验说明</span><code>${esc(pv.signature_reason)}</code></div>` : ''}
+            </details>` : ''}
+        </div>
+        ${sig.blocked ? '<div class="pc-alert-bad" id="instSigBlocked">❌ 签名无效，已禁止安装此插件包。</div>' : ''}
+        ${bpfWarningHtml}
         <div class="section-title" style="margin:8px 0 4px">安装后将立即提供以下能力：</div>
         <ul class="pc-cap-list">${caps || '<li class="muted">未声明能力</li>'}</ul>
         ${warns}
       `;
-      if (btnOk) btnOk.disabled = false;
+      if (btnOk) btnOk.disabled = Boolean(sig.blocked || hasBpf);
     }
     modal.hidden = false;
   }
@@ -1008,6 +1298,20 @@
 
   async function confirmInstallExternal() {
     if (!PC.pendingInstallPath) return;
+    const sigCheck = (Wave1() && typeof Wave1().describePluginSignature === 'function')
+      ? Wave1().describePluginSignature(PC.pendingPreview || {})
+      : { blocked: PC.pendingPreview && PC.pendingPreview.signature_status === 'invalid' };
+    if (sigCheck && sigCheck.blocked) {
+      toast('签名无效，禁止安装该插件', 'bad');
+      return;
+    }
+    if (PC.pendingPreview && PC.pendingPreview.has_kernel_bpf) {
+      const ack = $('#instBpfConfirm');
+      if (!ack || !ack.checked) {
+        toast('请先勾选确认同意加载设备内核态 eBPF 字节码', 'warn');
+        return;
+      }
+    }
     const p = PC.pendingInstallPath;
     closeInstallModal();
     try {
@@ -1138,11 +1442,28 @@
       pcDetail.addEventListener('input', (e) => {
         syncDraftFromEvent(e.target);
       });
+      pcDetail.addEventListener('toggle', (e) => {
+        const det = e.target;
+        if (det && det.classList && det.classList.contains('sf-group') && det.dataset.groupId) {
+          PC.groupOpenState.set(`${det.dataset.pluginId || PC.selectedId}:${det.dataset.groupId}`, det.open);
+        }
+      }, true);
       pcDetail.addEventListener('click', async (e) => {
+        const presetCard = e.target.closest('.sf-preset-card');
+        if (presetCard) {
+          const rec = ((PC.state && PC.state.plugins) || []).find((p) => p.meta && p.meta.id === PC.selectedId);
+          if (rec && rec.schema && Wave1() && typeof Wave1().applyPresetToConfig === 'function') {
+            PC.draftCfg = Wave1().applyPresetToConfig(rec.schema, PC.draftCfg, presetCard.dataset.presetId);
+            renderPluginDetail(rec);
+          }
+          return;
+        }
         const saveBtn = e.target.closest('#pcBtnSaveCfg');
         if (saveBtn) { saveSelectedConfig(saveBtn.dataset.pid); return; }
         const resetBtn = e.target.closest('#pcBtnResetCfg');
         if (resetBtn) { resetSelectedConfig(resetBtn.dataset.pid); return; }
+        const exportBtn = e.target.closest('#pcDetExport');
+        if (exportBtn) { exportPluginZip(exportBtn.dataset.pid, exportBtn); return; }
         const reloadBtn = e.target.closest('#pcDetReload');
         if (reloadBtn) { reloadPluginById(reloadBtn.dataset.pid); return; }
         const uninstBtn = e.target.closest('#pcDetUninstall');
@@ -1197,7 +1518,20 @@
       });
     }
 
+    // Workbench compact probe preset summary -> jump straight to collector plugin settings
+    $('#probePresetSummary')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('#btnOpenProbeSettings');
+      if (btn) setMainView('plugins', btn.dataset.pid || 'builtin.collector.ebpf-tc');
+    });
+
     // Install Preview Modal
+    $('#instBody')?.addEventListener('change', (e) => {
+      if (e.target && e.target.id === 'instBpfConfirm') {
+        const btnOk = $('#instConfirm');
+        const blocked = PC.pendingPreview && PC.pendingPreview.signature_status === 'invalid';
+        if (btnOk) btnOk.disabled = Boolean(blocked || !e.target.checked);
+      }
+    });
     $('#instClose')?.addEventListener('click', closeInstallModal);
     $('#instCancel')?.addEventListener('click', closeInstallModal);
     $('#instConfirm')?.addEventListener('click', confirmInstallExternal);
@@ -1207,7 +1541,7 @@
 
     // Wire bridge hooks into app.js
     if (window.PktPathStudio) {
-      window.PktPathStudio.openPluginCenter = () => setMainView('plugins');
+      window.PktPathStudio.openPluginCenter = (pid) => setMainView('plugins', pid);
       window.PktPathStudio.openWorkbench = () => setMainView('workbench');
       window.PktPathStudio._onSessionRendered = (ov) => renderSessionPluginOutputs(ov);
       window.PktPathStudio._onTransportChanged = () => syncWorkbenchVisibility(PC.state);

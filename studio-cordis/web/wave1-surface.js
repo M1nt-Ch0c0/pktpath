@@ -572,9 +572,699 @@
     return raw;
   }
 
+  const PROBE_GROUP_LABELS = Object.freeze({
+    core_drop: '丢包与生命周期',
+    egress_tc: '发包队列与驱动（TC/Qdisc）',
+    sock_app: '进程与 Socket 归属',
+    ingress_rx: '收包入口（Ingress）',
+    l3_route: '路由与隧道/转发',
+    netfilter_nat: '防火墙与 NAT',
+    tcp_diag: 'TCP 状态与重传',
+    drop_stack: '丢包内核调用栈',
+    tcp_probe: 'TCP 逐包 ACK 探测',
+  });
+
+  const PROBE_PRESET_DEFS = Object.freeze({
+    egress: Object.freeze({
+      id: 'egress',
+      label: '发包与队列排障（默认）',
+      groups: Object.freeze(['core_drop', 'egress_tc', 'sock_app']),
+    }),
+    'drop-pwru': Object.freeze({
+      id: 'drop-pwru',
+      label: '丢包定位（pwru 模式）',
+      groups: Object.freeze(['core_drop', 'drop_stack', 'ingress_rx', 'netfilter_nat']),
+    }),
+    'full-path': Object.freeze({
+      id: 'full-path',
+      label: '全链路双向（收发+路由+NAT）',
+      groups: Object.freeze(['core_drop', 'egress_tc', 'ingress_rx', 'l3_route', 'netfilter_nat', 'sock_app']),
+    }),
+    'tcp-diag': Object.freeze({
+      id: 'tcp-diag',
+      label: 'TCP 抖动与重传',
+      groups: Object.freeze(['core_drop', 'tcp_diag', 'egress_tc', 'sock_app']),
+    }),
+    custom: Object.freeze({
+      id: 'custom',
+      label: '自定义',
+      groups: Object.freeze(['core_drop']),
+    }),
+  });
+
+  const HIGH_OVERHEAD_GROUPS = new Set(['ingress_rx', 'drop_stack', 'tcp_probe']);
+
+  function cloneVal(v) {
+    if (v === null || typeof v !== 'object') return v;
+    try { return JSON.parse(JSON.stringify(v)); } catch (_) { return v; }
+  }
+
+  function isReadOnlyField(field) {
+    return Boolean(field && (field.readOnly === true || field.readonly === true));
+  }
+
+  function isHighRiskBadge(badge) {
+    const s = String(badge || '').trim();
+    if (!s) return false;
+    return /高开销|高噪|丢样|风险|root|警告|高负载|慎用/i.test(s);
+  }
+
+  function effectiveFieldValue(field, cfg) {
+    if (cfg && typeof cfg === 'object' && field && Object.prototype.hasOwnProperty.call(cfg, field.key) && cfg[field.key] !== undefined) {
+      return cfg[field.key];
+    }
+    return field ? field.default : undefined;
+  }
+
+  function valuesMatch(a, b) {
+    if (a === b) return true;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return false;
+      const sa = a.map(String).sort();
+      const sb = b.map(String).sort();
+      for (let i = 0; i < sa.length; i++) {
+        if (sa[i] !== sb[i]) return false;
+      }
+      return true;
+    }
+    if (typeof a === 'boolean' || typeof b === 'boolean') {
+      return Boolean(a) === Boolean(b);
+    }
+    if (typeof a === 'number' && typeof b === 'number') {
+      return Number.isNaN(a) && Number.isNaN(b);
+    }
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      try { return JSON.stringify(a) === JSON.stringify(b); } catch (_) { return false; }
+    }
+    return false;
+  }
+
+  function resolveActivePreset(schema, cfg) {
+    if (!schema || !Array.isArray(schema.presets) || !schema.presets.length) return '';
+    const fieldMap = new Map();
+    for (const f of arr(schema.fields)) {
+      if (f && f.key) fieldMap.set(f.key, f);
+    }
+    const sourceCfg = cfg && typeof cfg === 'object' ? cfg : {};
+    for (const preset of schema.presets) {
+      if (!preset || !preset.id || preset.id === 'custom') continue;
+      const vals = preset.values && typeof preset.values === 'object' ? preset.values : null;
+      if (!vals) continue;
+      const allKeys = Object.keys(vals);
+      const nonMetaKeys = allKeys.filter((k) => k !== 'probe_preset' && k !== 'preset');
+      const keysToCheck = nonMetaKeys.length ? nonMetaKeys : allKeys;
+      if (!keysToCheck.length) continue;
+      let matched = true;
+      for (const k of keysToCheck) {
+        const f = fieldMap.get(k);
+        const cur = f ? effectiveFieldValue(f, sourceCfg) : sourceCfg[k];
+        if (!valuesMatch(cur, vals[k])) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return String(preset.id);
+    }
+    return 'custom';
+  }
+
+  function applyPresetToConfig(schema, cfg, presetId) {
+    const next = cloneVal(cfg && typeof cfg === 'object' ? cfg : {});
+    const presets = arr(schema && schema.presets);
+    const preset = presets.find((p) => p && String(p.id) === String(presetId));
+    if (preset && preset.values && typeof preset.values === 'object') {
+      for (const [k, v] of Object.entries(preset.values)) {
+        next[k] = cloneVal(v);
+      }
+    }
+    const fields = arr(schema && schema.fields);
+    const hasProbePresetField = fields.some((f) => f && f.key === 'probe_preset')
+      || Object.prototype.hasOwnProperty.call(next, 'probe_preset')
+      || (preset && preset.values && Object.prototype.hasOwnProperty.call(preset.values, 'probe_preset'));
+    const hasPresetField = fields.some((f) => f && f.key === 'preset')
+      || Object.prototype.hasOwnProperty.call(next, 'preset')
+      || (preset && preset.values && Object.prototype.hasOwnProperty.call(preset.values, 'preset'));
+    for (const f of fields) {
+      if (isReadOnlyField(f) && f.default !== undefined) {
+        next[f.key] = cloneVal(f.default);
+      }
+    }
+    const resolvedId = preset ? String(preset.id) : 'custom';
+    if (hasProbePresetField) next.probe_preset = resolvedId;
+    if (hasPresetField) next.preset = resolvedId;
+    return next;
+  }
+
+  function groupSchemaFields(schema) {
+    const fields = arr(schema && schema.fields);
+    if (!fields.length) return [];
+    const groups = arr(schema && schema.groups);
+    if (!groups.length) {
+      return [{ id: '', label: '', description: '', collapsible: false, defaultCollapsed: false, fields }];
+    }
+    const groupIds = new Set(groups.map((g) => g && g.id).filter(Boolean));
+    const ungrouped = fields.filter((f) => !f.group || !groupIds.has(f.group));
+    const sections = [];
+    if (ungrouped.length) {
+      sections.push({
+        id: '',
+        label: '',
+        description: '',
+        collapsible: false,
+        defaultCollapsed: false,
+        fields: ungrouped,
+      });
+    }
+    for (const g of groups) {
+      if (!g || !g.id) continue;
+      const gFields = fields.filter((f) => f.group === g.id);
+      if (!gFields.length) continue;
+      sections.push({
+        id: String(g.id),
+        label: String(g.label || g.id),
+        description: g.description ? String(g.description) : '',
+        collapsible: g.collapsible !== false,
+        defaultCollapsed: g.defaultCollapsed !== undefined ? Boolean(g.defaultCollapsed) : false,
+        fields: gFields,
+      });
+    }
+    return sections;
+  }
+
+  function extractProbeGroupKey(fieldKey) {
+    const raw = String(fieldKey || '').trim();
+    if (!raw) return '';
+    if (Object.prototype.hasOwnProperty.call(PROBE_GROUP_LABELS, raw)) return raw;
+    const stripped = raw.replace(/^(?:probe_group_|probe_|group_|grp_|enable_)/, '');
+    if (Object.prototype.hasOwnProperty.call(PROBE_GROUP_LABELS, stripped)) return stripped;
+    return '';
+  }
+
+  function summarizeCollectorPreset(state) {
+    const plugins = snapshotPlugins(state);
+    const colPlugin = plugins.find((p) => pluginId(p) === 'builtin.collector.ebpf-tc') || null;
+    const available = Boolean(
+      (state && state.collector && Object.keys(state.collector).length > 0)
+      || (colPlugin && colPlugin.enabled !== false && colPlugin.status !== 'disabled')
+    );
+    const schema = (colPlugin && colPlugin.schema) || null;
+    const cfg = (colPlugin && colPlugin.config && typeof colPlugin.config === 'object')
+      ? colPlugin.config
+      : ((state && state.collector && typeof state.collector === 'object') ? state.collector : {});
+
+    let presetId = resolveActivePreset(schema, cfg);
+    if (!presetId) {
+      const fromCfg = cfg.probe_preset || cfg.preset || (state && state.collector && state.collector.probe_preset);
+      presetId = fromCfg ? String(fromCfg) : 'egress';
+    }
+
+    const schemaPreset = arr(schema && schema.presets).find((p) => p && String(p.id) === presetId);
+    const fallbackDef = Object.prototype.hasOwnProperty.call(PROBE_PRESET_DEFS, presetId)
+      ? PROBE_PRESET_DEFS[presetId]
+      : null;
+    const presetLabel = (schemaPreset && schemaPreset.label)
+      ? String(schemaPreset.label)
+      : (fallbackDef ? fallbackDef.label : (presetId === 'custom' ? '自定义' : presetId));
+
+    const enabledGroups = [];
+    const seen = new Set();
+    const pushGroup = (gid) => {
+      const id = String(gid || '').trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      enabledGroups.push(id);
+    };
+
+    const explicitArr = Array.isArray(cfg.probe_groups)
+      ? cfg.probe_groups
+      : (Array.isArray(cfg.enabled_groups) ? cfg.enabled_groups : null);
+
+    if (explicitArr) {
+      pushGroup('core_drop');
+      for (const g of explicitArr) pushGroup(g);
+    } else {
+      let foundBoolGroupField = false;
+      for (const f of arr(schema && schema.fields)) {
+        if (!f || f.type !== 'boolean') continue;
+        const gid = extractProbeGroupKey(f.key);
+        if (!gid) continue;
+        foundBoolGroupField = true;
+        if (Boolean(effectiveFieldValue(f, cfg))) pushGroup(gid);
+      }
+      if (!foundBoolGroupField) {
+        for (const [k, v] of Object.entries(cfg)) {
+          const gid = extractProbeGroupKey(k);
+          if (!gid) continue;
+          foundBoolGroupField = true;
+          if (Boolean(v)) pushGroup(gid);
+        }
+      }
+      if (foundBoolGroupField) {
+        if (!seen.has('core_drop')) enabledGroups.unshift('core_drop');
+      } else if (fallbackDef) {
+        for (const g of fallbackDef.groups) pushGroup(g);
+      } else {
+        pushGroup('core_drop');
+      }
+    }
+
+    const fieldLabelByGroup = new Map();
+    const highOverheadLabels = [];
+    for (const f of arr(schema && schema.fields)) {
+      const gid = extractProbeGroupKey(f && f.key);
+      if (gid && f.label) fieldLabelByGroup.set(gid, String(f.label));
+      if (gid && seen.has(gid) && isHighRiskBadge(f.badge)) {
+        highOverheadLabels.push(String(f.label || PROBE_GROUP_LABELS[gid] || gid));
+      }
+    }
+    const enabledGroupLabels = enabledGroups.map((gid) =>
+      PROBE_GROUP_LABELS[gid] || fieldLabelByGroup.get(gid) || gid
+    );
+    if (!highOverheadLabels.length) {
+      for (const gid of enabledGroups) {
+        if (HIGH_OVERHEAD_GROUPS.has(gid)) {
+          highOverheadLabels.push(PROBE_GROUP_LABELS[gid] || gid);
+        }
+      }
+    }
+
+    return {
+      available,
+      pluginId: 'builtin.collector.ebpf-tc',
+      presetId,
+      presetLabel,
+      isCustom: presetId === 'custom',
+      enabledGroups,
+      enabledGroupLabels,
+      highOverhead: highOverheadLabels.length > 0,
+      highOverheadLabels,
+    };
+  }
+
+  function normalizeKernelBpfObjects(raw) {
+    if (Array.isArray(raw)) {
+      return raw.filter((x) => x && typeof x === 'object').map((x) => ({
+        arch: String(x.arch || '').trim(),
+        path: String(x.path || '').trim(),
+        sha256: String(x.sha256 || '').trim(),
+      })).filter((x) => x.arch || x.path);
+    }
+    if (raw && typeof raw === 'object') {
+      return Object.entries(raw).map(([arch, item]) => ({
+        arch: String(arch || '').trim(),
+        path: String((item && item.path) || '').trim(),
+        sha256: String((item && item.sha256) || '').trim(),
+      })).filter((x) => x.arch || x.path);
+    }
+    return [];
+  }
+
+  function normalizeKernelBpfHooks(raw) {
+    return arr(raw).filter((h) => h && typeof h === 'object').map((h) => ({
+      id: String(h.id || '').trim(),
+      group: String(h.group || '').trim(),
+      sec: String(h.sec || '').trim(),
+      type: String(h.type || '').trim(),
+      target: String(h.target || '').trim(),
+      stage: String(h.stage || '').trim(),
+    }));
+  }
+
+  function enrichPreviewBpf(obj) {
+    const kp = obj && obj.kernel_probes && typeof obj.kernel_probes === 'object' ? obj.kernel_probes : null;
+    const objects = normalizeKernelBpfObjects(obj.kernel_bpf_objects || (kp && kp.objects));
+    const hooks = normalizeKernelBpfHooks(obj.kernel_bpf_hooks || (kp && kp.hooks));
+    const hasBpf = Boolean(obj.has_kernel_bpf || objects.length > 0 || hooks.length > 0);
+    const rawSigStatus = String(obj.signature_status || '').trim().toLowerCase();
+    const sigStatus = (rawSigStatus === 'verified' || rawSigStatus === 'invalid' || rawSigStatus === 'unsigned')
+      ? rawSigStatus
+      : 'unsigned';
+    const rawSigTrust = String(obj.signature_trust || '').trim().toLowerCase();
+    const sigTrust = (rawSigTrust === 'trusted_key' || rawSigTrust === 'self_declared' || rawSigTrust === 'none')
+      ? rawSigTrust
+      : (sigStatus === 'verified' ? 'self_declared' : 'none');
+    const sigFp = (typeof obj.signature_key_fingerprint === 'string' && obj.signature_key_fingerprint.trim())
+      ? obj.signature_key_fingerprint.trim()
+      : null;
+    const sigMsg = typeof obj.signature_message === 'string' ? obj.signature_message.trim() : '';
+    const sigReason = typeof obj.signature_reason === 'string' ? obj.signature_reason.trim() : '';
+
+    return Object.assign({}, obj, {
+      has_kernel_bpf: hasBpf,
+      kernel_bpf_objects: objects,
+      kernel_bpf_hooks: hooks,
+      signature_status: sigStatus,
+      signature_trust: sigTrust,
+      signature_key_fingerprint: sigFp,
+      signature_message: sigMsg,
+      signature_reason: sigReason,
+    });
+  }
+
+  function describePluginSignature(pv) {
+    const norm = enrichPreviewBpf(pv || {});
+    const status = norm.signature_status;
+    const trust = norm.signature_trust;
+    const fingerprint = norm.signature_key_fingerprint;
+    if (status === 'invalid') {
+      return {
+        status,
+        trust,
+        fingerprint,
+        label: '签名无效·禁止安装',
+        badgeClass: 'badge-bad',
+        boxClass: 'is-bad',
+        blocked: true,
+        detail: '签名校验未通过，为保护设备安全已禁止安装。',
+      };
+    }
+    if (status === 'verified' && trust === 'trusted_key') {
+      return {
+        status,
+        trust,
+        fingerprint,
+        label: '已签名校验',
+        badgeClass: 'badge-ok',
+        boxClass: 'is-ok',
+        blocked: false,
+        detail: '已通过签名校验，可放心安装。',
+      };
+    }
+    if (status === 'verified') {
+      return {
+        status,
+        trust: 'self_declared',
+        fingerprint,
+        label: '签名完整·自签非官方背书',
+        badgeClass: 'badge-warn',
+        boxClass: 'is-warn',
+        blocked: false,
+        detail: '签名完整（自签，非官方背书），确认来源可信后再安装。',
+      };
+    }
+    return {
+      status: 'unsigned',
+      trust: 'none',
+      fingerprint,
+      label: '未签名',
+      badgeClass: 'badge-muted',
+      boxClass: 'is-muted',
+      blocked: false,
+      detail: '未附带数字签名，仅安装你信任来源的插件。',
+    };
+  }
+
+  function normalizeSelfCheckLevel(v) {
+    const s = String(v || '').trim().toLowerCase();
+    if (s === 'green' || s === 'ok' || s === 'pass') return 'green';
+    if (s === 'red' || s === 'error' || s === 'fail' || s === 'bad') return 'red';
+    return 'yellow';
+  }
+
+  function normalizeDeviceSelfCheck(resp) {
+    if (!resp || typeof resp !== 'object') {
+      return {
+        ok: false,
+        serial: '',
+        overall: 'red',
+        overallLabel: '自检失败',
+        source: 'unknown',
+        sourceLabel: '未知来源',
+        arch: null,
+        kernel_release: null,
+        root_mode: null,
+        btf_available: null,
+        drop_reason_enum_count: null,
+        kptr_restrict: null,
+        items: [],
+        checks: [],
+        error: '设备自检响应无效',
+      };
+    }
+    const overallRaw = resp.overall || (resp.status === 'ok' ? 'green' : resp.status === 'degraded' ? 'yellow' : resp.status === 'blocked' ? 'red' : '');
+    const overall = normalizeSelfCheckLevel(overallRaw);
+    const overallMap = { green: '已就绪', yellow: '可用（部分受限）', red: '暂不可抓包' };
+    const headlineMap = {
+      green: '这台设备已准备就绪，可以直接开始抓包。',
+      yellow: '设备可以正常抓包，但有部分高级能力受限，不影响基础排查。',
+      red: '设备目前还不能抓包，请先按下面提示处理标红项。',
+    };
+    const source = resp.source
+      ? String(resp.source)
+      : (resp.agent_self_check ? 'agent_self_check' : 'shell_fallback');
+    const sourceLabel = source === 'agent_self_check'
+      ? '设备深度检测'
+      : source === 'shell_fallback'
+        ? '基础环境检测'
+        : '环境检测';
+    const levelMap = { green: '通过', yellow: '降级', red: '阻塞' };
+    const rawList = Array.isArray(resp.items)
+      ? resp.items
+      : (Array.isArray(resp.checks) ? resp.checks : []);
+    const items = rawList.map((c, idx) => {
+      const lv = normalizeSelfCheckLevel(c && (c.level !== undefined ? c.level : c.status));
+      const summary = typeof (c && c.summary) === 'string' ? c.summary.trim() : '';
+      const detail = typeof (c && c.detail) === 'string' ? c.detail.trim() : '';
+      const remediation = typeof (c && c.remediation) === 'string' ? c.remediation.trim() : '';
+      return {
+        id: String((c && c.id) || `check_${idx + 1}`),
+        label: String((c && c.label) || (c && c.id) || `检查项 ${idx + 1}`),
+        level: lv,
+        status: lv,
+        statusLabel: levelMap[lv],
+        summary,
+        detail,
+        remediation,
+      };
+    });
+    return {
+      ok: resp.ok !== false,
+      serial: String(resp.serial || ''),
+      overall,
+      overallLabel: overallMap[overall],
+      headline: headlineMap[overall],
+      source,
+      sourceLabel,
+      arch: resp.arch ? String(resp.arch) : null,
+      kernel_release: resp.kernel_release ? String(resp.kernel_release) : null,
+      root_mode: resp.root_mode ? String(resp.root_mode) : null,
+      btf_available: typeof resp.btf_available === 'boolean' ? resp.btf_available : null,
+      drop_reason_enum_count: Number.isFinite(Number(resp.drop_reason_enum_count)) ? Number(resp.drop_reason_enum_count) : null,
+      kptr_restrict: resp.kptr_restrict !== undefined && resp.kptr_restrict !== null ? resp.kptr_restrict : null,
+      items,
+      checks: items,
+      error: resp.error ? String(resp.error) : '',
+    };
+  }
+
+  function finiteOptNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function isTcpDetailedProbeEnabled(sessionSummary) {
+    const s = sessionSummary && typeof sessionSummary === 'object' ? sessionSummary : {};
+    const inv = Array.isArray(s.probe_inventory) ? s.probe_inventory : [];
+    if (inv.length) {
+      return inv.some((p) =>
+        p && (p.group === 'tcp_diag' || p.group === 'tcp_probe') && p.status === 'attached'
+      );
+    }
+    const eff = Array.isArray(s.effective_groups) ? s.effective_groups
+      : (Array.isArray(s.requested_groups) ? s.requested_groups : []);
+    if (eff.length) {
+      return eff.includes('tcp_diag') || eff.includes('tcp_probe');
+    }
+    const preset = String(s.probe_preset || '');
+    if (preset === 'tcp-diag' || preset === 'full-path') return true;
+    return false;
+  }
+
+  function sameFlowKey(a, b) {
+    if (!a || !b) return false;
+    if (a.flow_key && b.flow_key && String(a.flow_key) === String(b.flow_key)) return true;
+    if (a.src && b.src && a.dst && b.dst) {
+      const pA = String(a.proto || '').toLowerCase();
+      const pB = String(b.proto || '').toLowerCase();
+      return pA === pB && String(a.src) === String(b.src) && String(a.dst) === String(b.dst);
+    }
+    return false;
+  }
+
+  function buildFlowTcpChartsData(detail, samples, sessionSummary, row) {
+    const d = detail && typeof detail === 'object' ? detail : {};
+    const shanObj = (d.tcp_series && !Array.isArray(d.tcp_series) && typeof d.tcp_series === 'object') ? d.tcp_series : null;
+    const probeEnabled = shanObj && typeof shanObj.tcp_probes_enabled === 'boolean'
+      ? shanObj.tcp_probes_enabled
+      : isTcpDetailedProbeEnabled(sessionSummary);
+    const timeSeqPoints = [];
+    const cwndPoints = [];
+    const rttPoints = [];
+    let retransmitCount = 0;
+    let dropCount = 0;
+
+    // 1. Prefer structured server-side FlowTcpSeriesResult from Shan's analyzer
+    if (shanObj && (Array.isArray(shanObj.time_sequence) || Array.isArray(shanObj.cwnd_rtt))) {
+      for (const pt of (Array.isArray(shanObj.time_sequence) ? shanObj.time_sequence : [])) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tMs = finiteOptNum(pt.rel_ms) !== null ? finiteOptNum(pt.rel_ms) : timeSeqPoints.length;
+        const seq = finiteOptNum(pt.rel_seq !== undefined && pt.rel_seq !== null ? pt.rel_seq : pt.seq);
+        const kind = String(pt.event_kind || 'normal');
+        const retransmit = kind === 'retransmit' || Boolean(pt.retransmit);
+        const dropped = kind === 'drop' || Boolean(pt.dropped);
+        if (retransmit) retransmitCount++;
+        if (dropped) dropCount++;
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+      }
+      for (const pt of (Array.isArray(shanObj.cwnd_rtt) ? shanObj.cwnd_rtt : [])) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tMs = finiteOptNum(pt.rel_ms) !== null ? finiteOptNum(pt.rel_ms) : cwndPoints.length;
+        const cwnd = finiteOptNum(pt.snd_cwnd);
+        const srttUs = finiteOptNum(pt.srtt_us);
+        const srttMs = finiteOptNum(pt.srtt_ms) !== null ? finiteOptNum(pt.srtt_ms) : (srttUs !== null ? srttUs / 1000 : null);
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttMs !== null) rttPoints.push({ tMs, srttUs: srttUs !== null ? srttUs : srttMs * 1000, rttMs: srttMs });
+      }
+    } else if (Array.isArray(d.tcp_series) || Array.isArray(d.time_sequence) || (d.tcp_metrics && Array.isArray(d.tcp_metrics.points))) {
+      const rawSeries = Array.isArray(d.tcp_series) ? d.tcp_series
+        : Array.isArray(d.time_sequence) ? d.time_sequence
+        : d.tcp_metrics.points;
+      let baseTs = null;
+      for (const pt of rawSeries) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tsRaw = finiteOptNum(pt.ts_ms) !== null
+          ? finiteOptNum(pt.ts_ms)
+          : (finiteOptNum(pt.ts_ns) !== null ? finiteOptNum(pt.ts_ns) / 1e6 : finiteOptNum(pt.rel_ms));
+        if (tsRaw !== null && baseTs === null) baseTs = tsRaw;
+        const tMs = tsRaw !== null ? Math.max(0, tsRaw - (baseTs || 0)) : timeSeqPoints.length;
+        const seq = finiteOptNum(pt.tcp_seq !== undefined ? pt.tcp_seq : pt.seq);
+        const cwnd = finiteOptNum(pt.snd_cwnd !== undefined ? pt.snd_cwnd : pt.cwnd);
+        const srttUs = finiteOptNum(pt.srtt_us);
+        const retransmit = Boolean(pt.retransmit || pt.is_retransmit);
+        const dropped = Boolean(pt.dropped || pt.is_drop || pt.drop);
+        if (retransmit) retransmitCount++;
+        if (dropped) dropCount++;
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttUs !== null) rttPoints.push({ tMs, srttUs, rttMs: srttUs / 1000 });
+      }
+    } else {
+      // 2. Collect from matching flow samples + current detail timeline (never fabricate 0 for missing fields)
+      const list = [];
+      const curRow = row && typeof row === 'object' ? row : {};
+      if (Array.isArray(samples) && samples.length && (curRow.src || curRow.flow_key)) {
+        for (const s of samples) {
+          if (sameFlowKey(curRow, s)) list.push(s);
+        }
+      }
+      if (!list.length && curRow && (curRow.tcp_seq !== undefined || curRow.snd_cwnd !== undefined || curRow.srtt_us !== undefined)) {
+        list.push(curRow);
+      }
+      // Also inspect timeline events in detail.branches
+      const brs = Array.isArray(d.branches) ? d.branches : [];
+      for (const b of brs) {
+        const tl = Array.isArray(b && b.timeline) ? b.timeline : [];
+        for (const ev of tl) {
+          if (!ev || typeof ev !== 'object') continue;
+          if (ev.tcp_seq !== undefined || ev.snd_cwnd !== undefined || ev.srtt_us !== undefined) {
+            list.push(ev);
+          }
+        }
+      }
+      let baseTs = null;
+      for (const item of list) {
+        const tsRaw = finiteOptNum(item.t_ms) !== null
+          ? finiteOptNum(item.t_ms)
+          : (finiteOptNum(item.ts_ns) !== null ? finiteOptNum(item.ts_ns) / 1e6 : finiteOptNum(item.rel_us) !== null ? finiteOptNum(item.rel_us) / 1000 : null);
+        if (tsRaw !== null && baseTs === null) baseTs = tsRaw;
+        const tMs = tsRaw !== null ? Math.max(0, tsRaw - (baseTs || 0)) : timeSeqPoints.length;
+        const seq = finiteOptNum(item.tcp_seq);
+        const cwnd = finiteOptNum(item.snd_cwnd);
+        const srttUs = finiteOptNum(item.srtt_us);
+        const stageStr = `${item.stage || ''} ${item.title || ''} ${item.outcome || ''}`.toUpperCase();
+        const retransmit = Boolean(item.retransmit || /RETRANS/.test(stageStr));
+        const dropped = Boolean(item.dropped || /DROP/.test(stageStr));
+        if (seq !== null || cwnd !== null || srttUs !== null) {
+          if (retransmit) retransmitCount++;
+          if (dropped) dropCount++;
+        }
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttUs !== null) rttPoints.push({ tMs, srttUs, rttMs: srttUs / 1000 });
+      }
+    }
+
+    const hasData = timeSeqPoints.length > 0 || cwndPoints.length > 0 || rttPoints.length > 0;
+    const reason = hasData
+      ? ''
+      : (shanObj && typeof shanObj.notice === 'string' && shanObj.notice.trim()
+          ? shanObj.notice.trim()
+          : (!probeEnabled
+              ? '本次抓包未开启 TCP 详细探针，默认只记录路径和丢包，不采集拥塞窗口与往返延迟曲线。'
+              : '已开启 TCP 详细探针，但这条连接本次没有采到可用于绘图的传输指标。'));
+
+    return {
+      probeEnabled,
+      hasData,
+      reason,
+      timeSeqPoints,
+      cwndPoints,
+      rttPoints,
+      retransmitCount,
+      dropCount,
+    };
+  }
+
+  function extractFlowTlsEvents(detail, sessionSummary, row) {
+    const d = detail && typeof detail === 'object' ? detail : {};
+    const s = sessionSummary && typeof sessionSummary === 'object' ? sessionSummary : {};
+    const cur = row && typeof row === 'object' ? row : {};
+    const direct = Array.isArray(d.tls_events) ? d.tls_events
+      : Array.isArray(d.tls_correlation) ? d.tls_correlation
+      : (d.tls_correlation && typeof d.tls_correlation === 'object' && Array.isArray(d.tls_correlation.events) ? d.tls_correlation.events : null);
+    let raw = direct;
+    if (!raw) {
+      const sessList = Array.isArray(s.tls_events) ? s.tls_events
+        : Array.isArray(s.tls_correlation) ? s.tls_correlation
+        : [];
+      if (sessList.length) {
+        const pid = finiteOptNum(cur.pid);
+        const src = String(cur.src || '');
+        const dst = String(cur.dst || '');
+        raw = sessList.filter((ev) => {
+          if (!ev || typeof ev !== 'object') return false;
+          if (pid !== null && finiteOptNum(ev.pid) === pid) return true;
+          const h = ev.conn_hint && typeof ev.conn_hint === 'object' ? ev.conn_hint : null;
+          if (h && src && dst) {
+            const pair = `${h.src_ip || ''}:${h.src_port || ''}`;
+            const peer = `${h.dst_ip || ''}:${h.dst_port || ''}`;
+            if ((pair === src && peer === dst) || (pair === dst && peer === src)) return true;
+          }
+          return false;
+        });
+      } else {
+        raw = [];
+      }
+    }
+    return raw.filter((ev) => ev && typeof ev === 'object').map((ev) => ({
+      ts_ns: ev.ts_ns !== undefined && ev.ts_ns !== null ? String(ev.ts_ns) : '',
+      pid: finiteOptNum(ev.pid),
+      tid: finiteOptNum(ev.tid),
+      uid: finiteOptNum(ev.uid),
+      comm: String(ev.comm || ''),
+      direction: String(ev.direction || 'write').toLowerCase() === 'read' ? 'read' : 'write',
+      library: String(ev.library || 'unknown'),
+      conn_hint: ev.conn_hint && typeof ev.conn_hint === 'object' ? ev.conn_hint : null,
+      plaintext_len: finiteOptNum(ev.plaintext_len) || 0,
+      plaintext_preview: typeof ev.plaintext_preview === 'string' ? ev.plaintext_preview : '',
+      truncated: Boolean(ev.truncated),
+    }));
+  }
+
   function normalizeInstallPreview(resp) {
     if (!resp || typeof resp !== 'object') {
-      return { ok: false, error: '解析失败' };
+      return { ok: false, error: '解析失败', has_kernel_bpf: false, kernel_bpf_objects: [], kernel_bpf_hooks: [] };
     }
     if (resp.preview && typeof resp.preview === 'object') {
       const inner = resp.preview;
@@ -583,12 +1273,12 @@
       if (!ok && !merged.error) {
         merged.error = resp.error || '格式无效';
       }
-      return merged;
+      return enrichPreviewBpf(merged);
     }
     if (resp.ok === true) {
-      return Object.assign({}, resp, { ok: true });
+      return enrichPreviewBpf(Object.assign({}, resp, { ok: true }));
     }
-    return Object.assign({}, resp, { ok: false, error: resp.error || '解析失败' });
+    return enrichPreviewBpf(Object.assign({}, resp, { ok: false, error: resp.error || '解析失败' }));
   }
 
   return {
@@ -630,5 +1320,19 @@
     ICON_SLUG_MAP,
     renderPluginIcon,
     normalizeInstallPreview,
+    PROBE_GROUP_LABELS,
+    PROBE_PRESET_DEFS,
+    isReadOnlyField,
+    isHighRiskBadge,
+    effectiveFieldValue,
+    resolveActivePreset,
+    applyPresetToConfig,
+    groupSchemaFields,
+    summarizeCollectorPreset,
+    describePluginSignature,
+    normalizeDeviceSelfCheck,
+    isTcpDetailedProbeEnabled,
+    buildFlowTcpChartsData,
+    extractFlowTlsEvents,
   };
 });

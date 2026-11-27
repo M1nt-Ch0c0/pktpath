@@ -442,8 +442,125 @@
     renderDevicePill();
     updateStartBtn();
   }
+  function updateSelfCheckBtn() {
+    const btn = $('#btnDeviceSelfCheck');
+    const badge = $('#selfCheckQuickBadge');
+    if (btn) {
+      btn.disabled = Boolean(!S.serial || String(S.serial).startsWith('ssh:') || S.transport !== 'adb');
+    }
+    if (badge && (!S.serial || S.selfCheckSerial !== S.serial)) {
+      badge.hidden = true;
+    }
+  }
+
+  function closeSelfCheckModal() {
+    const m = $('#selfCheckModal');
+    if (m) m.hidden = true;
+  }
+
+  function renderSelfCheckModal(report, loading, errMsg) {
+    const modal = $('#selfCheckModal');
+    const body = $('#selfCheckBody');
+    const title = $('#selfCheckTitle');
+    if (!modal || !body) return;
+    if (title) {
+      title.textContent = S.serial ? `🩺 设备一键自检 · ${S.serial}` : '🩺 设备一键自检';
+    }
+    if (loading) {
+      body.innerHTML = '<div class="empty-mini" style="padding:20px 8px">正在检查设备 root、内核版本、BTF、eBPF 与采集器状态…</div>';
+      modal.hidden = false;
+      return;
+    }
+    if (errMsg) {
+      body.innerHTML = `<div class="pc-alert-bad">❌ 设备自检失败：${esc(errMsg)}</div>`;
+      modal.hidden = false;
+      return;
+    }
+    const r = report || {};
+    const overallCls = r.overall === 'green' ? 'badge-ok' : r.overall === 'red' ? 'badge-bad' : 'badge-warn';
+    const headline = r.headline || (r.overall === 'green'
+      ? '这台设备已准备就绪，可以直接开始抓包。'
+      : r.overall === 'red'
+        ? '设备目前还不能抓包，请先按下面提示处理标红项。'
+        : '设备可以正常抓包，但有部分高级能力受限，不影响基础排查。');
+    const list = Array.isArray(r.items) ? r.items : (Array.isArray(r.checks) ? r.checks : []);
+    const renderRow = (c) => {
+      const lv = c.level || c.status || 'yellow';
+      const dotCls = lv === 'green' ? 'is-green' : lv === 'red' ? 'is-red' : 'is-yellow';
+      const pillCls = lv === 'green' ? 'badge-ok' : lv === 'red' ? 'badge-bad' : 'badge-warn';
+      const msg = c.summary || c.detail || '';
+      return `
+        <li class="sc-item ${dotCls}">
+          <div class="sc-item-head">
+            <span class="sc-dot ${dotCls}" aria-hidden="true"></span>
+            <span class="sc-label">${esc(c.label)}</span>
+            <span class="spacer"></span>
+            <span class="badge ${pillCls}">${esc(c.statusLabel || lv)}</span>
+          </div>
+          ${msg ? `<div class="sc-summary-line">${esc(msg)}</div>` : ''}
+          ${c.detail && c.summary && c.detail !== c.summary ? `<div class="sc-detail">${esc(c.detail)}</div>` : ''}
+          ${c.remediation ? `<div class="sc-remediation">处理建议：${esc(c.remediation)}</div>` : ''}
+        </li>`;
+    };
+    const issueItems = list.filter((c) => (c.level || c.status) !== 'green');
+    const attentionHtml = issueItems.length
+      ? `<ul class="sc-list" id="scAttentionList">${issueItems.map(renderRow).join('')}</ul>`
+      : '';
+    const techMeta = [
+      r.arch ? `架构：${r.arch}` : '',
+      r.kernel_release ? `内核：${String(r.kernel_release).split('-')[0]}` : '',
+      r.root_mode ? `提权方式：${r.root_mode}` : '',
+      r.sourceLabel ? `检测方式：${r.sourceLabel}` : '',
+    ].filter(Boolean).join(' · ');
+    const allItemsHtml = list.length
+      ? `<ul class="sc-list">${list.map(renderRow).join('')}</ul>`
+      : '<div class="muted" style="font-size:12px">暂无逐项检测明细</div>';
+    body.innerHTML = `
+      <div class="sc-hero">
+        <span class="badge ${overallCls}">${esc(r.overallLabel || r.overall)}</span>
+        <div class="sc-headline">${esc(headline)}</div>
+      </div>
+      ${attentionHtml}
+      <details class="tech-details" id="scTechDetails">
+        <summary>查看技术详情（共 ${list.length} 项检查）</summary>
+        ${techMeta ? `<div class="sc-tech-meta">${esc(techMeta)}</div>` : ''}
+        ${allItemsHtml}
+      </details>
+    `;
+    const q = $('#selfCheckQuickBadge');
+    if (q) {
+      q.hidden = false;
+      q.className = `badge ${overallCls}`;
+      q.textContent = r.overallLabel || r.overall;
+    }
+    modal.hidden = false;
+  }
+
+  async function runDeviceSelfCheck() {
+    if (!S.serial) { toast('请先选择 Android 设备', 'warn'); return; }
+    if (isDemoMode()) {
+      toast('离线示例模式不连接真实设备，切换本地 Cordis 服务后可自检', 'warn');
+      return;
+    }
+    const serial = S.serial;
+    S.selfCheckSerial = serial;
+    renderSelfCheckModal(null, true, '');
+    try {
+      const raw = await api(`/api/devices/${encodeURIComponent(serial)}/self-check`, { timeout: 60000 });
+      if (S.serial !== serial) return;
+      const norm = (Wave1 && typeof Wave1.normalizeDeviceSelfCheck === 'function')
+        ? Wave1.normalizeDeviceSelfCheck(raw)
+        : raw;
+      renderSelfCheckModal(norm, false, norm && !norm.ok ? (norm.error || '自检失败') : '');
+    } catch (e) {
+      if (S.serial !== serial) return;
+      renderSelfCheckModal(null, false, e.message || String(e));
+    }
+  }
+
   async function selectDevice(serial) {
     S.serial = serial;
+    updateSelfCheckBtn();
     S.prepInfo = null; S.inspect = null; S.interfaces = []; S.iface = ''; S.apps = []; S.uidMap = {};
     if (String(serial || '').startsWith('ssh:')) {
       setPrep('bad', 'Linux SSH 数据源不在当前 Wave 1 范围，请改用 Android 设备或离线会话');
@@ -470,9 +587,10 @@
   }
 
   /* ---- Plugin Manager Drawer & Capability Inspector ---- */
-  function openPluginDrawer() {
+  function openPluginDrawer(targetPluginId) {
+    const pid = typeof targetPluginId === 'string' ? targetPluginId : undefined;
     if (window.PktPathStudio && typeof window.PktPathStudio.openPluginCenter === 'function') {
-      window.PktPathStudio.openPluginCenter();
+      window.PktPathStudio.openPluginCenter(pid);
       return;
     }
   }
@@ -1924,6 +2042,9 @@
       let best = -1, bi = 0;
       brs.forEach((b, i) => { const m = Math.max(0, ...arr(obj(b).timeline).map((e) => toNum(obj(e).sojourn_us) || 0)); if (m > best) { best = m; bi = i; } });
       S.branchIdx = bi;
+      S.detailRow = row;
+      S.detailTab = 'timeline';
+      syncDrawerTabs(row);
       renderDetail(row);
     } catch (e) {
       if (token !== S.detailToken) return;
@@ -1950,9 +2071,142 @@
     return 'other';
   }
   const CAT_COLOR = { entry: 'var(--accent)', queue: 'var(--warn)', xmit: 'var(--violet)', drop: 'var(--bad)', end: 'var(--ok)', transform: 'var(--info)', other: 'var(--text-3)' };
+  function syncDrawerTabs(row) {
+    const tlsEvents = (Wave1 && typeof Wave1.extractFlowTlsEvents === 'function')
+      ? Wave1.extractFlowTlsEvents(S.detail, S.summary, row)
+      : [];
+    const tlsBtn = $('#drwTabTls');
+    if (tlsBtn) {
+      const hasTls = tlsEvents.length > 0;
+      tlsBtn.hidden = !hasTls;
+      tlsBtn.textContent = hasTls ? `TLS 明文关联 (${tlsEvents.length})` : 'TLS 明文关联';
+      if (!hasTls && S.detailTab === 'tls') S.detailTab = 'timeline';
+    }
+    $$('#drwTabs .drw-tab').forEach((b) => {
+      const active = b.dataset.tab === (S.detailTab || 'timeline');
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+
+  function buildLineSvg(points, xKey, yKey, opts) {
+    const W = 560, H = 160, padL = 56, padR = 16, padT = 14, padB = 26;
+    const xs = points.map((p) => Number(p[xKey]));
+    const ys = points.map((p) => Number(p[yKey]));
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const spanX = maxX > minX ? (maxX - minX) : 1;
+    const spanY = maxY > minY ? (maxY - minY) : 1;
+    const sx = (v) => padL + ((v - minX) / spanX) * (W - padL - padR);
+    const sy = (v) => H - padB - ((v - minY) / spanY) * (H - padT - padB);
+    const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${sx(p[xKey]).toFixed(1)},${sy(p[yKey]).toFixed(1)}`).join(' ');
+    const dots = points.map((p) => {
+      const cx = sx(p[xKey]).toFixed(1);
+      const cy = sy(p[yKey]).toFixed(1);
+      if (opts && opts.markEvents && p.dropped) {
+        return `<g class="tcp-pt-drop"><line x1="${(Number(cx)-4).toFixed(1)}" y1="${(Number(cy)-4).toFixed(1)}" x2="${(Number(cx)+4).toFixed(1)}" y2="${(Number(cy)+4).toFixed(1)}" stroke="var(--bad)" stroke-width="2"/><line x1="${(Number(cx)-4).toFixed(1)}" y1="${(Number(cy)+4).toFixed(1)}" x2="${(Number(cx)+4).toFixed(1)}" y2="${(Number(cy)-4).toFixed(1)}" stroke="var(--bad)" stroke-width="2"/></g>`;
+      }
+      if (opts && opts.markEvents && p.retransmit) {
+        return `<polygon points="${cx},${(Number(cy)-5).toFixed(1)} ${(Number(cx)-4.5).toFixed(1)},${(Number(cy)+3.5).toFixed(1)} ${(Number(cx)+4.5).toFixed(1)},${(Number(cy)+3.5).toFixed(1)}" fill="var(--warn)"/>`;
+      }
+      return `<circle cx="${cx}" cy="${cy}" r="2.6" fill="${(opts && opts.color) || 'var(--accent)'}"/>`;
+    }).join('');
+    const fmtY = (opts && opts.fmtY) || ((v) => String(Math.round(v)));
+    return `
+      <svg class="tcp-chart-svg" viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="${esc((opts && opts.title) || 'TCP chart')}">
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H - padB}" stroke="var(--border)" stroke-width="1"/>
+        <line x1="${padL}" y1="${H - padB}" x2="${W - padR}" y2="${H - padB}" stroke="var(--border)" stroke-width="1"/>
+        <text x="${padL - 6}" y="${padT + 9}" text-anchor="end" font-size="10" fill="var(--text-3)">${esc(fmtY(maxY))}</text>
+        <text x="${padL - 6}" y="${H - padB}" text-anchor="end" font-size="10" fill="var(--text-3)">${esc(fmtY(minY))}</text>
+        <text x="${padL}" y="${H - 8}" text-anchor="start" font-size="10" fill="var(--text-3)">${esc(minX.toFixed(1))} ms</text>
+        <text x="${W - padR}" y="${H - 8}" text-anchor="end" font-size="10" fill="var(--text-3)">${esc(maxX.toFixed(1))} ms</text>
+        <path d="${pathD}" fill="none" stroke="${(opts && opts.color) || 'var(--accent)'}" stroke-width="1.6"/>
+        ${dots}
+      </svg>`;
+  }
+
+  function renderTcpChartsTab(row) {
+    const body = $('#drwBody');
+    if (!body) return;
+    const data = (Wave1 && typeof Wave1.buildFlowTcpChartsData === 'function')
+      ? Wave1.buildFlowTcpChartsData(S.detail, S.samples, S.summary, row)
+      : { probeEnabled: false, hasData: false, reason: '未开启 TCP 详细探针', timeSeqPoints: [], cwndPoints: [], rttPoints: [], retransmitCount: 0, dropCount: 0 };
+    if (!data.hasData) {
+      body.innerHTML = `
+        <div class="tcp-empty-card" id="drwTcpEmpty">
+          <div class="tcp-empty-title">📉 ${esc(data.probeEnabled ? '这条连接暂无 TCP 传输指标' : '未开启 TCP 详细探针')}</div>
+          <p class="tcp-empty-desc">${esc(data.reason)}</p>
+          ${!data.probeEnabled ? '<button type="button" class="btn btn-primary btn-sm" id="btnTcpOpenProbeSettings">去切换为「TCP 深度诊断」预设</button>' : ''}
+        </div>`;
+      $('#btnTcpOpenProbeSettings')?.addEventListener('click', () => {
+        closeDrawer();
+        openPluginDrawer('builtin.collector.ebpf-tc');
+      });
+      return;
+    }
+    const seqBlock = data.timeSeqPoints.length
+      ? `<div class="tcp-chart-card">
+          <div class="tcp-chart-head">
+            <strong>发包进度（时间-序号）</strong>
+            <span class="muted">点数 ${data.timeSeqPoints.length} · <span style="color:var(--warn)">▲ 重传 ${data.retransmitCount}</span> · <span style="color:var(--bad)">✕ 丢包 ${data.dropCount}</span></span>
+          </div>
+          ${buildLineSvg(data.timeSeqPoints, 'tMs', 'seq', { title: 'Time-Sequence', color: 'var(--accent)', markEvents: true, fmtY: (v) => String(Math.round(v)) })}
+        </div>`
+      : '<div class="muted" style="font-size:12px;margin-bottom:10px">本次未采到序号数据，已略过。</div>';
+    const cwndBlock = data.cwndPoints.length
+      ? `<div class="tcp-chart-card">
+          <div class="tcp-chart-head"><strong>拥塞窗口变化（包数）</strong><span class="muted">点数 ${data.cwndPoints.length}</span></div>
+          ${buildLineSvg(data.cwndPoints, 'tMs', 'cwnd', { title: 'snd_cwnd', color: 'var(--ok)', fmtY: (v) => `${Math.round(v)} seg` })}
+        </div>`
+      : '<div class="muted" style="font-size:12px;margin-bottom:10px">本次未采到拥塞窗口数据，已略过。</div>';
+    const rttBlock = data.rttPoints.length
+      ? `<div class="tcp-chart-card">
+          <div class="tcp-chart-head"><strong>往返延迟变化（RTT · ms）</strong><span class="muted">点数 ${data.rttPoints.length}</span></div>
+          ${buildLineSvg(data.rttPoints, 'tMs', 'rttMs', { title: 'srtt_us', color: 'var(--violet)', fmtY: (v) => `${v.toFixed(1)} ms` })}
+        </div>`
+      : '<div class="muted" style="font-size:12px">本次未采到延迟数据，已略过。</div>';
+    body.innerHTML = `<div class="tcp-charts-wrap">${seqBlock}${cwndBlock}${rttBlock}</div>`;
+  }
+
+  function renderTlsTab(row) {
+    const body = $('#drwBody');
+    if (!body) return;
+    const events = (Wave1 && typeof Wave1.extractFlowTlsEvents === 'function')
+      ? Wave1.extractFlowTlsEvents(S.detail, S.summary, row)
+      : [];
+    if (!events.length) {
+      body.innerHTML = '<div class="empty-mini">当前会话未包含 TLS 明文关联数据。</div>';
+      return;
+    }
+    const rows = events.map((ev) => {
+      const dirCls = ev.direction === 'read' ? 'badge-ok' : 'badge-accent';
+      const dirTxt = ev.direction === 'read' ? 'READ' : 'WRITE';
+      const conn = ev.conn_hint
+        ? `${ev.conn_hint.src_ip || '?'}:${ev.conn_hint.src_port || '?'} → ${ev.conn_hint.dst_ip || '?'}:${ev.conn_hint.dst_port || '?'}`
+        : '';
+      return `
+        <div class="tls-ev-card">
+          <div class="tls-ev-head">
+            <span class="badge ${dirCls}">${dirTxt}</span>
+            <span class="badge badge-muted">${esc(ev.library)}</span>
+            ${ev.comm ? `<span class="chip">${esc(ev.comm)}${ev.pid !== null ? ' · pid ' + esc(ev.pid) : ''}</span>` : ''}
+            <span class="spacer"></span>
+            <span class="muted" style="font-size:11.5px">${esc(ev.plaintext_len)} B${ev.truncated ? ' · 已截断' : ''}</span>
+          </div>
+          ${conn ? `<div class="tls-ev-meta mono">${esc(conn)}</div>` : ''}
+          <pre class="tls-ev-preview">${esc(ev.plaintext_preview || '（空明文预览）')}</pre>
+        </div>`;
+    }).join('');
+    body.innerHTML = `<div class="tls-list" id="drwTlsList">${rows}</div>`;
+  }
+
   function renderDetail(row) {
     const d = S.detail;
     const body = $('#drwBody');
+    const curRow = row || S.detailRow || {};
+    syncDrawerTabs(curRow);
+    if (S.detailTab === 'tcp') { renderTcpChartsTab(curRow); return; }
+    if (S.detailTab === 'tls') { renderTlsTab(curRow); return; }
     const brs = arr(d.branches).map(obj);
     let html = '';
 
@@ -2389,6 +2643,11 @@
     // ① target device (ADB / SSH) & iface
     bindSeg($('#segTransport'), (v) => switchTransport(v));
     $('#selDevice').addEventListener('change', (e) => selectDevice(e.target.value));
+    $('#btnDeviceSelfCheck')?.addEventListener('click', runDeviceSelfCheck);
+    $('#selfCheckRecheck')?.addEventListener('click', runDeviceSelfCheck);
+    $('#selfCheckClose')?.addEventListener('click', closeSelfCheckModal);
+    $('#selfCheckOk')?.addEventListener('click', closeSelfCheckModal);
+    $('#selfCheckModal')?.addEventListener('click', (e) => { if (e.target.id === 'selfCheckModal') closeSelfCheckModal(); });
     $('#selIface').addEventListener('change', (e) => {
       S.iface = e.target.value;
       updateStartBtn();
@@ -2479,6 +2738,12 @@
 
     // drawer
     $('#drwClose').addEventListener('click', closeDrawer);
+    $('#drwTabs')?.addEventListener('click', (e) => {
+      const tab = e.target.closest('.drw-tab');
+      if (!tab || tab.hidden) return;
+      S.detailTab = tab.dataset.tab || 'timeline';
+      if (S.detail) renderDetail(S.detailRow || {});
+    });
     $('#drawerMask').addEventListener('click', closeDrawer);
     $('#drwBody').addEventListener('click', (e) => {
       const b = e.target.closest('.br-tab');
