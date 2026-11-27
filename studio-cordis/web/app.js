@@ -470,9 +470,10 @@
   }
 
   /* ---- Plugin Manager Drawer & Capability Inspector ---- */
-  function openPluginDrawer() {
+  function openPluginDrawer(targetPluginId) {
+    const pid = typeof targetPluginId === 'string' ? targetPluginId : undefined;
     if (window.PktPathStudio && typeof window.PktPathStudio.openPluginCenter === 'function') {
-      window.PktPathStudio.openPluginCenter();
+      window.PktPathStudio.openPluginCenter(pid);
       return;
     }
   }

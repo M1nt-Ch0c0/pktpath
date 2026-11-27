@@ -572,9 +572,339 @@
     return raw;
   }
 
+  const PROBE_GROUP_LABELS = Object.freeze({
+    core_drop: '丢包与生命周期',
+    egress_tc: '发包队列与驱动（TC/Qdisc）',
+    sock_app: '进程与 Socket 归属',
+    ingress_rx: '收包入口（Ingress）',
+    l3_route: '路由与隧道/转发',
+    netfilter_nat: '防火墙与 NAT',
+    tcp_diag: 'TCP 状态与重传',
+    drop_stack: '丢包内核调用栈',
+    tcp_probe: 'TCP 逐包 ACK 探测',
+  });
+
+  const PROBE_PRESET_DEFS = Object.freeze({
+    egress: Object.freeze({
+      id: 'egress',
+      label: '发包与队列排障（默认）',
+      groups: Object.freeze(['core_drop', 'egress_tc', 'sock_app']),
+    }),
+    'drop-pwru': Object.freeze({
+      id: 'drop-pwru',
+      label: '丢包定位（pwru 模式）',
+      groups: Object.freeze(['core_drop', 'drop_stack', 'ingress_rx', 'netfilter_nat']),
+    }),
+    'full-path': Object.freeze({
+      id: 'full-path',
+      label: '全链路双向（收发+路由+NAT）',
+      groups: Object.freeze(['core_drop', 'egress_tc', 'ingress_rx', 'l3_route', 'netfilter_nat', 'sock_app']),
+    }),
+    'tcp-diag': Object.freeze({
+      id: 'tcp-diag',
+      label: 'TCP 抖动与重传',
+      groups: Object.freeze(['core_drop', 'tcp_diag', 'egress_tc', 'sock_app']),
+    }),
+    custom: Object.freeze({
+      id: 'custom',
+      label: '自定义',
+      groups: Object.freeze(['core_drop']),
+    }),
+  });
+
+  const HIGH_OVERHEAD_GROUPS = new Set(['ingress_rx', 'drop_stack', 'tcp_probe']);
+
+  function cloneVal(v) {
+    if (v === null || typeof v !== 'object') return v;
+    try { return JSON.parse(JSON.stringify(v)); } catch (_) { return v; }
+  }
+
+  function isReadOnlyField(field) {
+    return Boolean(field && (field.readOnly === true || field.readonly === true));
+  }
+
+  function isHighRiskBadge(badge) {
+    const s = String(badge || '').trim();
+    if (!s) return false;
+    return /高开销|高噪|丢样|风险|root|警告|高负载|慎用/i.test(s);
+  }
+
+  function effectiveFieldValue(field, cfg) {
+    if (cfg && typeof cfg === 'object' && field && Object.prototype.hasOwnProperty.call(cfg, field.key) && cfg[field.key] !== undefined) {
+      return cfg[field.key];
+    }
+    return field ? field.default : undefined;
+  }
+
+  function valuesMatch(a, b) {
+    if (a === b) return true;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length) return false;
+      const sa = a.map(String).sort();
+      const sb = b.map(String).sort();
+      for (let i = 0; i < sa.length; i++) {
+        if (sa[i] !== sb[i]) return false;
+      }
+      return true;
+    }
+    if (typeof a === 'boolean' || typeof b === 'boolean') {
+      return Boolean(a) === Boolean(b);
+    }
+    if (typeof a === 'number' && typeof b === 'number') {
+      return Number.isNaN(a) && Number.isNaN(b);
+    }
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      try { return JSON.stringify(a) === JSON.stringify(b); } catch (_) { return false; }
+    }
+    return false;
+  }
+
+  function resolveActivePreset(schema, cfg) {
+    if (!schema || !Array.isArray(schema.presets) || !schema.presets.length) return '';
+    const fieldMap = new Map();
+    for (const f of arr(schema.fields)) {
+      if (f && f.key) fieldMap.set(f.key, f);
+    }
+    const sourceCfg = cfg && typeof cfg === 'object' ? cfg : {};
+    for (const preset of schema.presets) {
+      if (!preset || !preset.id || preset.id === 'custom') continue;
+      const vals = preset.values && typeof preset.values === 'object' ? preset.values : null;
+      if (!vals) continue;
+      const allKeys = Object.keys(vals);
+      const nonMetaKeys = allKeys.filter((k) => k !== 'probe_preset' && k !== 'preset');
+      const keysToCheck = nonMetaKeys.length ? nonMetaKeys : allKeys;
+      if (!keysToCheck.length) continue;
+      let matched = true;
+      for (const k of keysToCheck) {
+        const f = fieldMap.get(k);
+        const cur = f ? effectiveFieldValue(f, sourceCfg) : sourceCfg[k];
+        if (!valuesMatch(cur, vals[k])) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) return String(preset.id);
+    }
+    return 'custom';
+  }
+
+  function applyPresetToConfig(schema, cfg, presetId) {
+    const next = cloneVal(cfg && typeof cfg === 'object' ? cfg : {});
+    const presets = arr(schema && schema.presets);
+    const preset = presets.find((p) => p && String(p.id) === String(presetId));
+    if (preset && preset.values && typeof preset.values === 'object') {
+      for (const [k, v] of Object.entries(preset.values)) {
+        next[k] = cloneVal(v);
+      }
+    }
+    const fields = arr(schema && schema.fields);
+    const hasProbePresetField = fields.some((f) => f && f.key === 'probe_preset')
+      || Object.prototype.hasOwnProperty.call(next, 'probe_preset')
+      || (preset && preset.values && Object.prototype.hasOwnProperty.call(preset.values, 'probe_preset'));
+    const hasPresetField = fields.some((f) => f && f.key === 'preset')
+      || Object.prototype.hasOwnProperty.call(next, 'preset')
+      || (preset && preset.values && Object.prototype.hasOwnProperty.call(preset.values, 'preset'));
+    for (const f of fields) {
+      if (isReadOnlyField(f) && f.default !== undefined) {
+        next[f.key] = cloneVal(f.default);
+      }
+    }
+    const resolvedId = preset ? String(preset.id) : 'custom';
+    if (hasProbePresetField) next.probe_preset = resolvedId;
+    if (hasPresetField) next.preset = resolvedId;
+    return next;
+  }
+
+  function groupSchemaFields(schema) {
+    const fields = arr(schema && schema.fields);
+    if (!fields.length) return [];
+    const groups = arr(schema && schema.groups);
+    if (!groups.length) {
+      return [{ id: '', label: '', description: '', collapsible: false, defaultCollapsed: false, fields }];
+    }
+    const groupIds = new Set(groups.map((g) => g && g.id).filter(Boolean));
+    const ungrouped = fields.filter((f) => !f.group || !groupIds.has(f.group));
+    const sections = [];
+    if (ungrouped.length) {
+      sections.push({
+        id: '',
+        label: '',
+        description: '',
+        collapsible: false,
+        defaultCollapsed: false,
+        fields: ungrouped,
+      });
+    }
+    for (const g of groups) {
+      if (!g || !g.id) continue;
+      const gFields = fields.filter((f) => f.group === g.id);
+      if (!gFields.length) continue;
+      sections.push({
+        id: String(g.id),
+        label: String(g.label || g.id),
+        description: g.description ? String(g.description) : '',
+        collapsible: g.collapsible !== false,
+        defaultCollapsed: g.defaultCollapsed !== undefined ? Boolean(g.defaultCollapsed) : false,
+        fields: gFields,
+      });
+    }
+    return sections;
+  }
+
+  function extractProbeGroupKey(fieldKey) {
+    const raw = String(fieldKey || '').trim();
+    if (!raw) return '';
+    if (Object.prototype.hasOwnProperty.call(PROBE_GROUP_LABELS, raw)) return raw;
+    const stripped = raw.replace(/^(?:probe_group_|probe_|group_|grp_|enable_)/, '');
+    if (Object.prototype.hasOwnProperty.call(PROBE_GROUP_LABELS, stripped)) return stripped;
+    return '';
+  }
+
+  function summarizeCollectorPreset(state) {
+    const plugins = snapshotPlugins(state);
+    const colPlugin = plugins.find((p) => pluginId(p) === 'builtin.collector.ebpf-tc') || null;
+    const available = Boolean(
+      (state && state.collector && Object.keys(state.collector).length > 0)
+      || (colPlugin && colPlugin.enabled !== false && colPlugin.status !== 'disabled')
+    );
+    const schema = (colPlugin && colPlugin.schema) || null;
+    const cfg = (colPlugin && colPlugin.config && typeof colPlugin.config === 'object')
+      ? colPlugin.config
+      : ((state && state.collector && typeof state.collector === 'object') ? state.collector : {});
+
+    let presetId = resolveActivePreset(schema, cfg);
+    if (!presetId) {
+      const fromCfg = cfg.probe_preset || cfg.preset || (state && state.collector && state.collector.probe_preset);
+      presetId = fromCfg ? String(fromCfg) : 'egress';
+    }
+
+    const schemaPreset = arr(schema && schema.presets).find((p) => p && String(p.id) === presetId);
+    const fallbackDef = Object.prototype.hasOwnProperty.call(PROBE_PRESET_DEFS, presetId)
+      ? PROBE_PRESET_DEFS[presetId]
+      : null;
+    const presetLabel = (schemaPreset && schemaPreset.label)
+      ? String(schemaPreset.label)
+      : (fallbackDef ? fallbackDef.label : (presetId === 'custom' ? '自定义' : presetId));
+
+    const enabledGroups = [];
+    const seen = new Set();
+    const pushGroup = (gid) => {
+      const id = String(gid || '').trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      enabledGroups.push(id);
+    };
+
+    const explicitArr = Array.isArray(cfg.probe_groups)
+      ? cfg.probe_groups
+      : (Array.isArray(cfg.enabled_groups) ? cfg.enabled_groups : null);
+
+    if (explicitArr) {
+      pushGroup('core_drop');
+      for (const g of explicitArr) pushGroup(g);
+    } else {
+      let foundBoolGroupField = false;
+      for (const f of arr(schema && schema.fields)) {
+        if (!f || f.type !== 'boolean') continue;
+        const gid = extractProbeGroupKey(f.key);
+        if (!gid) continue;
+        foundBoolGroupField = true;
+        if (Boolean(effectiveFieldValue(f, cfg))) pushGroup(gid);
+      }
+      if (!foundBoolGroupField) {
+        for (const [k, v] of Object.entries(cfg)) {
+          const gid = extractProbeGroupKey(k);
+          if (!gid) continue;
+          foundBoolGroupField = true;
+          if (Boolean(v)) pushGroup(gid);
+        }
+      }
+      if (foundBoolGroupField) {
+        if (!seen.has('core_drop')) enabledGroups.unshift('core_drop');
+      } else if (fallbackDef) {
+        for (const g of fallbackDef.groups) pushGroup(g);
+      } else {
+        pushGroup('core_drop');
+      }
+    }
+
+    const fieldLabelByGroup = new Map();
+    const highOverheadLabels = [];
+    for (const f of arr(schema && schema.fields)) {
+      const gid = extractProbeGroupKey(f && f.key);
+      if (gid && f.label) fieldLabelByGroup.set(gid, String(f.label));
+      if (gid && seen.has(gid) && isHighRiskBadge(f.badge)) {
+        highOverheadLabels.push(String(f.label || PROBE_GROUP_LABELS[gid] || gid));
+      }
+    }
+    const enabledGroupLabels = enabledGroups.map((gid) =>
+      PROBE_GROUP_LABELS[gid] || fieldLabelByGroup.get(gid) || gid
+    );
+    if (!highOverheadLabels.length) {
+      for (const gid of enabledGroups) {
+        if (HIGH_OVERHEAD_GROUPS.has(gid)) {
+          highOverheadLabels.push(PROBE_GROUP_LABELS[gid] || gid);
+        }
+      }
+    }
+
+    return {
+      available,
+      pluginId: 'builtin.collector.ebpf-tc',
+      presetId,
+      presetLabel,
+      isCustom: presetId === 'custom',
+      enabledGroups,
+      enabledGroupLabels,
+      highOverhead: highOverheadLabels.length > 0,
+      highOverheadLabels,
+    };
+  }
+
+  function normalizeKernelBpfObjects(raw) {
+    if (Array.isArray(raw)) {
+      return raw.filter((x) => x && typeof x === 'object').map((x) => ({
+        arch: String(x.arch || '').trim(),
+        path: String(x.path || '').trim(),
+        sha256: String(x.sha256 || '').trim(),
+      })).filter((x) => x.arch || x.path);
+    }
+    if (raw && typeof raw === 'object') {
+      return Object.entries(raw).map(([arch, item]) => ({
+        arch: String(arch || '').trim(),
+        path: String((item && item.path) || '').trim(),
+        sha256: String((item && item.sha256) || '').trim(),
+      })).filter((x) => x.arch || x.path);
+    }
+    return [];
+  }
+
+  function normalizeKernelBpfHooks(raw) {
+    return arr(raw).filter((h) => h && typeof h === 'object').map((h) => ({
+      id: String(h.id || '').trim(),
+      group: String(h.group || '').trim(),
+      sec: String(h.sec || '').trim(),
+      type: String(h.type || '').trim(),
+      target: String(h.target || '').trim(),
+      stage: String(h.stage || '').trim(),
+    }));
+  }
+
+  function enrichPreviewBpf(obj) {
+    const kp = obj && obj.kernel_probes && typeof obj.kernel_probes === 'object' ? obj.kernel_probes : null;
+    const objects = normalizeKernelBpfObjects(obj.kernel_bpf_objects || (kp && kp.objects));
+    const hooks = normalizeKernelBpfHooks(obj.kernel_bpf_hooks || (kp && kp.hooks));
+    const hasBpf = Boolean(obj.has_kernel_bpf || objects.length > 0 || hooks.length > 0);
+    return Object.assign({}, obj, {
+      has_kernel_bpf: hasBpf,
+      kernel_bpf_objects: objects,
+      kernel_bpf_hooks: hooks,
+    });
+  }
+
   function normalizeInstallPreview(resp) {
     if (!resp || typeof resp !== 'object') {
-      return { ok: false, error: '解析失败' };
+      return { ok: false, error: '解析失败', has_kernel_bpf: false, kernel_bpf_objects: [], kernel_bpf_hooks: [] };
     }
     if (resp.preview && typeof resp.preview === 'object') {
       const inner = resp.preview;
@@ -583,12 +913,12 @@
       if (!ok && !merged.error) {
         merged.error = resp.error || '格式无效';
       }
-      return merged;
+      return enrichPreviewBpf(merged);
     }
     if (resp.ok === true) {
-      return Object.assign({}, resp, { ok: true });
+      return enrichPreviewBpf(Object.assign({}, resp, { ok: true }));
     }
-    return Object.assign({}, resp, { ok: false, error: resp.error || '解析失败' });
+    return enrichPreviewBpf(Object.assign({}, resp, { ok: false, error: resp.error || '解析失败' }));
   }
 
   return {
@@ -630,5 +960,14 @@
     ICON_SLUG_MAP,
     renderPluginIcon,
     normalizeInstallPreview,
+    PROBE_GROUP_LABELS,
+    PROBE_PRESET_DEFS,
+    isReadOnlyField,
+    isHighRiskBadge,
+    effectiveFieldValue,
+    resolveActivePreset,
+    applyPresetToConfig,
+    groupSchemaFields,
+    summarizeCollectorPreset,
   };
 });
