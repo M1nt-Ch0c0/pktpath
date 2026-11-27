@@ -136,9 +136,12 @@ export async function handleKernelRoute(
     return true;
   }
 
-  if (pathname === '/api/kernel/plugins/export') {
-    const body = await readJsonBody(req);
-    const id = typeof body.id === 'string' ? body.id.trim() : '';
+  const pluginExportMatch = method === 'POST' ? pathname.match(/^\/api\/plugins\/([^/]+)\/export$/) : null;
+  if (pathname === '/api/kernel/plugins/export' || pluginExportMatch) {
+    const body = await readJsonBody(req).catch(() => ({} as Record<string, unknown>));
+    const id = pluginExportMatch
+      ? decodeURIComponent(pluginExportMatch[1]).trim()
+      : (typeof body.id === 'string' ? body.id.trim() : '');
     const requestedOutPath = typeof body.out_path === 'string' ? body.out_path.trim() : '';
     if (!id) {
       sendJson(res, 400, { ok: false, error: 'id is required' });

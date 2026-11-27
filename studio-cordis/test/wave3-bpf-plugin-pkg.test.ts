@@ -837,6 +837,22 @@ it("Wave 3 HTTP routes: POST /api/kernel/plugins/export and GET /api/device/self
         { id: "btf", label: "内核 BTF", status: "green", detail: "可用" },
       ],
     });
+    const expAliasRes = await fetch(`${base}/api/plugins/thirdparty.http-export-demo/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(expAliasRes.status, 200);
+    const expAliasJson = (await expAliasRes.json()) as any;
+    assert.equal(expAliasJson.ok, true);
+    assert.equal(expAliasJson.id, "thirdparty.http-export-demo");
+
+    const scAliasRes = await fetch(`${base}/api/devices/MOCK-SERIAL-1/self-check`);
+    assert.equal(scAliasRes.status, 200);
+    const scAliasJson = (await scAliasRes.json()) as any;
+    assert.equal(scAliasJson.ok, true);
+    assert.equal(scAliasJson.serial, "MOCK-SERIAL-1");
+
     const scRes = await fetch(`${base}/api/device/self-check?serial=MOCK-SERIAL-1`);
     assert.equal(scRes.status, 200);
     const scJson = (await scRes.json()) as any;
@@ -848,4 +864,55 @@ it("Wave 3 HTTP routes: POST /api/kernel/plugins/export and GET /api/device/self
     await app.close();
     fs.rmSync(workDir, { recursive: true, force: true });
   }
+});
+
+it("Wave 3 cross-slice P1: selfCheckDevice parses Lin Appendix A.2 nested --self-check JSON accurately", async () => {
+  const adb = new AdbClient("adb");
+  (adb as any).detectArch = async () => "x86_64";
+  (adb as any).shell = async () => ({ code: 0, stdout: "6.12.113+\n", stderr: "" });
+  (adb as any).ensureRoot = async () => "root";
+  (adb as any).priv = async () => ({
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({
+      schema_version: 1,
+      status: "ok",
+      kernel_release: "6.12.113+",
+      arch: "x86_64",
+      uid: 0,
+      is_root: true,
+      btf: {
+        path: "/sys/kernel/btf/vmlinux",
+        readable: true,
+        skb_drop_reason_count: 102,
+        tcp_sock_fields: { snd_nxt: true, snd_cwnd: true, srtt_us: true },
+      },
+      sysctl: {
+        kptr_restrict: 0,
+        unprivileged_bpf_disabled: 2,
+        perf_event_paranoid: 2,
+      },
+      probes: {
+        tracefs_mount: "/sys/kernel/tracing",
+        core_tracepoints: [
+          { name: "skb:kfree_skb", available: true },
+          { name: "net:net_dev_queue", available: true },
+        ],
+        core_kprobes: [{ symbol: "ip_rcv", available: true }],
+      },
+      checks: [
+        { id: "kptr_restrict", level: "yellow", label: "内核符号可见性", detail: "value=0, kallsyms_nonzero=false" },
+      ],
+    }),
+  });
+
+  const res = await adb.selfCheckDevice("LIN-A2-DEV");
+  assert.equal(res.btf_available, true);
+  assert.equal(res.drop_reason_enum_count, 102);
+  assert.equal(res.kptr_restrict, 0);
+  const kptrItem = res.items.find((x) => x.id === "kptr_restrict");
+  assert.equal(kptrItem?.level, "yellow");
+  const tpItem = res.items.find((x) => x.id === "core_tracepoints");
+  assert.equal(tpItem?.level, "green");
+  assert.equal(res.overall, "yellow");
 });

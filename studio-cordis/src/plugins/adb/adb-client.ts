@@ -996,18 +996,63 @@ export class AdbClient {
     let kptrRestrict: number | undefined;
     let coreTracepointOk: boolean | undefined;
 
+    let kptrCheckLevelFromAgent: 'green' | 'yellow' | 'red' | undefined;
+    let kptrCheckDetailFromAgent: string | undefined;
     if (agentSelfCheck) {
-      const btfVal = agentSelfCheck.btf_available ?? agentSelfCheck.vmlinux_btf_readable;
+      const btfObj =
+        agentSelfCheck.btf && typeof agentSelfCheck.btf === 'object' && !Array.isArray(agentSelfCheck.btf)
+          ? (agentSelfCheck.btf as Record<string, unknown>)
+          : undefined;
+      const sysctlObj =
+        agentSelfCheck.sysctl && typeof agentSelfCheck.sysctl === 'object' && !Array.isArray(agentSelfCheck.sysctl)
+          ? (agentSelfCheck.sysctl as Record<string, unknown>)
+          : undefined;
+      const probesObj =
+        agentSelfCheck.probes && typeof agentSelfCheck.probes === 'object' && !Array.isArray(agentSelfCheck.probes)
+          ? (agentSelfCheck.probes as Record<string, unknown>)
+          : undefined;
+
+      const btfVal =
+        btfObj?.readable ??
+        agentSelfCheck.btf_available ??
+        agentSelfCheck.vmlinux_btf_readable;
       btfAvailable = Boolean(btfVal);
-      const enumRaw = agentSelfCheck.drop_reason_enum_count ?? agentSelfCheck.skb_drop_reason_count;
+
+      const enumRaw =
+        btfObj?.skb_drop_reason_count ??
+        agentSelfCheck.drop_reason_enum_count ??
+        agentSelfCheck.skb_drop_reason_count;
       if (typeof enumRaw === 'number' && Number.isFinite(enumRaw)) {
         dropReasonEnumCount = Math.trunc(enumRaw);
       }
-      if (typeof agentSelfCheck.kptr_restrict === 'number' && Number.isFinite(agentSelfCheck.kptr_restrict)) {
-        kptrRestrict = Math.trunc(agentSelfCheck.kptr_restrict);
+
+      const kptrRaw = sysctlObj?.kptr_restrict ?? agentSelfCheck.kptr_restrict;
+      if (typeof kptrRaw === 'number' && Number.isFinite(kptrRaw)) {
+        kptrRestrict = Math.trunc(kptrRaw);
       }
-      if (typeof agentSelfCheck.core_tracepoint_ok === 'boolean') {
+
+      if (Array.isArray(probesObj?.core_tracepoints)) {
+        const tps = probesObj.core_tracepoints as Array<Record<string, unknown>>;
+        const kfree = tps.find((t) => t && t.name === 'skb:kfree_skb');
+        if (kfree && typeof kfree.available === 'boolean') {
+          coreTracepointOk = kfree.available;
+        } else if (tps.length > 0) {
+          coreTracepointOk = tps.some((t) => t && t.available === true);
+        }
+      } else if (typeof agentSelfCheck.core_tracepoint_ok === 'boolean') {
         coreTracepointOk = agentSelfCheck.core_tracepoint_ok;
+      }
+
+      if (Array.isArray(agentSelfCheck.checks)) {
+        const kptrCheck = (agentSelfCheck.checks as Array<Record<string, unknown>>).find(
+          (c) => c && c.id === 'kptr_restrict',
+        );
+        if (kptrCheck && (kptrCheck.level === 'green' || kptrCheck.level === 'yellow' || kptrCheck.level === 'red')) {
+          kptrCheckLevelFromAgent = kptrCheck.level;
+          if (typeof kptrCheck.detail === 'string') {
+            kptrCheckDetailFromAgent = kptrCheck.detail;
+          }
+        }
       }
     } else {
       const fallbackCmd = [
@@ -1049,13 +1094,15 @@ export class AdbClient {
     }
 
     if (kptrRestrict !== undefined) {
+      const kptrLevel = kptrCheckLevelFromAgent ?? (kptrRestrict >= 2 ? 'yellow' : 'green');
       items.push({
         id: 'kptr_restrict',
         label: '内核符号可见性 (kptr_restrict)',
-        level: kptrRestrict >= 2 ? 'yellow' : 'green',
-        summary: kptrRestrict >= 2
-          ? `kptr_restrict=${kptrRestrict}（丢包调用栈可能仅显示地址）`
-          : `kptr_restrict=${kptrRestrict}（允许内核符号化）`,
+        level: kptrLevel,
+        summary: kptrLevel === 'green'
+          ? `kptr_restrict=${kptrRestrict}（允许内核符号化）`
+          : `kptr_restrict=${kptrRestrict}（丢包调用栈可能仅显示地址）`,
+        ...(kptrCheckDetailFromAgent ? { detail: kptrCheckDetailFromAgent } : {}),
       });
     }
 
