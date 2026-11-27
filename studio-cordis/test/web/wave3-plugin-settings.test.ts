@@ -397,3 +397,41 @@ test('Wave 3 UX declutter keeps technical details collapsed and avoids raw inter
   assert.match(appJs, /id="scTechDetails"/);
   assert.match(appJs, /查看技术详情/);
 });
+
+test('Wave 3 frontend parsers align with Shan FlowTcpSeriesResult and tls_correlation object payloads', () => {
+  const tcp = Wave1.buildFlowTcpChartsData({
+    tcp_series: {
+      tcp_probes_enabled: true,
+      tcp_probe_status: 'attached',
+      notice: null,
+      time_sequence: [
+        { ts_ns: '100', rel_ms: 0, seq: 1000, rel_seq: 0, event_kind: 'normal' },
+        { ts_ns: '200', rel_ms: 12.5, seq: 2440, rel_seq: 1440, event_kind: 'retransmit' },
+        { ts_ns: '300', rel_ms: 25, seq: 3880, rel_seq: 2880, event_kind: 'drop' },
+      ],
+      cwnd_rtt: [
+        { ts_ns: '100', rel_ms: 0, snd_cwnd: 10, srtt_us: 15000, srtt_ms: 15 },
+        { ts_ns: '200', rel_ms: 12.5, snd_cwnd: null, srtt_us: null, srtt_ms: null },
+      ],
+    },
+  }, [], {}, {});
+  assert.equal(tcp.probeEnabled, true);
+  assert.equal(tcp.hasData, true);
+  assert.equal(tcp.timeSeqPoints.length, 3);
+  assert.equal(tcp.cwndPoints.length, 1);
+  assert.equal(tcp.rttPoints.length, 1);
+  assert.equal(tcp.retransmitCount, 1);
+  assert.equal(tcp.dropCount, 1);
+
+  const tls = Wave1.extractFlowTlsEvents({
+    tls_correlation: {
+      available: true,
+      events: [
+        { ts_ns: '1732700000000000000', pid: 42, comm: 'app', direction: 'read', library: 'conscrypt', plaintext_len: 12, plaintext_preview: 'HTTP/1.1 200', truncated: false },
+      ],
+    },
+  }, {}, {});
+  assert.equal(tls.length, 1);
+  assert.equal(tls[0].library, 'conscrypt');
+  assert.equal(tls[0].direction, 'read');
+});

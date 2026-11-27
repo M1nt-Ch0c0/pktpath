@@ -1094,19 +1094,42 @@
 
   function buildFlowTcpChartsData(detail, samples, sessionSummary, row) {
     const d = detail && typeof detail === 'object' ? detail : {};
-    const probeEnabled = isTcpDetailedProbeEnabled(sessionSummary);
+    const shanObj = (d.tcp_series && !Array.isArray(d.tcp_series) && typeof d.tcp_series === 'object') ? d.tcp_series : null;
+    const probeEnabled = shanObj && typeof shanObj.tcp_probes_enabled === 'boolean'
+      ? shanObj.tcp_probes_enabled
+      : isTcpDetailedProbeEnabled(sessionSummary);
     const timeSeqPoints = [];
     const cwndPoints = [];
     const rttPoints = [];
     let retransmitCount = 0;
     let dropCount = 0;
 
-    // 1. Prefer structured server-side series if Shan's analyzer provides them
-    const rawSeries = Array.isArray(d.tcp_series) ? d.tcp_series
-      : Array.isArray(d.time_sequence) ? d.time_sequence
-      : (d.tcp_metrics && Array.isArray(d.tcp_metrics.points) ? d.tcp_metrics.points : null);
-
-    if (rawSeries && rawSeries.length) {
+    // 1. Prefer structured server-side FlowTcpSeriesResult from Shan's analyzer
+    if (shanObj && (Array.isArray(shanObj.time_sequence) || Array.isArray(shanObj.cwnd_rtt))) {
+      for (const pt of (Array.isArray(shanObj.time_sequence) ? shanObj.time_sequence : [])) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tMs = finiteOptNum(pt.rel_ms) !== null ? finiteOptNum(pt.rel_ms) : timeSeqPoints.length;
+        const seq = finiteOptNum(pt.rel_seq !== undefined && pt.rel_seq !== null ? pt.rel_seq : pt.seq);
+        const kind = String(pt.event_kind || 'normal');
+        const retransmit = kind === 'retransmit' || Boolean(pt.retransmit);
+        const dropped = kind === 'drop' || Boolean(pt.dropped);
+        if (retransmit) retransmitCount++;
+        if (dropped) dropCount++;
+        if (seq !== null) timeSeqPoints.push({ tMs, seq, retransmit, dropped });
+      }
+      for (const pt of (Array.isArray(shanObj.cwnd_rtt) ? shanObj.cwnd_rtt : [])) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tMs = finiteOptNum(pt.rel_ms) !== null ? finiteOptNum(pt.rel_ms) : cwndPoints.length;
+        const cwnd = finiteOptNum(pt.snd_cwnd);
+        const srttUs = finiteOptNum(pt.srtt_us);
+        const srttMs = finiteOptNum(pt.srtt_ms) !== null ? finiteOptNum(pt.srtt_ms) : (srttUs !== null ? srttUs / 1000 : null);
+        if (cwnd !== null) cwndPoints.push({ tMs, cwnd });
+        if (srttMs !== null) rttPoints.push({ tMs, srttUs: srttUs !== null ? srttUs : srttMs * 1000, rttMs: srttMs });
+      }
+    } else if (Array.isArray(d.tcp_series) || Array.isArray(d.time_sequence) || (d.tcp_metrics && Array.isArray(d.tcp_metrics.points))) {
+      const rawSeries = Array.isArray(d.tcp_series) ? d.tcp_series
+        : Array.isArray(d.time_sequence) ? d.time_sequence
+        : d.tcp_metrics.points;
       let baseTs = null;
       for (const pt of rawSeries) {
         if (!pt || typeof pt !== 'object') continue;
@@ -1175,9 +1198,11 @@
     const hasData = timeSeqPoints.length > 0 || cwndPoints.length > 0 || rttPoints.length > 0;
     const reason = hasData
       ? ''
-      : (!probeEnabled
-          ? '本次抓包未开启 TCP 详细探针，默认只记录路径和丢包，不采集拥塞窗口与往返延迟曲线。'
-          : '已开启 TCP 详细探针，但这条连接本次没有采到可用于绘图的传输指标。');
+      : (shanObj && typeof shanObj.notice === 'string' && shanObj.notice.trim()
+          ? shanObj.notice.trim()
+          : (!probeEnabled
+              ? '本次抓包未开启 TCP 详细探针，默认只记录路径和丢包，不采集拥塞窗口与往返延迟曲线。'
+              : '已开启 TCP 详细探针，但这条连接本次没有采到可用于绘图的传输指标。'));
 
     return {
       probeEnabled,
@@ -1197,7 +1222,7 @@
     const cur = row && typeof row === 'object' ? row : {};
     const direct = Array.isArray(d.tls_events) ? d.tls_events
       : Array.isArray(d.tls_correlation) ? d.tls_correlation
-      : null;
+      : (d.tls_correlation && typeof d.tls_correlation === 'object' && Array.isArray(d.tls_correlation.events) ? d.tls_correlation.events : null);
     let raw = direct;
     if (!raw) {
       const sessList = Array.isArray(s.tls_events) ? s.tls_events
