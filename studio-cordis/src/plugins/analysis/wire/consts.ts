@@ -135,6 +135,9 @@ export const TLV_STEP_BUCKET = 0x010c
 export const TLV_STEP_TXQ = 0x010d
 export const TLV_STEP_RAW_RET = 0x010e
 export const TLV_STEP_CTX_TID = 0x010f
+export const TLV_STEP_TCP_SEQ = 0x0110
+export const TLV_STEP_SND_CWND = 0x0111
+export const TLV_STEP_SRTT_US = 0x0112
 
 export const TLV_REL_OP_ID = 0x0201
 export const TLV_REL_TYPE = 0x0202
@@ -225,6 +228,9 @@ export const KNOWN_TLVS: ReadonlyMap<number, TlvSpec> = new Map<number, TlvSpec>
   [TLV_STEP_TXQ, { name: 'txq', codec: 'u16' }],
   [TLV_STEP_RAW_RET, { name: 'raw_ret', codec: 's32' }],
   [TLV_STEP_CTX_TID, { name: 'ctx_tid', codec: 'u32' }],
+  [TLV_STEP_TCP_SEQ, { name: 'tcp_seq', codec: 'u32' }],
+  [TLV_STEP_SND_CWND, { name: 'snd_cwnd', codec: 'u32' }],
+  [TLV_STEP_SRTT_US, { name: 'srtt_us', codec: 'u32' }],
 
   [TLV_REL_OP_ID, { name: 'op_id', codec: 'u64' }],
   [TLV_REL_TYPE, { name: 'rel_type', codec: 'u8' }],
