@@ -282,7 +282,7 @@ test('Wave 3 describePluginSignature distinguishes trusted_key, self_declared (n
   assert.equal(invalid.label, '签名无效·禁止安装');
   assert.equal(invalid.badgeClass, 'badge-bad');
   assert.equal(invalid.blocked, true);
-  assert.match(invalid.detail, /digest mismatch/);
+  assert.match(invalid.detail, /签名校验未通过/);
 });
 
 test('Wave 3 normalizeDeviceSelfCheck reads Bo actual items/level/summary/detail schema and preserves metadata', () => {
@@ -303,8 +303,8 @@ test('Wave 3 normalizeDeviceSelfCheck reads Bo actual items/level/summary/detail
   });
   assert.equal(rep.ok, true);
   assert.equal(rep.overall, 'yellow');
-  assert.equal(rep.overallLabel, '部分降级');
-  assert.equal(rep.sourceLabel, '设备 Agent 自检');
+  assert.equal(rep.overallLabel, '可用（部分受限）');
+  assert.equal(rep.sourceLabel, '设备深度检测');
   assert.equal(rep.arch, 'arm64');
   assert.equal(rep.kernel_release, '6.1.157-android14-g1234');
   assert.equal(rep.root_mode, 'su -c');
@@ -316,8 +316,8 @@ test('Wave 3 normalizeDeviceSelfCheck reads Bo actual items/level/summary/detail
   assert.equal(rep.items[2].level, 'red');
 
   const fb = Wave1.normalizeDeviceSelfCheck({ ok: true, serial: 'dev1', overall: 'green', arch: 'x86_64', items: [] });
-  assert.equal(fb.sourceLabel, 'ADB Shell 降级检测');
-  assert.equal(fb.overallLabel, '全部就绪');
+  assert.equal(fb.sourceLabel, '基础环境检测');
+  assert.equal(fb.overallLabel, '已就绪');
 });
 
 test('Wave 3 buildFlowTcpChartsData reports disabled TCP probe honestly and never fills missing cwnd/srtt with 0', () => {
@@ -387,4 +387,13 @@ test('Wave 3 additions B/C HTML and JS wire plugin export .zip, signature badge/
   assert.match(html, /id="selfCheckModal"/);
   assert.match(appJs, /\/api\/devices\/\$\{encodeURIComponent\(serial\)\}\/self-check/);
   assert.match(appJs, /normalizeDeviceSelfCheck/);
+});
+
+test('Wave 3 UX declutter keeps technical details collapsed and avoids raw internal jargon in primary UI', () => {
+  const pcJs = fs.readFileSync(path.join(webDir, 'plugin-center.js'), 'utf8');
+  const appJs = fs.readFileSync(path.join(webDir, 'app.js'), 'utf8');
+  assert.match(pcJs, /id="instBpfTechDetails"/);
+  assert.match(pcJs, /id="instSigTechDetails"/);
+  assert.match(appJs, /id="scTechDetails"/);
+  assert.match(appJs, /查看技术详情/);
 });

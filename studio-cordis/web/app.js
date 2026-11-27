@@ -478,35 +478,54 @@
     }
     const r = report || {};
     const overallCls = r.overall === 'green' ? 'badge-ok' : r.overall === 'red' ? 'badge-bad' : 'badge-warn';
+    const headline = r.headline || (r.overall === 'green'
+      ? '这台设备已准备就绪，可以直接开始抓包。'
+      : r.overall === 'red'
+        ? '设备目前还不能抓包，请先按下面提示处理标红项。'
+        : '设备可以正常抓包，但有部分高级能力受限，不影响基础排查。');
     const list = Array.isArray(r.items) ? r.items : (Array.isArray(r.checks) ? r.checks : []);
-    const items = list.length
-      ? list.map((c) => {
-          const lv = c.level || c.status || 'yellow';
-          const dotCls = lv === 'green' ? 'is-green' : lv === 'red' ? 'is-red' : 'is-yellow';
-          const pillCls = lv === 'green' ? 'badge-ok' : lv === 'red' ? 'badge-bad' : 'badge-warn';
-          return `
-            <li class="sc-item ${dotCls}">
-              <div class="sc-item-head">
-                <span class="sc-dot ${dotCls}" aria-hidden="true"></span>
-                <span class="sc-label">${esc(c.label)}</span>
-                <span class="spacer"></span>
-                <span class="badge ${pillCls}">${esc(c.statusLabel || lv)}</span>
-              </div>
-              ${c.summary ? `<div class="sc-summary-line">${esc(c.summary)}</div>` : ''}
-              ${c.detail && c.detail !== c.summary ? `<div class="sc-detail">${esc(c.detail)}</div>` : ''}
-              ${c.remediation ? `<div class="sc-remediation">建议：${esc(c.remediation)}</div>` : ''}
-            </li>`;
-        }).join('')
-      : '<li class="muted" style="padding:8px 0">后端未返回逐项检查结果</li>';
+    const renderRow = (c) => {
+      const lv = c.level || c.status || 'yellow';
+      const dotCls = lv === 'green' ? 'is-green' : lv === 'red' ? 'is-red' : 'is-yellow';
+      const pillCls = lv === 'green' ? 'badge-ok' : lv === 'red' ? 'badge-bad' : 'badge-warn';
+      const msg = c.summary || c.detail || '';
+      return `
+        <li class="sc-item ${dotCls}">
+          <div class="sc-item-head">
+            <span class="sc-dot ${dotCls}" aria-hidden="true"></span>
+            <span class="sc-label">${esc(c.label)}</span>
+            <span class="spacer"></span>
+            <span class="badge ${pillCls}">${esc(c.statusLabel || lv)}</span>
+          </div>
+          ${msg ? `<div class="sc-summary-line">${esc(msg)}</div>` : ''}
+          ${c.detail && c.summary && c.detail !== c.summary ? `<div class="sc-detail">${esc(c.detail)}</div>` : ''}
+          ${c.remediation ? `<div class="sc-remediation">处理建议：${esc(c.remediation)}</div>` : ''}
+        </li>`;
+    };
+    const issueItems = list.filter((c) => (c.level || c.status) !== 'green');
+    const attentionHtml = issueItems.length
+      ? `<ul class="sc-list" id="scAttentionList">${issueItems.map(renderRow).join('')}</ul>`
+      : '';
+    const techMeta = [
+      r.arch ? `架构：${r.arch}` : '',
+      r.kernel_release ? `内核：${String(r.kernel_release).split('-')[0]}` : '',
+      r.root_mode ? `提权方式：${r.root_mode}` : '',
+      r.sourceLabel ? `检测方式：${r.sourceLabel}` : '',
+    ].filter(Boolean).join(' · ');
+    const allItemsHtml = list.length
+      ? `<ul class="sc-list">${list.map(renderRow).join('')}</ul>`
+      : '<div class="muted" style="font-size:12px">暂无逐项检测明细</div>';
     body.innerHTML = `
-      <div class="sc-summary">
+      <div class="sc-hero">
         <span class="badge ${overallCls}">${esc(r.overallLabel || r.overall)}</span>
-        ${r.arch ? `<span class="badge badge-muted">架构 ${esc(r.arch)}</span>` : ''}
-        ${r.kernel_release ? `<span class="badge badge-muted">内核 ${esc(String(r.kernel_release).split('-')[0])}</span>` : ''}
-        ${r.root_mode ? `<span class="badge badge-muted">Root ${esc(r.root_mode)}</span>` : ''}
-        <span class="badge badge-muted">${esc(r.sourceLabel || r.source || '')}</span>
+        <div class="sc-headline">${esc(headline)}</div>
       </div>
-      <ul class="sc-list">${items}</ul>
+      ${attentionHtml}
+      <details class="tech-details" id="scTechDetails">
+        <summary>查看技术详情（共 ${list.length} 项检查）</summary>
+        ${techMeta ? `<div class="sc-tech-meta">${esc(techMeta)}</div>` : ''}
+        ${allItemsHtml}
+      </details>
     `;
     const q = $('#selfCheckQuickBadge');
     if (q) {
@@ -2115,9 +2134,9 @@
     if (!data.hasData) {
       body.innerHTML = `
         <div class="tcp-empty-card" id="drwTcpEmpty">
-          <div class="tcp-empty-title">📉 ${esc(data.probeEnabled ? '当前流暂无 TCP 详细指标样本' : '未开启 TCP 详细探针')}</div>
+          <div class="tcp-empty-title">📉 ${esc(data.probeEnabled ? '这条连接暂无 TCP 传输指标' : '未开启 TCP 详细探针')}</div>
           <p class="tcp-empty-desc">${esc(data.reason)}</p>
-          ${!data.probeEnabled ? '<button type="button" class="btn btn-ghost btn-sm" id="btnTcpOpenProbeSettings">前往插件设置开启 TCP 诊断预设 →</button>' : ''}
+          ${!data.probeEnabled ? '<button type="button" class="btn btn-primary btn-sm" id="btnTcpOpenProbeSettings">去切换为「TCP 深度诊断」预设</button>' : ''}
         </div>`;
       $('#btnTcpOpenProbeSettings')?.addEventListener('click', () => {
         closeDrawer();
@@ -2128,24 +2147,24 @@
     const seqBlock = data.timeSeqPoints.length
       ? `<div class="tcp-chart-card">
           <div class="tcp-chart-head">
-            <strong>时间-序号（Time-Sequence）</strong>
+            <strong>发包进度（时间-序号）</strong>
             <span class="muted">点数 ${data.timeSeqPoints.length} · <span style="color:var(--warn)">▲ 重传 ${data.retransmitCount}</span> · <span style="color:var(--bad)">✕ 丢包 ${data.dropCount}</span></span>
           </div>
           ${buildLineSvg(data.timeSeqPoints, 'tMs', 'seq', { title: 'Time-Sequence', color: 'var(--accent)', markEvents: true, fmtY: (v) => String(Math.round(v)) })}
         </div>`
-      : '<div class="muted" style="font-size:12px;margin-bottom:10px">当前流未采集到 tcp_seq 字段（缺失已省略，不填 0）。</div>';
+      : '<div class="muted" style="font-size:12px;margin-bottom:10px">本次未采到序号数据，已略过。</div>';
     const cwndBlock = data.cwndPoints.length
       ? `<div class="tcp-chart-card">
-          <div class="tcp-chart-head"><strong>拥塞窗口（snd_cwnd · segments）</strong><span class="muted">点数 ${data.cwndPoints.length}</span></div>
+          <div class="tcp-chart-head"><strong>拥塞窗口变化（包数）</strong><span class="muted">点数 ${data.cwndPoints.length}</span></div>
           ${buildLineSvg(data.cwndPoints, 'tMs', 'cwnd', { title: 'snd_cwnd', color: 'var(--ok)', fmtY: (v) => `${Math.round(v)} seg` })}
         </div>`
-      : '<div class="muted" style="font-size:12px;margin-bottom:10px">未采集到 snd_cwnd（缺失已省略，不填 0）。</div>';
+      : '<div class="muted" style="font-size:12px;margin-bottom:10px">本次未采到拥塞窗口数据，已略过。</div>';
     const rttBlock = data.rttPoints.length
       ? `<div class="tcp-chart-card">
-          <div class="tcp-chart-head"><strong>平滑 RTT（srtt_us 换算 ms）</strong><span class="muted">点数 ${data.rttPoints.length}</span></div>
+          <div class="tcp-chart-head"><strong>往返延迟变化（RTT · ms）</strong><span class="muted">点数 ${data.rttPoints.length}</span></div>
           ${buildLineSvg(data.rttPoints, 'tMs', 'rttMs', { title: 'srtt_us', color: 'var(--violet)', fmtY: (v) => `${v.toFixed(1)} ms` })}
         </div>`
-      : '<div class="muted" style="font-size:12px">未采集到 srtt_us（缺失已省略，不填 0）。</div>';
+      : '<div class="muted" style="font-size:12px">本次未采到延迟数据，已略过。</div>';
     body.innerHTML = `<div class="tcp-charts-wrap">${seqBlock}${cwndBlock}${rttBlock}</div>`;
   }
 

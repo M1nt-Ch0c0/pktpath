@@ -1137,9 +1137,8 @@
       }
       const kb = data && data.size_bytes ? `${(Number(data.size_bytes) / 1024).toFixed(1)} KB` : '';
       const count = data && data.file_count ? `${data.file_count} 个文件` : '';
-      const sigTxt = data && data.signature_status ? ` · 签名: ${data.signature_status}` : '';
-      const metaStr = [count, kb].filter(Boolean).join(' / ');
-      toast(`插件已导出${data && data.path ? '：' + data.path : ''}${metaStr ? '（' + metaStr + '）' : ''}${sigTxt}`, 'ok');
+      const metaStr = [count, kb].filter(Boolean).join('，');
+      toast(`插件包已导出${data && data.path ? '：' + data.path : ''}${metaStr ? '（' + metaStr + '）' : ''}`, 'ok');
     } catch (e) {
       toast('导出插件失败：' + friendlyErr(e.message), 'bad');
     } finally {
@@ -1242,15 +1241,18 @@
           : '';
         bpfWarningHtml = `
           <div class="inst-bpf-warning" id="instBpfWarning">
-            <div class="inst-bpf-title">⚠️ 高风险内核字节码提示</div>
+            <div class="inst-bpf-title">⚠️ 内核级权限提示</div>
             <p class="inst-bpf-msg">包含将在设备内核态以 root 权限加载的 eBPF 字节码，仅安装信任来源。</p>
-            <div class="inst-bpf-sub">目标架构 .bpf.o 文件：</div>
-            <ul class="inst-bpf-list">${objRows}</ul>
-            ${hookRows}
             <label class="inst-bpf-ack">
               <input type="checkbox" id="instBpfConfirm">
-              <span>我已确认该插件来源可信，并明确同意在设备内核态加载上述 eBPF 字节码</span>
+              <span>我确认来源可信，同意在设备内核加载此插件</span>
             </label>
+            <details class="tech-details" id="instBpfTechDetails">
+              <summary>查看技术详情（${bpfObjects.length} 个字节码文件${bpfHooks.length ? ` · ${bpfHooks.length} 个内核挂点` : ''}）</summary>
+              <div class="inst-bpf-sub">目标架构字节码文件：</div>
+              <ul class="inst-bpf-list">${objRows}</ul>
+              ${hookRows}
+            </details>
           </div>`;
       }
 
@@ -1266,12 +1268,17 @@
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">${badges.join('')}</div>
         <div class="inst-sig-box ${esc(sig.boxClass)}" id="instSigBox">
           <div class="inst-sig-head">
-            <span class="inst-sig-title">签名状态：${esc(sig.label)}</span>
-            ${sig.fingerprint ? `<code class="inst-sig-fp" title="${esc(sig.fingerprint)}">公钥指纹 ${esc(sig.fingerprint)}</code>` : ''}
+            <span class="inst-sig-title">${esc(sig.label)}</span>
           </div>
           ${sig.detail ? `<div class="inst-sig-detail">${esc(sig.detail)}</div>` : ''}
+          ${(sig.fingerprint || pv.signature_reason) ? `
+            <details class="tech-details" id="instSigTechDetails">
+              <summary>查看签名技术详情</summary>
+              ${sig.fingerprint ? `<div class="tech-kv"><span>公钥指纹</span><code class="inst-sig-fp">${esc(sig.fingerprint)}</code></div>` : ''}
+              ${pv.signature_reason ? `<div class="tech-kv"><span>校验说明</span><code>${esc(pv.signature_reason)}</code></div>` : ''}
+            </details>` : ''}
         </div>
-        ${sig.blocked ? '<div class="pc-alert-bad" id="instSigBlocked">❌ 签名无效，禁止安装此插件包。</div>' : ''}
+        ${sig.blocked ? '<div class="pc-alert-bad" id="instSigBlocked">❌ 签名无效，已禁止安装此插件包。</div>' : ''}
         ${bpfWarningHtml}
         <div class="section-title" style="margin:8px 0 4px">安装后将立即提供以下能力：</div>
         <ul class="pc-cap-list">${caps || '<li class="muted">未声明能力</li>'}</ul>

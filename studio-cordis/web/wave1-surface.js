@@ -935,7 +935,7 @@
         badgeClass: 'badge-bad',
         boxClass: 'is-bad',
         blocked: true,
-        detail: norm.signature_message || norm.signature_reason || '插件包签名校验失败，禁止安装。',
+        detail: '签名校验未通过，为保护设备安全已禁止安装。',
       };
     }
     if (status === 'verified' && trust === 'trusted_key') {
@@ -947,7 +947,7 @@
         badgeClass: 'badge-ok',
         boxClass: 'is-ok',
         blocked: false,
-        detail: norm.signature_message || '已通过受信任公钥签名校验。',
+        detail: '已通过签名校验，可放心安装。',
       };
     }
     if (status === 'verified') {
@@ -959,7 +959,7 @@
         badgeClass: 'badge-warn',
         boxClass: 'is-warn',
         blocked: false,
-        detail: norm.signature_message || '包内容与签名一致，但使用自声明公钥，非官方可信背书。',
+        detail: '签名完整（自签，非官方背书），确认来源可信后再安装。',
       };
     }
     return {
@@ -970,7 +970,7 @@
       badgeClass: 'badge-muted',
       boxClass: 'is-muted',
       blocked: false,
-      detail: norm.signature_message || '该插件包未附带数字签名。',
+      detail: '未附带数字签名，仅安装你信任来源的插件。',
     };
   }
 
@@ -1003,15 +1003,20 @@
     }
     const overallRaw = resp.overall || (resp.status === 'ok' ? 'green' : resp.status === 'degraded' ? 'yellow' : resp.status === 'blocked' ? 'red' : '');
     const overall = normalizeSelfCheckLevel(overallRaw);
-    const overallMap = { green: '全部就绪', yellow: '部分降级', red: '存在阻塞项' };
+    const overallMap = { green: '已就绪', yellow: '可用（部分受限）', red: '暂不可抓包' };
+    const headlineMap = {
+      green: '这台设备已准备就绪，可以直接开始抓包。',
+      yellow: '设备可以正常抓包，但有部分高级能力受限，不影响基础排查。',
+      red: '设备目前还不能抓包，请先按下面提示处理标红项。',
+    };
     const source = resp.source
       ? String(resp.source)
       : (resp.agent_self_check ? 'agent_self_check' : 'shell_fallback');
     const sourceLabel = source === 'agent_self_check'
-      ? '设备 Agent 自检'
+      ? '设备深度检测'
       : source === 'shell_fallback'
-        ? 'ADB Shell 降级检测'
-        : source;
+        ? '基础环境检测'
+        : '环境检测';
     const levelMap = { green: '通过', yellow: '降级', red: '阻塞' };
     const rawList = Array.isArray(resp.items)
       ? resp.items
@@ -1037,6 +1042,7 @@
       serial: String(resp.serial || ''),
       overall,
       overallLabel: overallMap[overall],
+      headline: headlineMap[overall],
       source,
       sourceLabel,
       arch: resp.arch ? String(resp.arch) : null,
@@ -1170,8 +1176,8 @@
     const reason = hasData
       ? ''
       : (!probeEnabled
-          ? '未开启 TCP 详细探针（tcp_diag / tcp_probe），未采集时间-序号与拥塞窗口/RTT 数据。'
-          : '已开启 TCP 详细探针，但当前流暂无带 tcp_seq / snd_cwnd / srtt_us 的样本点。');
+          ? '本次抓包未开启 TCP 详细探针，默认只记录路径和丢包，不采集拥塞窗口与往返延迟曲线。'
+          : '已开启 TCP 详细探针，但这条连接本次没有采到可用于绘图的传输指标。');
 
     return {
       probeEnabled,

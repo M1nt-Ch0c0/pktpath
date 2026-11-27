@@ -1278,3 +1278,52 @@ body.density-compact .pc-item { padding: 8px 10px; }
   overflow: auto;
 }
 .sc-summary-line { margin-top: 4px; font-size: 12.5px; color: var(--text); font-weight: 500; }
+
+/* ===== Wave 3 UX Declutter: Plain-language Hero & Collapsible Tech Details ===== */
+.sc-hero {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.sc-headline {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.45;
+}
+.sc-tech-meta {
+  font-size: 11.5px;
+  color: var(--text-2);
+  margin: 6px 0 8px;
+}
+.tech-details {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--card);
+}
+.tech-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  user-select: none;
+}
+.tech-details[open] > summary {
+  margin-bottom: 6px;
+  color: var(--text);
+}
+.tech-kv {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
