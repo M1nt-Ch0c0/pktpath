@@ -1,3 +1,4 @@
+#include <elf.h>
 #define _GNU_SOURCE
 #include "../device/device_common.h"
 #include "../include/pktpath_bpf.h"
@@ -73,24 +74,6 @@ static void test_real_pwru_objects(const char *path, const char *label) {
     printf("PASS: test_real_pwru_objects (%s, 19 sections + bounds/EM_BPF checks)\n", label);
 }
 
-static void test_adversarial_elf(const char *path, const char *sec, const char *expect_substr, const char *label) {
-    size_t len = 0;
-    uint8_t *elf = read_all(path, &len);
-    struct ext_bpf_prog_buf out;
-    char err[256] = {0};
-    int rc = bpf_elf_extract_and_relocate(elf, len, sec, 101, 102, 103, 0x2000, &out, err, sizeof(err));
-    free(elf);
-    if (rc == 0) {
-        fprintf(stderr, "FAIL: %s should have been rejected!\n", label);
-        free(out.insns);
-        exit(1);
-    }
-    if (strstr(err, expect_substr) == NULL) {
-        fprintf(stderr, "FAIL: %s err='%s' did not contain '%s'\n", label, err, expect_substr);
-        exit(1);
-    }
-    printf("PASS: test_adversarial_elf (%s -> %s)\n", label, err);
-}
 
 static void test_btf_export_enum_synthetic(void) {
     /* Build minimal valid binary BTF with BTF_KIND_ENUM("skb_drop_reason") + BTF_KIND_ENUM64("big_enum") */
@@ -214,12 +197,111 @@ static void test_bundle_scanner(const char *real_x86_obj, const char *real_sha) 
     printf("PASS: test_bundle_scanner (valid + forged sha256 + arch mismatch)\n");
 }
 
+
+static void test_adversarial_elf_synthetic(const char *target_sec_name,
+                                           const char *sym_name,
+                                           const char *expect_substr,
+                                           const char *label) {
+    /* Build a minimal valid ELF64 LE EM_BPF object in memory:
+     *   sec 0: NULL
+     *   sec 1: .shstrtab
+     *   sec 2: .strtab
+     *   sec 3: .symtab (2 entries: null + sym pointing to sec 4)
+     *   sec 4: <target_sec_name> (".rodata" or "maps")
+     *   sec 5: kp_adv (3 BPF insns: LD_IMM64 (16B) + EXIT (8B))
+     *   sec 6: .relkp_adv (1 Elf64_Rel referencing sym 1 at offset 0)
+     */
+    uint8_t buf[4096];
+    memset(buf, 0, sizeof(buf));
+
+    char shstr[256];
+    size_t shlen = 1; /* leading NUL */
+    uint32_t off_shstr   = (uint32_t)shlen; strcpy(shstr + shlen, ".shstrtab"); shlen += strlen(".shstrtab") + 1;
+    uint32_t off_strtab  = (uint32_t)shlen; strcpy(shstr + shlen, ".strtab");   shlen += strlen(".strtab") + 1;
+    uint32_t off_symtab  = (uint32_t)shlen; strcpy(shstr + shlen, ".symtab");   shlen += strlen(".symtab") + 1;
+    uint32_t off_target  = (uint32_t)shlen; strcpy(shstr + shlen, target_sec_name); shlen += strlen(target_sec_name) + 1;
+    uint32_t off_prog    = (uint32_t)shlen; strcpy(shstr + shlen, "kp_adv");    shlen += strlen("kp_adv") + 1;
+    uint32_t off_rel     = (uint32_t)shlen; strcpy(shstr + shlen, ".relkp_adv"); shlen += strlen(".relkp_adv") + 1;
+
+    char strtab[128];
+    size_t stlen = 1;
+    uint32_t off_sym = (uint32_t)stlen; strcpy(strtab + stlen, sym_name); stlen += strlen(sym_name) + 1;
+
+    Elf64_Sym syms[2];
+    memset(syms, 0, sizeof(syms));
+    syms[1].st_name  = off_sym;
+    syms[1].st_info  = ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT);
+    syms[1].st_shndx = 4; /* target_sec_name */
+    syms[1].st_value = 0;
+    syms[1].st_size  = 16;
+
+    uint8_t target_data[16] = {0};
+
+    /* 3 BPF insns: LD_IMM64 (opcode 0x18, 2 insns) + EXIT (opcode 0x95) */
+    uint8_t insns[24];
+    memset(insns, 0, sizeof(insns));
+    insns[0] = 0x18; /* BPF_LD | BPF_DW | BPF_IMM */
+    insns[16] = 0x95; /* BPF_JMP | BPF_EXIT */
+
+    Elf64_Rel rel;
+    rel.r_offset = 0;
+    rel.r_info   = ELF64_R_INFO(1, 1); /* sym 1, R_BPF_64_64 */
+
+    size_t cur = sizeof(Elf64_Ehdr);
+    size_t shstr_off = cur; memcpy(buf + cur, shstr, shlen); cur = (cur + shlen + 7) & ~7ULL;
+    size_t str_off   = cur; memcpy(buf + cur, strtab, stlen); cur = (cur + stlen + 7) & ~7ULL;
+    size_t sym_off   = cur; memcpy(buf + cur, syms, sizeof(syms)); cur = (cur + sizeof(syms) + 7) & ~7ULL;
+    size_t tgt_off   = cur; memcpy(buf + cur, target_data, sizeof(target_data)); cur = (cur + sizeof(target_data) + 7) & ~7ULL;
+    size_t prg_off   = cur; memcpy(buf + cur, insns, sizeof(insns)); cur = (cur + sizeof(insns) + 7) & ~7ULL;
+    size_t rel_off   = cur; memcpy(buf + cur, &rel, sizeof(rel)); cur = (cur + sizeof(rel) + 7) & ~7ULL;
+    size_t shdr_off  = cur;
+
+    Elf64_Shdr sh[7];
+    memset(sh, 0, sizeof(sh));
+    sh[1].sh_name = off_shstr;  sh[1].sh_type = SHT_STRTAB;   sh[1].sh_offset = shstr_off; sh[1].sh_size = shlen;
+    sh[2].sh_name = off_strtab; sh[2].sh_type = SHT_STRTAB;   sh[2].sh_offset = str_off;   sh[2].sh_size = stlen;
+    sh[3].sh_name = off_symtab; sh[3].sh_type = SHT_SYMTAB;   sh[3].sh_offset = sym_off;   sh[3].sh_size = sizeof(syms);
+    sh[3].sh_link = 2;          sh[3].sh_entsize = sizeof(Elf64_Sym);
+    sh[4].sh_name = off_target; sh[4].sh_type = SHT_PROGBITS; sh[4].sh_offset = tgt_off;   sh[4].sh_size = sizeof(target_data);
+    sh[5].sh_name = off_prog;   sh[5].sh_type = SHT_PROGBITS; sh[5].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+    sh[5].sh_offset = prg_off;  sh[5].sh_size = sizeof(insns);
+    sh[6].sh_name = off_rel;    sh[6].sh_type = SHT_REL;      sh[6].sh_offset = rel_off;   sh[6].sh_size = sizeof(rel);
+    sh[6].sh_link = 3;          sh[6].sh_info = 5;            sh[6].sh_entsize = sizeof(Elf64_Rel);
+
+    memcpy(buf + shdr_off, sh, sizeof(sh));
+    size_t total = shdr_off + sizeof(sh);
+
+    Elf64_Ehdr eh;
+    memset(&eh, 0, sizeof(eh));
+    memcpy(eh.e_ident, ELFMAG, SELFMAG);
+    eh.e_ident[EI_CLASS] = ELFCLASS64;
+    eh.e_ident[EI_DATA]  = ELFDATA2LSB;
+    eh.e_ident[EI_VERSION] = EV_CURRENT;
+    eh.e_type      = ET_REL;
+    eh.e_machine   = 247; /* EM_BPF */
+    eh.e_version   = EV_CURRENT;
+    eh.e_shoff     = shdr_off;
+    eh.e_ehsize    = sizeof(Elf64_Ehdr);
+    eh.e_shentsize = sizeof(Elf64_Shdr);
+    eh.e_shnum     = 7;
+    eh.e_shstrndx  = 1;
+    memcpy(buf, &eh, sizeof(eh));
+
+    struct ext_bpf_prog_buf out;
+    char err[256] = {0};
+    int rc = bpf_elf_extract_and_relocate(buf, total, "kp_adv", 10, 11, 12,
+                                          0x2000U, &out, err, sizeof(err));
+    assert(rc != 0);
+    assert(strstr(err, expect_substr) != NULL);
+    printf("PASS: test_adversarial_elf_synthetic (%s -> %s)\n", label, err);
+}
+
 int main(void) {
     test_sha256_vectors();
     test_real_pwru_objects("plugins/official/pktpath-pwru-probes/bpf/arm64/pwru_probes.bpf.o", "arm64");
     test_real_pwru_objects("plugins/official/pktpath-pwru-probes/bpf/x86_64/pwru_probes.bpf.o", "x86_64");
-    test_adversarial_elf("/tmp/adv_rodata.bpf.o", "kp_bad_rodata", "rodata", "rodata rejection");
-    test_adversarial_elf("/tmp/adv_control.bpf.o", "kp_bad_ctrl", "forbidden map/symbol", "control map rejection");
+    test_adversarial_elf_synthetic(".rodata", "forbidden_tbl", "rodata", "rodata rejection");
+    test_adversarial_elf_synthetic("maps", "control", "forbidden map/symbol", "control map rejection");
     test_btf_export_enum_synthetic();
 
     char x86_sha[65] = {0};

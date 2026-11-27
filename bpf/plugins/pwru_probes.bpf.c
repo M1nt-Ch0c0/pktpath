@@ -124,9 +124,12 @@ struct tp_tcp_retransmit_skb_ctx {
 
 SEC("tp_tcp_retransmit_skb")
 int prog_tp_tcp_retransmit_skb(struct tp_tcp_retransmit_skb_ctx *ctx) {
-    uint64_t skb = 0;
+    uint64_t skb = 0, sk = 0;
     bpf_probe_read_kernel(&skb, sizeof(skb), &ctx->skbaddr);
-    return pkt_plugin_emit_step(skb, PKT_DIR_TX, PKT_STAGE_REQUEUE_GSO, 0);
+    bpf_probe_read_kernel(&sk, sizeof(sk), &ctx->skaddr);
+    pkt_plugin_emit_tcp_step(skb, (const void *)(unsigned long)sk, 0,
+                             PKT_DIR_TX, PKT_STAGE_REQUEUE_GSO, 0);
+    return 0;
 }
 
 struct tp_inet_sock_set_state_ctx {
@@ -142,7 +145,9 @@ int prog_tp_inet_sock_set_state(struct tp_inet_sock_set_state_ctx *ctx) {
     int32_t newst = 0;
     bpf_probe_read_kernel(&sk, sizeof(sk), &ctx->skaddr);
     bpf_probe_read_kernel(&newst, sizeof(newst), &ctx->newstate);
-    return pkt_plugin_emit_step(sk, PKT_DIR_TX, PKT_STAGE_HANDOFF_LAYER, newst);
+    pkt_plugin_emit_tcp_step(sk, (const void *)(unsigned long)sk, 0,
+                             PKT_DIR_TX, PKT_STAGE_HANDOFF_LAYER, newst);
+    return 0;
 }
 
 /* ---- Group: tcp_probe (9th opt-in high-noise group) ---- */
@@ -159,13 +164,49 @@ struct tp_tcp_probe_ctx {
     uint32_t snd_nxt;
     uint32_t snd_una;
     uint32_t snd_cwnd;
+    uint32_t ssthresh;
+    uint32_t snd_wnd;
+    uint32_t srtt;
 };
 
 SEC("tp_tcp_probe")
 int prog_tp_tcp_probe(struct tp_tcp_probe_ctx *ctx) {
-    uint32_t cwnd = 0;
-    bpf_probe_read_kernel(&cwnd, sizeof(cwnd), &ctx->snd_cwnd);
-    return pkt_plugin_emit_step(0, PKT_DIR_TX, PKT_STAGE_HANDOFF_LAYER, (int32_t)cwnd);
+    struct bpf_ev_step *ev = bpf_ringbuf_reserve(&rb, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+    uint16_t flags = 0;
+    uint32_t seq = 0, cwnd = 0, srtt = 0;
+    if (bpf_probe_read_kernel(&seq, sizeof(seq), &ctx->snd_nxt) == 0)
+        flags |= (uint16_t)PKT_EVF_HAS_TCP_SEQ;
+    if (bpf_probe_read_kernel(&cwnd, sizeof(cwnd), &ctx->snd_cwnd) == 0)
+        flags |= (uint16_t)PKT_EVF_HAS_TCP_CWND;
+    if (bpf_probe_read_kernel(&srtt, sizeof(srtt), &ctx->srtt) == 0)
+        flags |= (uint16_t)PKT_EVF_HAS_TCP_SRTT;
+
+    ev->h.kind           = PKT_EV_STEP;
+    ev->h.object_type    = PKT_OBJ_SKB;
+    ev->h.evidence_level = PKT_EVID_DIRECT;
+    *(volatile uint16_t *)&ev->h.site_dict_idx = (uint16_t)PKT_SITE_EXT_SENTINEL;
+    ev->h.flags          = flags;
+    ev->h.cpu            = bpf_get_smp_processor_id();
+    ev->h.reserved       = 0;
+    ev->h.seq            = 0;
+    ev->h.ts_ns          = bpf_ktime_get_boot_ns();
+
+    ev->object_id        = 0;
+    ev->visit_or_call_id = 0;
+    ev->netns_inum       = 0;
+    ev->ifindex          = 0;
+    ev->qdisc_handle     = seq;
+    ev->qdisc_parent     = cwnd;
+    ev->classid          = srtt;
+    ev->raw_ret          = 0;
+    ev->ctx_tid          = (uint32_t)bpf_get_current_pid_tgid();
+    ev->txq              = 0;
+    ev->dir              = PKT_DIR_TX;
+    ev->stage            = PKT_STAGE_HANDOFF_LAYER;
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
 }
 
 char _license[] SEC("license") = "GPL";

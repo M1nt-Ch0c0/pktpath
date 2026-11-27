@@ -639,7 +639,7 @@ static void parse_one_bundle(const char *subdir_path, const char *bundle_path,
     memset(b, 0, sizeof(*b));
     FILE *fp = fopen(bundle_path, "rb");
     if (!fp) {
-        snprintf(b->error, sizeof(b->error), "cannot open %s: %s", bundle_path, strerror(errno));
+        snprintf(b->error, sizeof(b->error), "cannot open %.160s: %.60s", bundle_path, strerror(errno));
         return;
     }
     char *buf = malloc(128U * 1024U);
@@ -733,14 +733,14 @@ static void parse_one_bundle(const char *subdir_path, const char *bundle_path,
         return;
     }
 
-    snprintf(b->object_path, sizeof(b->object_path), "%s/%s", subdir_path, b->object_rel);
+    snprintf(b->object_path, sizeof(b->object_path), "%.250s/%.250s", subdir_path, b->object_rel);
     char sha_err[128] = {0};
     if (pkt_sha256_file(b->object_path, b->actual_sha256, NULL, sha_err, sizeof(sha_err)) != 0) {
-        snprintf(b->error, sizeof(b->error), "failed hashing %s: %s", b->object_rel, sha_err);
+        snprintf(b->error, sizeof(b->error), "failed hashing %.100s: %.100s", b->object_rel, sha_err);
         return;
     }
     if (!hex_equal_ci(b->expected_sha256, b->actual_sha256)) {
-        snprintf(b->error, sizeof(b->error), "sha256 mismatch for %s (expected %.12s..., got %.12s...)",
+        snprintf(b->error, sizeof(b->error), "sha256 mismatch for %.120s (expected %.12s..., got %.12s...)",
                  b->object_rel, b->expected_sha256, b->actual_sha256);
         return;
     }

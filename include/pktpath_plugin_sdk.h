@@ -158,4 +158,97 @@ static __always_inline int pkt_plugin_emit_step(uint64_t skb_ptr,
     return 0;
 }
 
+
+static __always_inline void
+pkt_plugin_emit_tcp_step(uint64_t object_id, const void *sk_ptr,
+                         uint32_t ifindex, uint8_t dir,
+                         uint8_t stage, int32_t raw_ret)
+{
+    struct bpf_ev_step *ev = bpf_ringbuf_reserve(&rb, sizeof(*ev), 0);
+    if (!ev)
+        return;
+
+    uint16_t flags = 0;
+    uint32_t tcp_seq = 0;
+    uint32_t snd_cwnd = 0;
+    uint32_t srtt_us = 0;
+
+    if (sk_ptr) {
+        uint32_t zero = 0;
+        struct bpf_plugin_cfg *cfg = bpf_map_lookup_elem(&plugin_cfg, &zero);
+        if (cfg) {
+            uint32_t off_seq  = cfg->extra_off[PKT_PLUG_OFF_TCP_SND_NXT];
+            uint32_t off_cwnd = cfg->extra_off[PKT_PLUG_OFF_TCP_SND_CWND];
+            uint32_t off_srtt = cfg->extra_off[PKT_PLUG_OFF_TCP_SRTT_US];
+
+            if (off_seq != PKT_PLUG_OFF_UNSET && off_seq < 4096U) {
+                uint32_t v = 0;
+                if (bpf_probe_read_kernel(&v, sizeof(v), (const char *)sk_ptr + off_seq) == 0) {
+                    tcp_seq = v;
+                    flags |= (uint16_t)PKT_EVF_HAS_TCP_SEQ;
+                }
+            }
+            if (off_cwnd != PKT_PLUG_OFF_UNSET && off_cwnd < 4096U) {
+                uint32_t v = 0;
+                if (bpf_probe_read_kernel(&v, sizeof(v), (const char *)sk_ptr + off_cwnd) == 0) {
+                    snd_cwnd = v;
+                    flags |= (uint16_t)PKT_EVF_HAS_TCP_CWND;
+                }
+            }
+            if (off_srtt != PKT_PLUG_OFF_UNSET && off_srtt < 4096U) {
+                uint32_t v = 0;
+                if (bpf_probe_read_kernel(&v, sizeof(v), (const char *)sk_ptr + off_srtt) == 0) {
+                    srtt_us = v >> 3;
+                    flags |= (uint16_t)PKT_EVF_HAS_TCP_SRTT;
+                }
+            }
+        }
+    }
+
+    ev->h.kind           = PKT_EV_STEP;
+    ev->h.object_type    = PKT_OBJ_SKB;
+    ev->h.evidence_level = PKT_EVID_DIRECT;
+    *(volatile uint16_t *)&ev->h.site_dict_idx = (uint16_t)PKT_SITE_EXT_SENTINEL;
+    ev->h.flags          = flags;
+    ev->h.cpu            = bpf_get_smp_processor_id();
+    ev->h.reserved       = 0;
+    ev->h.seq            = 0;
+    ev->h.ts_ns          = bpf_ktime_get_boot_ns();
+
+    ev->object_id        = object_id;
+    ev->visit_or_call_id = 0;
+    ev->netns_inum       = 0;
+    ev->ifindex          = ifindex;
+    ev->qdisc_handle     = tcp_seq;
+    ev->qdisc_parent     = snd_cwnd;
+    ev->classid          = srtt_us;
+    ev->raw_ret          = raw_ret;
+    ev->ctx_tid          = (uint32_t)bpf_get_current_pid_tgid();
+    ev->txq              = 0;
+    ev->dir              = dir;
+    ev->stage            = stage;
+
+    bpf_ringbuf_submit(ev, 0);
+}
+
+static __always_inline void
+pkt_plugin_emit_tcp_step_from_skb(const void *skb_ptr, uint32_t ifindex,
+                                  uint8_t dir, uint8_t stage, int32_t raw_ret)
+{
+    const void *sk_ptr = (const void *)0;
+    if (skb_ptr) {
+        uint32_t zero = 0;
+        struct bpf_plugin_cfg *cfg = bpf_map_lookup_elem(&plugin_cfg, &zero);
+        if (cfg) {
+            uint32_t off_sk = cfg->extra_off[PKT_PLUG_OFF_SKB_SK];
+            if (off_sk != PKT_PLUG_OFF_UNSET && off_sk < 512U) {
+                const void *tmp = (const void *)0;
+                if (bpf_probe_read_kernel(&tmp, sizeof(tmp), (const char *)skb_ptr + off_sk) == 0)
+                    sk_ptr = tmp;
+            }
+        }
+    }
+    pkt_plugin_emit_tcp_step((uint64_t)(unsigned long)skb_ptr, sk_ptr, ifindex, dir, stage, raw_ret);
+}
+
 #endif /* PKTPATH_PLUGIN_SDK_H */

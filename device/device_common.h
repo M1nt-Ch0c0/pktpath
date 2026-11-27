@@ -470,4 +470,6 @@ int bpf_bundle_scan_dir(const char *plugin_dir, const char *host_arch,
 int run_inspect(const struct dev_cli_opts *opts);
 int run_record(const struct dev_cli_opts *opts);
 
+int device_self_check(void);
+
 #endif /* PKTPATH_DEVICE_COMMON_H */

@@ -8,11 +8,11 @@
     "objects": {
       "arm64": {
         "path": "bpf/arm64/pwru_probes.bpf.o",
-        "sha256": "2aa06ec1c80b088a2993a5d4982ea14db856df507a4bdabeb3ef3fcbfed6c361"
+        "sha256": "8e8f28bb058b3cf4aafe611321b98f1464b3d775d879330020f6b5127ec59963"
       },
       "x86_64": {
         "path": "bpf/x86_64/pwru_probes.bpf.o",
-        "sha256": "052c345a44320a05f6bc0c098f3b52fcac09ced009b63c836b166fe0b3180eff"
+        "sha256": "ce46da24d4004948a6995831c454e19a3362f01421177a9109148c7565b9a46e"
       }
     },
     "hooks": [
@@ -169,5 +169,12 @@
         "stage": "tcp_probe"
       }
     ]
+  },
+  "category": "collector",
+  "capabilities": [
+    "collector.bpf-probes"
+  ],
+  "entrypoint": {
+    "module": "index.mjs"
   }
 }

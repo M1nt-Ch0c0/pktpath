@@ -495,6 +495,7 @@ struct probe_plan {
     bool                      btf_available;
     bool                      drop_reason_available;
     bool                      stack_symbolize_available;
+    uint32_t                  ext_tcp_off[4]; /* PKT_PLUG_OFF_* or PKT_PLUG_OFF_UNSET */
     size_t                    num_drop_reasons;
     struct btf_enum_entry     drop_reasons[256];
 };
@@ -576,6 +577,22 @@ static const char *site_qdisc_kind(const struct probe_plan *plan, uint16_t site_
     return inferred_qdisc_kind_for_site(site_id);
 }
 
+static bool kallsyms_has_nonzero_addrs(void) {
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) return false;
+    char line[256];
+    bool nonzero = false;
+    for (int i = 0; i < 64 && fgets(line, sizeof(line), f); i++) {
+        unsigned long long addr = 0;
+        if (sscanf(line, "%llx", &addr) == 1 && addr != 0ULL) {
+            nonzero = true;
+            break;
+        }
+    }
+    fclose(f);
+    return nonzero;
+}
+
 static int build_probe_plan(const struct dev_cli_opts *opts,
                             const struct topo_mgr *topo,
                             struct probe_plan *plan,
@@ -622,7 +639,19 @@ static int build_probe_plan(const struct dev_cli_opts *opts,
     } else {
         plan->drop_reason_available = false;
     }
-    plan->stack_symbolize_available = (access("/proc/kallsyms", R_OK) == 0);
+    plan->stack_symbolize_available = kallsyms_has_nonzero_addrs();
+    for (int i = 0; i < 4; i++) plan->ext_tcp_off[i] = PKT_PLUG_OFF_UNSET;
+    {
+        uint32_t off_v = 0;
+        if (btf_resolve_field(bdb, "tcp_sock", "snd_nxt", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SND_NXT] = off_v;
+        if (btf_resolve_field(bdb, "tcp_sock", "snd_cwnd", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SND_CWND] = off_v;
+        if (btf_resolve_field(bdb, "tcp_sock", "srtt_us", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SRTT_US] = off_v;
+        if (btf_resolve_field(bdb, "sk_buff", "sk", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_SKB_SK] = off_v;
+    }
     if (plugin_registry_load(opts, bdb, &plan->plugins, err_buf, err_cap) != 0) {
         btf_db_free(bdb);
         return -1;
@@ -1686,9 +1715,19 @@ static void transcode_bpf_record(struct recorder_ctx *rec, const uint8_t *raw, u
         tlv_put_u8(out, &off, PKT_TLV_STEP_DIR, st->dir);
         tlv_put_u8(out, &off, PKT_TLV_STEP_STAGE, st->stage);
         if (qgen != 0)  tlv_put_u64(out, &off, PKT_TLV_STEP_QUEUE_GEN, qgen);
-        if (qh != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_HANDLE, qh);
-        if (qp != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_PARENT, qp);
-        if (cls != 0)   tlv_put_u32(out, &off, PKT_TLV_STEP_CLASSID, cls);
+        bool has_tcp_meta = (st->h.flags & (PKT_EVF_HAS_TCP_SEQ | PKT_EVF_HAS_TCP_CWND | PKT_EVF_HAS_TCP_SRTT)) != 0;
+        if (has_tcp_meta) {
+            if (st->h.flags & PKT_EVF_HAS_TCP_SEQ)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_TCP_SEQ, st->qdisc_handle);
+            if (st->h.flags & PKT_EVF_HAS_TCP_CWND)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_SND_CWND, st->qdisc_parent);
+            if (st->h.flags & PKT_EVF_HAS_TCP_SRTT)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_SRTT_US, st->classid);
+        } else {
+            if (qh != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_HANDLE, qh);
+            if (qp != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_PARENT, qp);
+            if (cls != 0)   tlv_put_u32(out, &off, PKT_TLV_STEP_CLASSID, cls);
+        }
         if (st->stage == PKT_STAGE_XMIT_START || st->txq != 0)
             tlv_put_u16(out, &off, PKT_TLV_STEP_TXQ, st->txq);
         if (st->stage == PKT_STAGE_QDISC_ENQ_RET || st->stage == PKT_STAGE_XMIT_RET || st->raw_ret != 0)
@@ -2540,6 +2579,10 @@ static int setup_bpf_maps(struct recorder_ctx *rec) {
     pcfg.abi_version    = PKT_PLUGIN_ABI_VERSION;
     pcfg.target_ifindex = rec->plan.target_ifindex;
     pcfg.filter_uid     = rec->opts->has_uid ? rec->opts->uid : PKT_FILTER_UID_ANY;
+    for (size_t i = 0; i < 32; i++)
+        pcfg.extra_off[i] = PKT_PLUG_OFF_UNSET;
+    for (int i = 0; i < 4; i++)
+        pcfg.extra_off[i] = rec->plan.ext_tcp_off[i];
     if (bpf_map_update(rec->map_fds[PKT_MAP_PLUGIN_CFG], &z, &pcfg, 0) < 0) {
         fprintf(stderr, "record error: update plugin_cfg map failed: %s\n", strerror(errno));
         return -1;
@@ -3253,4 +3296,176 @@ int run_record(const struct dev_cli_opts *opts) {
 
     cleanup_recorder(&rec);
     return exit_code;
+}
+
+
+/* ==================== Wave 3 Expansion: Device Self-Check ==================== */
+
+static int read_sysctl_int(const char *path, int *out_val) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int v = 0;
+    int ok = (fscanf(f, "%d", &v) == 1) ? 0 : -1;
+    fclose(f);
+    if (ok == 0 && out_val) *out_val = v;
+    return ok;
+}
+
+int device_self_check(void) {
+    struct utsname uts;
+    memset(&uts, 0, sizeof(uts));
+    (void)uname(&uts);
+
+    const char *arch = uts.machine;
+    if (strcmp(uts.machine, "aarch64") == 0) arch = "arm64";
+    else if (strcmp(uts.machine, "x86_64") == 0) arch = "x86_64";
+
+    uid_t uid = geteuid();
+    bool is_root = (uid == 0);
+
+    const char *btf_path = "/sys/kernel/btf/vmlinux";
+    bool btf_readable = (access(btf_path, R_OK) == 0);
+    int drop_reason_cnt = 0;
+    bool has_snd_nxt = false, has_snd_cwnd = false, has_srtt_us = false;
+    if (btf_readable) {
+        char berr[128] = {0};
+        struct btf_db *bdb = btf_db_load(btf_path, berr, sizeof(berr));
+        if (bdb) {
+            struct btf_enum_entry *entries = calloc(512, sizeof(*entries));
+            if (entries) {
+                size_t n = 0;
+                if (btf_export_enum(bdb, "skb_drop_reason", entries, 512, &n) == 0)
+                    drop_reason_cnt = (int)n;
+                free(entries);
+            }
+            uint32_t off_v = 0;
+            has_snd_nxt  = (btf_resolve_field(bdb, "tcp_sock", "snd_nxt", &off_v) == 0);
+            has_snd_cwnd = (btf_resolve_field(bdb, "tcp_sock", "snd_cwnd", &off_v) == 0);
+            has_srtt_us  = (btf_resolve_field(bdb, "tcp_sock", "srtt_us", &off_v) == 0);
+            btf_db_free(bdb);
+        } else {
+            btf_readable = false;
+        }
+    }
+
+    int kptr = 0, unpriv = 0, paranoid = 0;
+    bool has_kptr     = (read_sysctl_int("/proc/sys/kernel/kptr_restrict", &kptr) == 0);
+    bool has_unpriv   = (read_sysctl_int("/proc/sys/kernel/unprivileged_bpf_disabled", &unpriv) == 0);
+    bool has_paranoid = (read_sysctl_int("/proc/sys/kernel/perf_event_paranoid", &paranoid) == 0);
+
+    const char *tfs = tracefs_root();
+    static const char *core_tps[] = {
+        "skb:kfree_skb",
+        "net:net_dev_queue",
+        "net:net_dev_xmit",
+        "tcp:tcp_retransmit_skb"
+    };
+    bool tp_ok[4] = {false, false, false, false};
+    int tp_avail = 0;
+    for (int i = 0; i < 4; i++) {
+        const char *colon = strchr(core_tps[i], ':');
+        if (colon) {
+            char cat[32] = {0};
+            size_t clen = (size_t)(colon - core_tps[i]);
+            if (clen < sizeof(cat)) {
+                memcpy(cat, core_tps[i], clen);
+                cat[clen] = '\0';
+                tp_ok[i] = tracefs_event_exists(cat, colon + 1);
+                if (tp_ok[i]) tp_avail++;
+            }
+        }
+    }
+
+    static const char *core_kps[] = {
+        "ip_rcv",
+        "nf_hook_slow",
+        "tcp_v4_rcv",
+        "tcp_transmit_skb"
+    };
+    bool kp_ok[4] = {false, false, false, false};
+    int kp_avail = 0;
+    char kerr[128] = {0};
+    struct ksym_db *kdb = ksym_db_load("/proc/kallsyms", kerr, sizeof(kerr));
+    if (kdb) {
+        for (int i = 0; i < 4; i++) {
+            char rsym[128] = {0};
+            if (ksym_resolve(kdb, core_kps[i], rsym, sizeof(rsym)) == 0) {
+                kp_ok[i] = true;
+                kp_avail++;
+            }
+        }
+        ksym_db_free(kdb);
+    }
+
+    const char *lvl_root = is_root ? "green" : "red";
+    const char *lvl_btf  = (btf_readable && drop_reason_cnt > 0) ? "green"
+                         : (btf_readable ? "yellow" : "yellow");
+    const char *lvl_tcp  = (has_snd_nxt && has_snd_cwnd && has_srtt_us) ? "green" : "yellow";
+    bool ksym_nonzero = kallsyms_has_nonzero_addrs();
+    const char *lvl_kptr = (!has_kptr) ? "yellow"
+                         : (ksym_nonzero && (kptr == 0 || is_root)) ? "green" : "yellow";
+    const char *lvl_prb  = (tp_avail == 4 && kp_avail == 4) ? "green"
+                         : (tp_avail > 0 || kp_avail > 0) ? "yellow" : "red";
+
+    const char *overall = "ok";
+    if (strcmp(lvl_root, "red") == 0 || strcmp(lvl_prb, "red") == 0)
+        overall = "blocked";
+    else if (strcmp(lvl_btf, "yellow") == 0 || strcmp(lvl_tcp, "yellow") == 0 ||
+             strcmp(lvl_kptr, "yellow") == 0 || strcmp(lvl_prb, "yellow") == 0)
+        overall = "degraded";
+
+    printf("{\n");
+    printf("  \"schema_version\": 1,\n");
+    printf("  \"status\": \"%s\",\n", overall);
+    printf("  \"kernel_release\": \"%s\",\n", uts.release);
+    printf("  \"arch\": \"%s\",\n", arch);
+    printf("  \"uid\": %u,\n", (unsigned)uid);
+    printf("  \"is_root\": %s,\n", is_root ? "true" : "false");
+    printf("  \"btf\": {\n");
+    printf("    \"path\": \"%s\",\n", btf_path);
+    printf("    \"readable\": %s,\n", btf_readable ? "true" : "false");
+    printf("    \"skb_drop_reason_count\": %d,\n", drop_reason_cnt);
+    printf("    \"tcp_sock_fields\": { \"snd_nxt\": %s, \"snd_cwnd\": %s, \"srtt_us\": %s }\n",
+           has_snd_nxt ? "true" : "false",
+           has_snd_cwnd ? "true" : "false",
+           has_srtt_us ? "true" : "false");
+    printf("  },\n");
+    printf("  \"sysctl\": {\n");
+    if (has_kptr)     printf("    \"kptr_restrict\": %d,\n", kptr);
+    else              printf("    \"kptr_restrict\": null,\n");
+    if (has_unpriv)   printf("    \"unprivileged_bpf_disabled\": %d,\n", unpriv);
+    else              printf("    \"unprivileged_bpf_disabled\": null,\n");
+    if (has_paranoid) printf("    \"perf_event_paranoid\": %d\n", paranoid);
+    else              printf("    \"perf_event_paranoid\": null\n");
+    printf("  },\n");
+    printf("  \"probes\": {\n");
+    if (tfs && tfs[0]) printf("    \"tracefs_mount\": \"%s\",\n", tfs);
+    else               printf("    \"tracefs_mount\": null,\n");
+    printf("    \"core_tracepoints\": [");
+    for (int i = 0; i < 4; i++) {
+        printf("%s{\"name\":\"%s\",\"available\":%s}",
+               i ? "," : "", core_tps[i], tp_ok[i] ? "true" : "false");
+    }
+    printf("],\n");
+    printf("    \"core_kprobes\": [");
+    for (int i = 0; i < 4; i++) {
+        printf("%s{\"symbol\":\"%s\",\"available\":%s}",
+               i ? "," : "", core_kps[i], kp_ok[i] ? "true" : "false");
+    }
+    printf("]\n");
+    printf("  },\n");
+    printf("  \"checks\": [\n");
+    printf("    {\"id\":\"root_priv\",\"level\":\"%s\",\"label\":\"Root / BPF 权限\",\"detail\":\"euid=%u\"},\n",
+           lvl_root, (unsigned)uid);
+    printf("    {\"id\":\"vmlinux_btf\",\"level\":\"%s\",\"label\":\"内核 BTF 与 drop_reason 枚举\",\"detail\":\"readable=%s, drop_reasons=%d\"},\n",
+           lvl_btf, btf_readable ? "true" : "false", drop_reason_cnt);
+    printf("    {\"id\":\"tcp_sock_btf\",\"level\":\"%s\",\"label\":\"tcp_sock 字段 (cwnd/RTT)\",\"detail\":\"snd_nxt=%s,snd_cwnd=%s,srtt_us=%s\"},\n",
+           lvl_tcp, has_snd_nxt ? "ok" : "missing", has_snd_cwnd ? "ok" : "missing", has_srtt_us ? "ok" : "missing");
+    printf("    {\"id\":\"kptr_restrict\",\"level\":\"%s\",\"label\":\"内核符号可见性 (kptr_restrict)\",\"detail\":\"value=%s%d, kallsyms_nonzero=%s\"},\n",
+           lvl_kptr, has_kptr ? "" : "unreadable:", has_kptr ? kptr : -1, ksym_nonzero ? "true" : "false");
+    printf("    {\"id\":\"core_probes\",\"level\":\"%s\",\"label\":\"核心 tracepoint / kprobe 符号\",\"detail\":\"tracepoints=%d/4, kprobes=%d/4\"}\n",
+           lvl_prb, tp_avail, kp_avail);
+    printf("  ]\n");
+    printf("}\n");
+    return 0;
 }

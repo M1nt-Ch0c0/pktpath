@@ -116,7 +116,10 @@ enum pkt_evid_level {
 enum pkt_ev_flags {
     PKT_EVF_IN_TASK          = (1U << 0),
     PKT_EVF_NONLINEAR_TRUNC  = (1U << 1),
-    PKT_EVF_PARTIAL_COVERAGE = (1U << 2)
+    PKT_EVF_PARTIAL_COVERAGE = (1U << 2),
+    PKT_EVF_HAS_TCP_SEQ      = (1U << 8),
+    PKT_EVF_HAS_TCP_CWND     = (1U << 9),
+    PKT_EVF_HAS_TCP_SRTT     = (1U << 10)
 };
 
 /* Active skb lifecycle states (详细设计 §3.3) */
@@ -239,6 +242,12 @@ enum pkt_summary_valid_flags {
 #define PKT_SITE_EXT_MIN          0x2000U
 #define PKT_SITE_EXT_MAX          0xFFFEU
 #define PKT_SITE_EXT_SENTINEL     0x7E00U
+
+#define PKT_PLUG_OFF_UNSET        0xFFFFFFFFU
+#define PKT_PLUG_OFF_TCP_SND_NXT  0U
+#define PKT_PLUG_OFF_TCP_SND_CWND 1U
+#define PKT_PLUG_OFF_TCP_SRTT_US  2U
+#define PKT_PLUG_OFF_SKB_SK       3U
 
 struct bpf_plugin_cfg {
     uint32_t abi_version;

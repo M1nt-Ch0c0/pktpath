@@ -12,6 +12,7 @@
 static void print_usage(FILE *fp) {
     fprintf(fp,
         "Usage:\n"
+        "  pktpath --self-check | pktpath self-check\n"
         "  pktpath inspect --dev <ifname> --scope <tc-egress|ip-tx|sock-tx|rx-sock|fwd>\n"
         "    [--plugin <file.json>]... [--plugin-dir <dir>] [--json]\n"
         "  pktpath record --mode <oneshot|daemon> --dev <ifname> --scope <...>\n"
@@ -200,6 +201,9 @@ int main(int argc, char **argv) {
 
     bool duration_set = false;
 
+    if (strcmp(argv[1], "--self-check") == 0 || strcmp(argv[1], "self-check") == 0) {
+        return device_self_check();
+    }
     if (strcmp(argv[1], "inspect") == 0) {
         opts.is_record = false;
     } else if (strcmp(argv[1], "record") == 0) {

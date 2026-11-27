@@ -88,5 +88,23 @@ class TestWave3CliAndPwruPlugin(unittest.TestCase):
             self.assertTrue(h["id"])
 
 
+    def test_self_check_json_contract(self):
+        if not BIN_X86.exists():
+            self.skipTest("bin/pktpath-linux-x86_64 not built")
+        for flag in ("--self-check", "self-check"):
+            res = subprocess.run([str(BIN_X86), flag], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"{flag} stderr={res.stderr}")
+            data = json.loads(res.stdout)
+            self.assertEqual(data["schema_version"], 1)
+            self.assertIn(data["status"], ("ok", "degraded", "blocked"))
+            self.assertIn("btf", data)
+            self.assertIn("tcp_sock_fields", data["btf"])
+            self.assertIn("sysctl", data)
+            self.assertIn("probes", data)
+            self.assertIsInstance(data["checks"], list)
+            self.assertEqual(len(data["checks"]), 5)
+            for chk in data["checks"]:
+                self.assertIn(chk["level"], ("green", "yellow", "red"))
+
 if __name__ == "__main__":
     unittest.main()
