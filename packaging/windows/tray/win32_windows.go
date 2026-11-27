@@ -13,6 +13,7 @@ const (
 	wmClose           = 0x0010
 	wmQueryEndSession = 0x0011
 	wmEndSession      = 0x0016
+	wmContextMenu     = 0x007B
 	wmCommand         = 0x0111
 	wmRButtonUp       = 0x0205
 	wmLButtonUp       = 0x0202
@@ -162,6 +163,7 @@ func utf16Ptr(s string) *uint16 {
 }
 
 func copyUTF16(dst []uint16, s string) {
+	clear(dst)
 	u, _ := syscall.UTF16FromString(s)
 	n := len(u)
 	if n > len(dst) {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"time"
 )
 
@@ -12,6 +13,12 @@ func main() {
 }
 
 func runWindowsTray() int {
+	// Win32 windows and their message loops are strictly thread-affine.
+	// Lock this goroutine to one OS thread before creating any window or
+	// running GetMessageW so tray clicks, WM_CLOSE, and wmActivate always land.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	opt := ParseTrayArgs(os.Args[1:], os.Getenv, currentExecutable())
 	host := newTrayHost(opt)
 	globalTray = host
@@ -67,6 +74,7 @@ func runWindowsTray() int {
 	}
 	host.hwnd = hwnd
 	allowMessage(hwnd, wmActivate)
+	allowMessage(hwnd, wmClose)
 	host.tbCreated = registerTaskbarCreated()
 	if host.tbCreated != 0 {
 		allowMessage(hwnd, host.tbCreated)
@@ -80,7 +88,7 @@ func runWindowsTray() int {
 		if err := host.launcher.Start(); err != nil {
 			host.consumePendingOpen()
 			host.setTip("PktPath Studio 启动失败，请查看日志")
-			messageBox(hwnd, err.Error()+"\n\n日志目录：\n"+host.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+			messageBox(0, err.Error()+"\n\n日志目录：\n"+host.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 			// Exit the tray cleanly instead of leaving an empty shell holding
 			// the single-instance mutex.
 			postMessage(hwnd, wmClose, 0, 0)

@@ -18,6 +18,7 @@ type TrayHost struct {
 	hwnd      uintptr
 	hInst     uintptr
 	hIcon     uintptr
+	nidMu     sync.Mutex
 	nid       notifyIconDataW
 	tbCreated uint32
 
@@ -53,12 +54,23 @@ func (h *TrayHost) setTip(s string) {
 	if h.hwnd == 0 {
 		return
 	}
+	h.nidMu.Lock()
+	defer h.nidMu.Unlock()
+	if h.nid.CbSize == 0 {
+		h.nid.CbSize = uint32(unsafe.Sizeof(h.nid))
+		h.nid.HWnd = h.hwnd
+		h.nid.UID = 1
+		h.nid.UCallbackMessage = wmTray
+		h.nid.HIcon = h.hIcon
+	}
 	h.nid.UFlags = nifMessage | nifIcon | nifTip
 	copyUTF16(h.nid.SzTip[:], s)
 	notifyIcon(nimModify, &h.nid)
 }
 
 func (h *TrayHost) addIcon() {
+	h.nidMu.Lock()
+	defer h.nidMu.Unlock()
 	h.nid.CbSize = uint32(unsafe.Sizeof(h.nid))
 	h.nid.HWnd = h.hwnd
 	h.nid.UID = 1
@@ -75,6 +87,8 @@ func (h *TrayHost) deleteIcon() {
 	if h.hwnd == 0 {
 		return
 	}
+	h.nidMu.Lock()
+	defer h.nidMu.Unlock()
 	h.nid.CbSize = uint32(unsafe.Sizeof(h.nid))
 	h.nid.HWnd = h.hwnd
 	h.nid.UID = 1
@@ -167,7 +181,7 @@ func (h *TrayHost) restartAsyncWithOpen(openAfter bool) {
 		if err := h.launcher.Restart(); err != nil {
 			h.consumePendingOpen()
 			h.setTip("PktPath Studio 启动失败，请查看日志")
-			messageBox(h.hwnd, err.Error()+"\n\n日志目录：\n"+h.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
+			messageBox(0, err.Error()+"\n\n日志目录：\n"+h.paths.LogsDir, "PktPath Studio", mbOK|mbIconError|mbSetForeground|mbTopmost)
 			return
 		}
 		url := h.launcher.URL()
@@ -225,7 +239,7 @@ func trayWindowProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		switch loWord(lparam) {
 		case wmLButtonUp, wmLButtonDblClk:
 			h.openStudio()
-		case wmRButtonUp:
+		case wmRButtonUp, wmContextMenu:
 			popupTrayMenu(hwnd)
 		}
 		return 0
