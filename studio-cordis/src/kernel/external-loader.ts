@@ -258,21 +258,28 @@ export function parseExternalPluginDir(pluginDir: string): LoadedExternalPlugin 
     throw new Error('manifest.json requires non-empty "name" and "version"');
   }
 
-  const entrypoint = raw.entrypoint;
-  if (!isRecord(entrypoint)) {
+  const hasKernelProbesDecl = raw.kernel_probes !== undefined && raw.kernel_probes !== null;
+  let modRel = '';
+  let modulePath = '';
+  if (raw.entrypoint !== undefined && raw.entrypoint !== null) {
+    const entrypoint = raw.entrypoint;
+    if (!isRecord(entrypoint)) {
+      throw new Error('manifest.json requires "entrypoint" object');
+    }
+    if ('command' in entrypoint && entrypoint.command !== undefined && entrypoint.command !== null) {
+      throw new Error('legacy entrypoint.command is forbidden in Wave 1 pure Cordis host; use entrypoint.module');
+    }
+    modRel = typeof entrypoint.module === 'string' ? entrypoint.module.trim() : '';
+    if (!modRel) {
+      throw new Error('manifest.json requires "entrypoint.module"');
+    }
+    if (!/\.(mjs|js|ts)$/.test(modRel)) {
+      throw new Error(`entrypoint.module must end with .mjs, .js, or .ts: ${modRel}`);
+    }
+    modulePath = assertInsideRoot(pluginDir, modRel, 'entrypoint.module');
+  } else if (!hasKernelProbesDecl) {
     throw new Error('manifest.json requires "entrypoint" object');
   }
-  if ('command' in entrypoint && entrypoint.command !== undefined && entrypoint.command !== null) {
-    throw new Error('legacy entrypoint.command is forbidden in Wave 1 pure Cordis host; use entrypoint.module');
-  }
-  const modRel = typeof entrypoint.module === 'string' ? entrypoint.module.trim() : '';
-  if (!modRel) {
-    throw new Error('manifest.json requires "entrypoint.module"');
-  }
-  if (!/\.(mjs|js|ts)$/.test(modRel)) {
-    throw new Error(`entrypoint.module must end with .mjs, .js, or .ts: ${modRel}`);
-  }
-  const modulePath = assertInsideRoot(pluginDir, modRel, 'entrypoint.module');
 
   const analyzers: ExternalAnalyzerDecl[] = [];
   if (Array.isArray(raw.analyzers)) {
@@ -558,6 +565,7 @@ export function discoverExternalPlugins(pluginsDir: string): {
 }
 
 export async function importExternalModule(modulePath: string, reloadSeq: number): Promise<ExternalModuleExports> {
+  if (!modulePath) return {};
   const url = `${pathToFileURL(modulePath).href}?v=${reloadSeq}-${Date.now()}`;
   const mod = (await import(url)) as Record<string, unknown>;
   const defaultObj = isRecord(mod.default) ? mod.default : undefined;

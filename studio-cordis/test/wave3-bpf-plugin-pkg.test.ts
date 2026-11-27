@@ -471,10 +471,10 @@ describe('Wave 3 Slice 2: ConfigSchema, ebpf-tc probes/presets, external BPF pac
         localObjectPath: objPath,
         sha256: 'f'.repeat(64),
       };
-      await assert.rejects(
-        () => adb.syncAllPlugins('wave3dev1', [], [badBundle]),
-        /sha256 mismatch/,
-      );
+      const badRes = await adb.syncAllPlugins('wave3dev1', [], [badBundle]);
+      assert.equal(badRes.bpfSynced, 0);
+      assert.equal(badRes.failed.length, 1);
+      assert.match(badRes.failed[0].reason, /sha256 mismatch/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -644,4 +644,117 @@ exit 0
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+it("Wave 3 P1-2: pure kernel_probes plugin without entrypoint (Lin official pwru format) previews, installs, and loads cleanly", async () => {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "pktpath-w3-pure-bpf-"));
+  try {
+    const pkgDir = path.join(workDir, "pkg");
+    fs.mkdirSync(path.join(pkgDir, "bpf", "arm64"), { recursive: true });
+    const elf = makeElf64Bpf();
+    const sha = sha256Hex(elf);
+    fs.writeFileSync(path.join(pkgDir, "bpf", "arm64", "pwru.bpf.o"), elf);
+    fs.writeFileSync(
+      path.join(pkgDir, "manifest.json"),
+      JSON.stringify({
+        id: "pktpath.pwru-probes-test",
+        name: "Pure Kernel Probes Plugin",
+        version: "1.0.0",
+        kernel_probes: {
+          abi_version: 1,
+          objects: { arm64: { path: "bpf/arm64/pwru.bpf.o", sha256: sha } },
+          hooks: [
+            {
+              id: "ext.ingress.ip_rcv",
+              group: "ingress_rx",
+              sec: "kp_ip_rcv",
+              type: "kprobe",
+              target: "ip_rcv",
+              stage: "rx_l3",
+            },
+          ],
+        },
+      }),
+    );
+
+    const preview = previewExternalPackage(pkgDir);
+    assert.equal(preview.id, "pktpath.pwru-probes-test");
+    assert.equal(preview.has_kernel_bpf, true);
+    assert.equal(preview.entrypoint_module, "");
+    assert.equal(preview.signature_status, "unsigned");
+
+    const pluginsRoot = path.join(workDir, "installed");
+    const installed = installExternalPackage(pkgDir, pluginsRoot);
+    assert.equal(installed.manifest.id, "pktpath.pwru-probes-test");
+    assert.equal(installed.modulePath, "");
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+it("Wave 3 P1-1: single corrupted .bpf.o is isolated and does NOT block healthy BPF or legacy .json plugins", async () => {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "pktpath-w3-iso-"));
+  try {
+    const goodElf = makeElf64Bpf();
+    const goodSha = sha256Hex(goodElf);
+    const goodObj = path.join(workDir, "good.bpf.o");
+    fs.writeFileSync(goodObj, goodElf);
+
+    const badObj = path.join(workDir, "bad.bpf.o");
+    fs.writeFileSync(badObj, Buffer.from("CORRUPTED_ON_DISK"));
+
+    const legacyJson = path.join(workDir, "legacy.json");
+    fs.writeFileSync(legacyJson, JSON.stringify({ id: "legacy.demo" }));
+
+    const adb = new AdbClient("adb");
+    const pushed: string[] = [];
+    (adb as any).priv = async () => "";
+    (adb as any).run = async (args: string[]) => {
+      if (args[2] === "push") pushed.push(args[3]);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    (adb as any).remoteFileSha256 = async () => null;
+
+    const res = await adb.syncAllPlugins(
+      "SER-ISO",
+      [legacyJson],
+      [
+        {
+          pluginId: "bad.tampered",
+          abiVersion: 1,
+          arch: "arm64",
+          localObjectPath: badObj,
+          objectFileName: "bad.bpf.o",
+          sha256: goodSha,
+          enabledGroups: ["ingress_rx"],
+          hooks: [
+            { id: "ext.bad", group: "ingress_rx", sec: "kp_bad", type: "kprobe", target: "ip_rcv", stage: "rx_l3" },
+          ],
+        },
+        {
+          pluginId: "good.healthy",
+          abiVersion: 1,
+          arch: "arm64",
+          localObjectPath: goodObj,
+          objectFileName: "good.bpf.o",
+          sha256: goodSha,
+          enabledGroups: ["ingress_rx"],
+          hooks: [
+            { id: "ext.good", group: "ingress_rx", sec: "kp_good", type: "kprobe", target: "ip_rcv", stage: "rx_l3" },
+          ],
+        },
+      ],
+    );
+
+    assert.equal(res.failed.length, 1);
+    assert.equal(res.failed[0].plugin_id, "bad.tampered");
+    assert.equal(res.legacySynced, 1);
+    assert.equal(res.bpfSynced, 1);
+    assert.equal(res.bpfReused, 0);
+    assert.ok(pushed.includes(legacyJson));
+    assert.ok(pushed.includes(goodObj));
+    assert.ok(!pushed.includes(badObj));
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
 });

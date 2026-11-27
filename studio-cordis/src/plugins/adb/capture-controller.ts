@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { discoverExternalPlugins } from '../../kernel/external-loader.ts';
+import { discoverExternalPlugins, validateBpfObjectFile } from '../../kernel/external-loader.ts';
 import type { HostServices, KernelProbeArch } from '../../kernel/types.ts';
 import type { SessionProvider } from '../analysis/types.ts';
 import { REMOTE_PLUGINS_DIR, type ExternalBpfSyncItem, type RemoteRun } from './adb-client.ts';
@@ -30,7 +30,7 @@ export interface CaptureStartResult {
 
 export interface SkippedBpfPlugin {
   plugin_id: string;
-  status: 'unavailable_for_arch';
+  status: 'unavailable_for_arch' | 'invalid_object' | 'sync_failed';
   reason: string;
 }
 
@@ -218,11 +218,23 @@ export function collectEnabledExternalBpfBundles(
     const activeHooks = kp.hooks.filter((h) => enabledGroupSet.has(h.group));
     if (activeHooks.length === 0) continue;
 
+    const localObjectPath = path.resolve(ext.dir, objDecl.path);
+    try {
+      validateBpfObjectFile(localObjectPath, objDecl.sha256, `external BPF plugin ${pluginId}`);
+    } catch (err) {
+      skipped.push({
+        plugin_id: pluginId,
+        status: 'invalid_object',
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
     bundles.push({
       pluginId,
       abiVersion: 1,
       arch,
-      localObjectPath: path.resolve(ext.dir, objDecl.path),
+      localObjectPath,
       objectFileName: path.basename(objDecl.path),
       sha256: objDecl.sha256,
       enabledGroups,
@@ -458,11 +470,14 @@ export class CaptureController {
           skippedBpfPlugins = collected.skipped;
         }
         if (pluginPaths.length > 0 || bpfBundles.length > 0) {
-          const syncRes = await adb.client.syncAllPlugins(serial, pluginPaths, bpfBundles).catch(() => ({
-            legacySynced: 0,
-            bpfSynced: 0,
-            bpfReused: 0,
-          }));
+          const syncRes = await adb.client.syncAllPlugins(serial, pluginPaths, bpfBundles);
+          for (const f of syncRes.failed) {
+            skippedBpfPlugins.push({
+              plugin_id: f.plugin_id,
+              status: 'sync_failed',
+              reason: f.reason,
+            });
+          }
           if (syncRes.legacySynced + syncRes.bpfSynced + syncRes.bpfReused > 0) {
             args.push('--plugin-dir', REMOTE_PLUGINS_DIR);
           }

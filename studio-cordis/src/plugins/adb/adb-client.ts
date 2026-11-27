@@ -339,6 +339,7 @@ export interface SyncAllPluginsResult {
   legacySynced: number;
   bpfSynced: number;
   bpfReused: number;
+  failed: Array<{ plugin_id: string; reason: string }>;
 }
 
 export type SelfCheckLevel = 'green' | 'yellow' | 'red';
@@ -618,23 +619,35 @@ export class AdbClient {
     legacyJsonPaths: string[],
     bpfBundles: ExternalBpfSyncItem[],
   ): Promise<SyncAllPluginsResult> {
-    if (bpfBundles.length === 0) {
-      const legacySynced = await this.syncPluginFiles(serial, legacyJsonPaths);
-      return { legacySynced, bpfSynced: 0, bpfReused: 0 };
+    const failed: Array<{ plugin_id: string; reason: string }> = [];
+    const validBundles: ExternalBpfSyncItem[] = [];
+
+    // Isolate per-plugin validation: a single corrupted/tampered .bpf.o MUST NOT
+    // block healthy BPF plugins or legacy flat .json runtime plugins.
+    for (const bundle of bpfBundles) {
+      try {
+        validateBpfObjectFile(
+          bundle.localObjectPath,
+          bundle.sha256,
+          `external BPF plugin ${bundle.pluginId}`,
+        );
+        validBundles.push(bundle);
+      } catch (err) {
+        failed.push({
+          plugin_id: bundle.pluginId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
-    // Verify all local .bpf.o files and SHA256 before touching the device.
-    for (const bundle of bpfBundles) {
-      validateBpfObjectFile(
-        bundle.localObjectPath,
-        bundle.sha256,
-        `external BPF plugin ${bundle.pluginId}`,
-      );
+    if (validBundles.length === 0) {
+      const legacySynced = await this.syncPluginFiles(serial, legacyJsonPaths);
+      return { legacySynced, bpfSynced: 0, bpfReused: 0, failed };
     }
 
     // Ensure root plugin dir exists; remove stale flat *.json files and stale plugin subdirs
     // while keeping active BPF plugin subdirs intact for incremental SHA256 reuse.
-    const keepIds = new Set(bpfBundles.map((b) => b.pluginId));
+    const keepIds = new Set(validBundles.map((b) => b.pluginId));
     const keepChecks = [...keepIds].map((id) => `[ "$base" = ${shQuote(id)} ]`).join(' || ');
     const cleanupCmd = [
       `mkdir -p ${REMOTE_PLUGINS_DIR}`,
@@ -658,55 +671,62 @@ export class AdbClient {
     let bpfReused = 0;
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pktpath-bpf-bundle-'));
     try {
-      for (const bundle of bpfBundles) {
-        const pluginDir = `${REMOTE_PLUGINS_DIR}/${bundle.pluginId}`;
-        const remoteObj = `${pluginDir}/${bundle.objectFileName}`;
-        const remoteBundleJson = `${pluginDir}/bundle.json`;
+      for (const bundle of validBundles) {
+        try {
+          const pluginDir = `${REMOTE_PLUGINS_DIR}/${bundle.pluginId}`;
+          const remoteObj = `${pluginDir}/${bundle.objectFileName}`;
+          const remoteBundleJson = `${pluginDir}/bundle.json`;
 
-        await this.priv(
-          serial,
-          `mkdir -p ${shQuote(pluginDir)} && chmod 755 ${shQuote(pluginDir)}`,
-          10_000,
-        );
-
-        const existingSha = await this.remoteFileSha256(serial, remoteObj);
-        if (existingSha === bundle.sha256) {
-          bpfReused += 1;
-        } else {
-          const objStage = `${REMOTE_TMP}_bpf_${bundle.pluginId}_${bundle.objectFileName}`;
-          await this.run(['-s', serial, 'push', bundle.localObjectPath, objStage], 30_000);
           await this.priv(
             serial,
-            `mv -f ${shQuote(objStage)} ${shQuote(remoteObj)} && chmod 644 ${shQuote(remoteObj)}`,
+            `mkdir -p ${shQuote(pluginDir)} && chmod 755 ${shQuote(pluginDir)}`,
             10_000,
           );
-          bpfSynced += 1;
-        }
 
-        const bundleDoc = {
-          abi_version: bundle.abiVersion,
-          plugin_id: bundle.pluginId,
-          arch: bundle.arch,
-          object: bundle.objectFileName,
-          sha256: bundle.sha256,
-          enabled_groups: bundle.enabledGroups,
-          hooks: bundle.hooks,
-        };
-        const localBundlePath = path.join(tempDir, `${bundle.pluginId}.bundle.json`);
-        fs.writeFileSync(localBundlePath, JSON.stringify(bundleDoc, null, 2), 'utf8');
-        const bundleStage = `${REMOTE_TMP}_bundle_${bundle.pluginId}.json`;
-        await this.run(['-s', serial, 'push', localBundlePath, bundleStage], 20_000);
-        await this.priv(
-          serial,
-          `mv -f ${shQuote(bundleStage)} ${shQuote(remoteBundleJson)} && chmod 644 ${shQuote(remoteBundleJson)}`,
-          10_000,
-        );
+          const existingSha = await this.remoteFileSha256(serial, remoteObj);
+          if (existingSha === bundle.sha256) {
+            bpfReused += 1;
+          } else {
+            const objStage = `${REMOTE_TMP}_bpf_${bundle.pluginId}_${bundle.objectFileName}`;
+            await this.run(['-s', serial, 'push', bundle.localObjectPath, objStage], 30_000);
+            await this.priv(
+              serial,
+              `mv -f ${shQuote(objStage)} ${shQuote(remoteObj)} && chmod 644 ${shQuote(remoteObj)}`,
+              10_000,
+            );
+            bpfSynced += 1;
+          }
+
+          const bundleDoc = {
+            abi_version: bundle.abiVersion,
+            plugin_id: bundle.pluginId,
+            arch: bundle.arch,
+            object: bundle.objectFileName,
+            sha256: bundle.sha256,
+            enabled_groups: bundle.enabledGroups,
+            hooks: bundle.hooks,
+          };
+          const localBundlePath = path.join(tempDir, `${bundle.pluginId}.bundle.json`);
+          fs.writeFileSync(localBundlePath, JSON.stringify(bundleDoc, null, 2), 'utf8');
+          const bundleStage = `${REMOTE_TMP}_bundle_${bundle.pluginId}.json`;
+          await this.run(['-s', serial, 'push', localBundlePath, bundleStage], 20_000);
+          await this.priv(
+            serial,
+            `mv -f ${shQuote(bundleStage)} ${shQuote(remoteBundleJson)} && chmod 644 ${shQuote(remoteBundleJson)}`,
+            10_000,
+          );
+        } catch (err) {
+          failed.push({
+            plugin_id: bundle.pluginId,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
 
-    return { legacySynced, bpfSynced, bpfReused };
+    return { legacySynced, bpfSynced, bpfReused, failed };
   }
 
   async inspect(
