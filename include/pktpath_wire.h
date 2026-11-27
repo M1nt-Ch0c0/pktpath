@@ -187,6 +187,9 @@ enum pkt_qual_kind {
 #define PKT_TLV_STEP_TXQ             0x010DU /* u16 */
 #define PKT_TLV_STEP_RAW_RET         0x010EU /* s32 */
 #define PKT_TLV_STEP_CTX_TID         0x010FU /* u32 */
+#define PKT_TLV_STEP_TCP_SEQ         0x0110U /* u32 (host order, only when observed) */
+#define PKT_TLV_STEP_SND_CWND        0x0111U /* u32 (segments, only when observed) */
+#define PKT_TLV_STEP_SRTT_US         0x0112U /* u32 (microseconds, only when observed) */
 
 /* RELATION (kind = 3) */
 #define PKT_TLV_REL_OP_ID            0x0201U /* u64 */

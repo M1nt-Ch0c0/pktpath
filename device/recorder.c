@@ -246,6 +246,17 @@ static int bpf_map_lookup(int fd, const void *key, void *val) {
     return bpf_sys(BPF_MAP_LOOKUP_ELEM, &a, sizeof(a));
 }
 
+#ifndef BPF_MAP_FREEZE
+#define BPF_MAP_FREEZE 22
+#endif
+
+static int bpf_map_freeze(int map_fd) {
+    union bpf_attr a;
+    memset(&a, 0, sizeof(a));
+    a.map_fd = (uint32_t)map_fd;
+    return bpf_sys(BPF_MAP_FREEZE, &a, sizeof(a));
+}
+
 static int bpf_map_update(int fd, const void *key, const void *val, uint64_t flags) {
     union bpf_attr a;
     memset(&a, 0, sizeof(a));
@@ -480,6 +491,13 @@ struct probe_plan {
     struct adapter_plan       adapters[DEV_MAX_ADAPTERS];
     uint32_t                  num_sites;
     struct site_plan          sites[DEV_MAX_SITES];
+    /* Wave 3: vmlinux BTF drop_reason_map & capabilities */
+    bool                      btf_available;
+    bool                      drop_reason_available;
+    bool                      stack_symbolize_available;
+    uint32_t                  ext_tcp_off[4]; /* PKT_PLUG_OFF_* or PKT_PLUG_OFF_UNSET */
+    size_t                    num_drop_reasons;
+    struct btf_enum_entry     drop_reasons[256];
 };
 
 static bool check_recursion_misses_support(void) {
@@ -559,6 +577,22 @@ static const char *site_qdisc_kind(const struct probe_plan *plan, uint16_t site_
     return inferred_qdisc_kind_for_site(site_id);
 }
 
+static bool kallsyms_has_nonzero_addrs(void) {
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) return false;
+    char line[256];
+    bool nonzero = false;
+    for (int i = 0; i < 64 && fgets(line, sizeof(line), f); i++) {
+        unsigned long long addr = 0;
+        if (sscanf(line, "%llx", &addr) == 1 && addr != 0ULL) {
+            nonzero = true;
+            break;
+        }
+    }
+    fclose(f);
+    return nonzero;
+}
+
 static int build_probe_plan(const struct dev_cli_opts *opts,
                             const struct topo_mgr *topo,
                             struct probe_plan *plan,
@@ -595,6 +629,28 @@ static int build_probe_plan(const struct dev_cli_opts *opts,
             snprintf(err_buf, err_cap, "BTF verification failed: %s", plan->btf.error);
         btf_db_free(bdb);
         return -1;
+    }
+    plan->btf_available = true;
+    plan->num_drop_reasons = 0;
+    if (btf_export_enum(bdb, "skb_drop_reason", plan->drop_reasons,
+                        sizeof(plan->drop_reasons) / sizeof(plan->drop_reasons[0]),
+                        &plan->num_drop_reasons) == 0 && plan->num_drop_reasons > 0) {
+        plan->drop_reason_available = true;
+    } else {
+        plan->drop_reason_available = false;
+    }
+    plan->stack_symbolize_available = kallsyms_has_nonzero_addrs();
+    for (int i = 0; i < 4; i++) plan->ext_tcp_off[i] = PKT_PLUG_OFF_UNSET;
+    {
+        uint32_t off_v = 0;
+        if (btf_resolve_field(bdb, "tcp_sock", "snd_nxt", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SND_NXT] = off_v;
+        if (btf_resolve_field(bdb, "tcp_sock", "snd_cwnd", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SND_CWND] = off_v;
+        if (btf_resolve_field(bdb, "tcp_sock", "srtt_us", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_TCP_SRTT_US] = off_v;
+        if (btf_resolve_field(bdb, "sk_buff", "sk", &off_v) == 0)
+            plan->ext_tcp_off[PKT_PLUG_OFF_SKB_SK] = off_v;
     }
     if (plugin_registry_load(opts, bdb, &plan->plugins, err_buf, err_cap) != 0) {
         btf_db_free(bdb);
@@ -1236,7 +1292,46 @@ struct recorder_ctx {
     uint32_t                   flush_count;
     uint64_t                   drop_ts_ring[DROP_WIN_CAP];
     uint32_t                   drop_ts_head;
+
+    /* Wave 3: four-state probe_inventory & isolated external .bpf.o plugins */
+    struct probe_inv_entry     probe_inv[DEV_MAX_PROBE_INV];
+    int                        num_probe_inv;
+    struct ext_bpf_bundle      ext_bundles[DEV_MAX_EXT_BUNDLES];
+    int                        num_ext_bundles;
+    int                        ext_prog_fds[DEV_MAX_EXT_BUNDLES * DEV_MAX_EXT_HOOKS];
+    int                        num_ext_prog_fds;
+    int                        ext_perf_fds[512];
+    int                        num_ext_perf_fds;
+    uint16_t                   next_ext_site_id;
 };
+
+static const char *builtin_group_for_site(const struct site_plan *sp) {
+    if (!sp) return "egress_tc";
+    if (sp->site_id == PKT_SITE_TP_KFREE_SKB ||
+        sp->site_id == PKT_SITE_TP_CONSUME_SKB ||
+        sp->adapter_idx == ADAPT_L2_TRANSFORMS)
+        return "core_drop";
+    if (sp->adapter_idx == ADAPT_L1_SOCK_BASE || sp->adapter_idx == ADAPT_L1_SENDMSG)
+        return "sock_app";
+    return "egress_tc";
+}
+
+static void record_probe_inv(struct recorder_ctx *rec,
+                             const char *id, const char *group, const char *source,
+                             const char *plugin_id, const char *sha256, const char *target,
+                             enum probe_inv_status status, const char *reason) {
+    if (!rec || rec->num_probe_inv >= DEV_MAX_PROBE_INV) return;
+    struct probe_inv_entry *e = &rec->probe_inv[rec->num_probe_inv++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->id, sizeof(e->id), "%s", id ? id : "");
+    snprintf(e->group, sizeof(e->group), "%s", group ? group : "");
+    snprintf(e->source, sizeof(e->source), "%s", source ? source : "builtin");
+    if (plugin_id && plugin_id[0]) snprintf(e->plugin_id, sizeof(e->plugin_id), "%s", plugin_id);
+    if (sha256 && sha256[0]) snprintf(e->bpf_sha256, sizeof(e->bpf_sha256), "%s", sha256);
+    snprintf(e->target, sizeof(e->target), "%s", target ? target : "");
+    e->status = status;
+    if (reason && reason[0]) snprintf(e->reason, sizeof(e->reason), "%s", reason);
+}
 
 static inline void tlv_put(uint8_t *dst, uint32_t *off, uint16_t tag,
                            const void *val, uint16_t len) {
@@ -1620,9 +1715,19 @@ static void transcode_bpf_record(struct recorder_ctx *rec, const uint8_t *raw, u
         tlv_put_u8(out, &off, PKT_TLV_STEP_DIR, st->dir);
         tlv_put_u8(out, &off, PKT_TLV_STEP_STAGE, st->stage);
         if (qgen != 0)  tlv_put_u64(out, &off, PKT_TLV_STEP_QUEUE_GEN, qgen);
-        if (qh != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_HANDLE, qh);
-        if (qp != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_PARENT, qp);
-        if (cls != 0)   tlv_put_u32(out, &off, PKT_TLV_STEP_CLASSID, cls);
+        bool has_tcp_meta = (st->h.flags & (PKT_EVF_HAS_TCP_SEQ | PKT_EVF_HAS_TCP_CWND | PKT_EVF_HAS_TCP_SRTT)) != 0;
+        if (has_tcp_meta) {
+            if (st->h.flags & PKT_EVF_HAS_TCP_SEQ)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_TCP_SEQ, st->qdisc_handle);
+            if (st->h.flags & PKT_EVF_HAS_TCP_CWND)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_SND_CWND, st->qdisc_parent);
+            if (st->h.flags & PKT_EVF_HAS_TCP_SRTT)
+                tlv_put_u32(out, &off, PKT_TLV_STEP_SRTT_US, st->classid);
+        } else {
+            if (qh != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_HANDLE, qh);
+            if (qp != 0)    tlv_put_u32(out, &off, PKT_TLV_STEP_QDISC_PARENT, qp);
+            if (cls != 0)   tlv_put_u32(out, &off, PKT_TLV_STEP_CLASSID, cls);
+        }
         if (st->stage == PKT_STAGE_XMIT_START || st->txq != 0)
             tlv_put_u16(out, &off, PKT_TLV_STEP_TXQ, st->txq);
         if (st->stage == PKT_STAGE_QDISC_ENQ_RET || st->stage == PKT_STAGE_XMIT_RET || st->raw_ret != 0)
@@ -1884,6 +1989,64 @@ static int write_manifest_and_dict(struct recorder_ctx *rec) {
     fprintf(fp, "    \"selected\": %llu,\n", (unsigned long long)cfg.admission_selected);
     fprintf(fp, "    \"created\": %llu,\n", (unsigned long long)cfg.admission_created);
     fprintf(fp, "    \"rejected\": %llu\n", (unsigned long long)cfg.admission_rejected);
+    fprintf(fp, "  },\n");
+    fprintf(fp, "  \"probe_preset\": ");
+    json_write_escaped(fp, rec->opts->probe_preset[0] ? rec->opts->probe_preset : "egress");
+    fprintf(fp, ",\n  \"requested_groups\": [");
+    {
+        bool first = true;
+        for (unsigned gi = 0; gi < PKT_GRP_COUNT; gi++) {
+            if (rec->opts->requested_groups_mask & (1U << gi)) {
+                if (!first) fprintf(fp, ", ");
+                json_write_escaped(fp, pkt_group_name_from_index(gi));
+                first = false;
+            }
+        }
+    }
+    fprintf(fp, "],\n  \"effective_groups\": [");
+    {
+        bool first = true;
+        for (unsigned gi = 0; gi < PKT_GRP_COUNT; gi++) {
+            if (rec->opts->effective_groups_mask & (1U << gi)) {
+                if (!first) fprintf(fp, ", ");
+                json_write_escaped(fp, pkt_group_name_from_index(gi));
+                first = false;
+            }
+        }
+    }
+    fprintf(fp, "],\n  \"probe_inventory\": [\n");
+    for (int i = 0; i < rec->num_probe_inv; i++) {
+        const struct probe_inv_entry *pe = &rec->probe_inv[i];
+        fprintf(fp, "    {\"id\": "); json_write_escaped(fp, pe->id);
+        fprintf(fp, ", \"group\": "); json_write_escaped(fp, pe->group);
+        fprintf(fp, ", \"source\": "); json_write_escaped(fp, pe->source);
+        if (pe->plugin_id[0]) {
+            fprintf(fp, ", \"plugin_id\": "); json_write_escaped(fp, pe->plugin_id);
+        }
+        if (pe->bpf_sha256[0]) {
+            fprintf(fp, ", \"bpf_sha256\": "); json_write_escaped(fp, pe->bpf_sha256);
+        }
+        fprintf(fp, ", \"target\": "); json_write_escaped(fp, pe->target);
+        fprintf(fp, ", \"status\": "); json_write_escaped(fp, probe_inv_status_str(pe->status));
+        if (pe->reason[0]) {
+            fprintf(fp, ", \"reason\": "); json_write_escaped(fp, pe->reason);
+        }
+        fprintf(fp, "}%s\n", (i + 1 < rec->num_probe_inv) ? "," : "");
+    }
+    fprintf(fp, "  ],\n  \"capabilities\": {\n");
+    fprintf(fp, "    \"btf_available\": %s,\n", rec->plan.btf_available ? "true" : "false");
+    fprintf(fp, "    \"drop_reason_available\": %s,\n", rec->plan.drop_reason_available ? "true" : "false");
+    fprintf(fp, "    \"drop_reason_source\": \"%s\",\n",
+            rec->plan.drop_reason_available ? "vmlinux_btf" : "unavailable");
+    fprintf(fp, "    \"stack_symbolize_available\": %s,\n",
+            rec->plan.stack_symbolize_available ? "true" : "false");
+    fprintf(fp, "    \"notes\": []\n");
+    fprintf(fp, "  },\n  \"drop_reason_map\": {\n");
+    for (size_t i = 0; i < rec->plan.num_drop_reasons; i++) {
+        fprintf(fp, "    \"%lld\": ", (long long)rec->plan.drop_reasons[i].value);
+        json_write_escaped(fp, rec->plan.drop_reasons[i].name);
+        fprintf(fp, "%s\n", (i + 1 < rec->plan.num_drop_reasons) ? "," : "");
+    }
     fprintf(fp, "  }\n}\n");
 
     if (fclose(fp) != 0 || rename(m_tmp, m_fin) != 0) {
@@ -2376,6 +2539,8 @@ static int setup_bpf_maps(struct recorder_ctx *rec) {
         bpf_create_map_ext(BPF_MAP_TYPE_ARRAY, 4, 8, PKT_MAX_CPUS, 0, -1);
     rec->map_fds[PKT_MAP_BTF_OFF] =
         bpf_create_map_ext(BPF_MAP_TYPE_ARRAY, 4, sizeof(struct bpf_btf_offsets), 1, 0, -1);
+    rec->map_fds[PKT_MAP_PLUGIN_CFG] =
+        bpf_create_map_ext(BPF_MAP_TYPE_ARRAY, 4, sizeof(struct bpf_plugin_cfg), 1, 0, -1);
 
     for (int i = 0; i < PKT_MAP_COUNT; i++) {
         if (rec->map_fds[i] < 0) {
@@ -2409,6 +2574,22 @@ static int setup_bpf_maps(struct recorder_ctx *rec) {
         fprintf(stderr, "record error: update btf_off map failed: %s\n", strerror(errno));
         return -1;
     }
+    struct bpf_plugin_cfg pcfg;
+    memset(&pcfg, 0, sizeof(pcfg));
+    pcfg.abi_version    = PKT_PLUGIN_ABI_VERSION;
+    pcfg.target_ifindex = rec->plan.target_ifindex;
+    pcfg.filter_uid     = rec->opts->has_uid ? rec->opts->uid : PKT_FILTER_UID_ANY;
+    for (size_t i = 0; i < 32; i++)
+        pcfg.extra_off[i] = PKT_PLUG_OFF_UNSET;
+    for (int i = 0; i < 4; i++)
+        pcfg.extra_off[i] = rec->plan.ext_tcp_off[i];
+    if (bpf_map_update(rec->map_fds[PKT_MAP_PLUGIN_CFG], &z, &pcfg, 0) < 0) {
+        fprintf(stderr, "record error: update plugin_cfg map failed: %s\n", strerror(errno));
+        return -1;
+    }
+    /* Freeze read-only maps exposed to external .bpf.o plugins */
+    (void)bpf_map_freeze(rec->map_fds[PKT_MAP_BTF_OFF]);
+    (void)bpf_map_freeze(rec->map_fds[PKT_MAP_PLUGIN_CFG]);
 
     /* Warm up pre-existing long-lived sockets (keyed by sk_ptr and/or skc_cookie) */
     struct dev_warm_sock *warm = calloc(4096, sizeof(*warm));
@@ -2450,12 +2631,38 @@ static int load_and_attach_probes(struct recorder_ctx *rec) {
     if (ncpus <= 0) ncpus = 1;
     if (ncpus > DEV_MAX_CPUS) ncpus = DEV_MAX_CPUS;
 
+    rec->num_probe_inv = 0;
+    rec->next_ext_site_id = PKT_SITE_EXT_MIN;
     for (uint32_t s = 0; s < rec->plan.num_sites; s++) {
         struct site_plan *sp = &rec->plan.sites[s];
-        if (!sp->desired || !sp->available)
+        const struct bpf_prog_img *im_chk = &pkt_bpf_progs[sp->prog_idx];
+        const char *grp_name = builtin_group_for_site(sp);
+        uint32_t grp_bit = pkt_group_bit_from_name(grp_name);
+        char bid[96];
+        snprintf(bid, sizeof(bid), "builtin.%s", sp->site_name[0] ? sp->site_name : im_chk->sec_name);
+        const char *btgt = sp->resolved_sym[0] ? sp->resolved_sym : sp->target_sym;
+
+        if (grp_bit != 0 && (rec->opts->effective_groups_mask & grp_bit) == 0) {
+            record_probe_inv(rec, bid, grp_name, "builtin", NULL, NULL, btgt,
+                             PROBE_ST_DISABLED_BY_USER, NULL);
             continue;
-        if (!rec->plan.adapters[sp->adapter_idx].enabled && sp->adapter_idx != ADAPT_L2_CORE)
+        }
+        if (!sp->desired) {
+            record_probe_inv(rec, bid, grp_name, "builtin", NULL, NULL, btgt,
+                             PROBE_ST_DISABLED_BY_USER, NULL);
             continue;
+        }
+        if (!sp->available) {
+            record_probe_inv(rec, bid, grp_name, "builtin", NULL, NULL, btgt,
+                             PROBE_ST_UNAVAILABLE_IN_KERNEL, "kernel symbol or tracepoint unavailable");
+            continue;
+        }
+        if (!rec->plan.adapters[sp->adapter_idx].enabled && sp->adapter_idx != ADAPT_L2_CORE) {
+            record_probe_inv(rec, bid, grp_name, "builtin", NULL, NULL, btgt,
+                             PROBE_ST_UNAVAILABLE_IN_KERNEL,
+                             rec->plan.adapters[sp->adapter_idx].missing_reason);
+            continue;
+        }
 
         const struct bpf_prog_img *im = &pkt_bpf_progs[sp->prog_idx];
         size_t code_bytes = (size_t)im->insn_cnt * sizeof(struct bpf_insn);
@@ -2577,6 +2784,175 @@ static int load_and_attach_probes(struct recorder_ctx *rec) {
             continue;
         }
         sp->attached = true;
+        record_probe_inv(rec, bid, grp_name, "builtin", NULL, NULL, btgt,
+                         PROBE_ST_ATTACHED, NULL);
+    }
+
+    /* Wave 3: Isolated external .bpf.o bundle loader (never aborts main capture) */
+    if (rec->opts->plugin_dir[0]) {
+        rec->num_ext_bundles = bpf_bundle_scan_dir(
+            rec->opts->plugin_dir, rec->plan.uts.machine,
+            rec->ext_bundles, DEV_MAX_EXT_BUNDLES);
+        struct ksym_db *ext_ksym = ksym_db_load("/proc/kallsyms", NULL, 0);
+        for (int bi = 0; bi < rec->num_ext_bundles; bi++) {
+            struct ext_bpf_bundle *b = &rec->ext_bundles[bi];
+            uint8_t *elf_buf = NULL;
+            size_t elf_len = 0;
+            if (b->valid) {
+                FILE *efp = fopen(b->object_path, "rb");
+                if (efp) {
+                    fseek(efp, 0, SEEK_END);
+                    long sz = ftell(efp);
+                    fseek(efp, 0, SEEK_SET);
+                    if (sz > 0 && (size_t)sz <= DEV_MAX_BPF_OBJ_BYTES) {
+                        elf_buf = malloc((size_t)sz);
+                        if (elf_buf && fread(elf_buf, 1, (size_t)sz, efp) == (size_t)sz) {
+                            elf_len = (size_t)sz;
+                        } else {
+                            free(elf_buf);
+                            elf_buf = NULL;
+                        }
+                    }
+                    fclose(efp);
+                }
+            }
+            for (int hi = 0; hi < b->num_hooks; hi++) {
+                struct ext_bpf_hook *h = &b->hooks[hi];
+                if (h->group_bit != 0 && (rec->opts->effective_groups_mask & h->group_bit) == 0) {
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     PROBE_ST_DISABLED_BY_USER, NULL);
+                    continue;
+                }
+                if (!b->valid || !elf_buf) {
+                    enum probe_inv_status st = strstr(b->error, "arch mismatch")
+                        ? PROBE_ST_UNAVAILABLE_IN_KERNEL : PROBE_ST_ATTACH_FAILED;
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     st, b->error[0] ? b->error : "failed reading .bpf.o");
+                    continue;
+                }
+                if (rec->next_ext_site_id > PKT_SITE_EXT_MAX) {
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     PROBE_ST_ATTACH_FAILED, "external site_id pool exhausted");
+                    continue;
+                }
+                uint16_t sid = rec->next_ext_site_id++;
+                struct ext_bpf_prog_buf pbuf;
+                char eerr[256] = {0};
+                if (bpf_elf_extract_and_relocate(
+                        elf_buf, elf_len, h->sec,
+                        rec->map_fds[PKT_MAP_RB],
+                        rec->map_fds[PKT_MAP_BTF_OFF],
+                        rec->map_fds[PKT_MAP_PLUGIN_CFG],
+                        sid, &pbuf, eerr, sizeof(eerr)) != 0) {
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     PROBE_ST_ATTACH_FAILED, eerr);
+                    continue;
+                }
+                bool is_tp = (strcmp(h->type, "tracepoint") == 0);
+                bool is_ret = (strcmp(h->type, "kretprobe") == 0);
+                int ev_id = -1;
+                if (is_tp) {
+                    const char *colon = strchr(h->target, ':');
+                    if (colon && colon > h->target) {
+                        char tgrp[64];
+                        size_t gl = (size_t)(colon - h->target);
+                        if (gl >= sizeof(tgrp)) gl = sizeof(tgrp) - 1;
+                        memcpy(tgrp, h->target, gl);
+                        tgrp[gl] = '\0';
+                        ev_id = tracefs_read_event_id(tgrp, colon + 1);
+                    }
+                } else {
+                    char rsym[128] = {0};
+                    if (!ext_ksym || ksym_resolve(ext_ksym, h->target, rsym, sizeof(rsym)) == 0) {
+                        const char *use_sym = rsym[0] ? rsym : h->target;
+                        char kpev[96];
+                        snprintf(kpev, sizeof(kpev), "%s_e%u", rec->kp_group, sid);
+                        if (tracefs_register_kprobe(rec->kp_group, kpev, use_sym, is_ret) == 0)
+                            ev_id = tracefs_read_event_id(rec->kp_group, kpev);
+                    }
+                }
+                if (ev_id < 0) {
+                    free(pbuf.insns);
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     PROBE_ST_UNAVAILABLE_IN_KERNEL,
+                                     "target tracepoint/kprobe symbol not present in kernel");
+                    continue;
+                }
+
+                union bpf_attr ea;
+                memset(&ea, 0, sizeof(ea));
+                ea.prog_type = is_tp ? PKT_BPF_PROG_TYPE_TRACEPOINT : PKT_BPF_PROG_TYPE_KPROBE;
+                ea.insns     = (uintptr_t)pbuf.insns;
+                ea.insn_cnt  = pbuf.insn_cnt;
+                ea.license   = (uintptr_t)"GPL";
+                size_t eload_sz = offsetof(union bpf_attr, kern_version) + 4U;
+                int epfd = bpf_sys(BPF_PROG_LOAD, &ea, eload_sz);
+                if (epfd < 0) {
+                    static char evlog[16384];
+                    evlog[0] = '\0';
+                    ea.log_level = 1;
+                    ea.log_buf   = (uintptr_t)evlog;
+                    ea.log_size  = sizeof(evlog);
+                    epfd = bpf_sys(BPF_PROG_LOAD, &ea, eload_sz);
+                    if (epfd < 0) {
+                        char brief[256];
+                        snprintf(brief, sizeof(brief), "verifier rejected (%s): %.180s",
+                                 strerror(errno), evlog);
+                        free(pbuf.insns);
+                        record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                         b->plugin_id, b->actual_sha256, h->target,
+                                         PROBE_ST_ATTACH_FAILED, brief);
+                        continue;
+                    }
+                }
+                free(pbuf.insns);
+
+                struct perf_event_attr epe;
+                memset(&epe, 0, sizeof(epe));
+                epe.size          = sizeof(epe);
+                epe.type          = PERF_TYPE_TRACEPOINT;
+                epe.config        = (uint64_t)ev_id;
+                epe.disabled      = 1;
+                epe.sample_period = 1;
+                epe.wakeup_events = 1;
+                int eatt = 0;
+                for (int cpu = 0; cpu < ncpus && rec->num_ext_perf_fds < 512; cpu++) {
+                    int pf = (int)syscall(__NR_perf_event_open, &epe, -1, cpu, -1, PERF_FLAG_FD_CLOEXEC);
+                    if (pf < 0 && (errno == ENODEV || errno == EINVAL)) continue;
+                    if (pf < 0) break;
+                    if (eatt == 0 && ioctl(pf, PERF_EVENT_IOC_SET_BPF, epfd) < 0) {
+                        close(pf);
+                        break;
+                    }
+                    if (ioctl(pf, PERF_EVENT_IOC_ENABLE, 0) < 0) {
+                        close(pf);
+                        break;
+                    }
+                    rec->ext_perf_fds[rec->num_ext_perf_fds++] = pf;
+                    eatt++;
+                }
+                if (eatt == 0) {
+                    close(epfd);
+                    record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                     b->plugin_id, b->actual_sha256, h->target,
+                                     PROBE_ST_ATTACH_FAILED, "perf_event_open/SET_BPF failed");
+                    continue;
+                }
+                h->assigned_site_id = sid;
+                if (rec->num_ext_prog_fds < DEV_MAX_EXT_BUNDLES * DEV_MAX_EXT_HOOKS)
+                    rec->ext_prog_fds[rec->num_ext_prog_fds++] = epfd;
+                record_probe_inv(rec, h->id, h->group, "external_bpf",
+                                 b->plugin_id, b->actual_sha256, h->target,
+                                 PROBE_ST_ATTACHED, NULL);
+            }
+            free(elf_buf);
+        }
+        if (ext_ksym) ksym_db_free(ext_ksym);
     }
 
     /* Record baseline kprobe_profile & recursion_misses before opening admission */
@@ -2848,6 +3224,15 @@ int run_record(const struct dev_cli_opts *opts) {
     /* Sample final missed counts BEFORE detaching probes */
     sample_health_and_losses(&rec, opts->mode == MODE_ONESHOT);
 
+    for (int j = 0; j < rec.num_ext_perf_fds; j++) {
+        if (rec.ext_perf_fds[j] >= 0) close(rec.ext_perf_fds[j]);
+    }
+    rec.num_ext_perf_fds = 0;
+    for (int j = 0; j < rec.num_ext_prog_fds; j++) {
+        if (rec.ext_prog_fds[j] >= 0) close(rec.ext_prog_fds[j]);
+    }
+    rec.num_ext_prog_fds = 0;
+
     /* Detach probes cleanly so no further kernel writes occur */
     for (int s = (int)rec.plan.num_sites - 1; s >= 0; s--) {
         struct site_plan *sp = &rec.plan.sites[s];
@@ -2911,4 +3296,176 @@ int run_record(const struct dev_cli_opts *opts) {
 
     cleanup_recorder(&rec);
     return exit_code;
+}
+
+
+/* ==================== Wave 3 Expansion: Device Self-Check ==================== */
+
+static int read_sysctl_int(const char *path, int *out_val) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int v = 0;
+    int ok = (fscanf(f, "%d", &v) == 1) ? 0 : -1;
+    fclose(f);
+    if (ok == 0 && out_val) *out_val = v;
+    return ok;
+}
+
+int device_self_check(void) {
+    struct utsname uts;
+    memset(&uts, 0, sizeof(uts));
+    (void)uname(&uts);
+
+    const char *arch = uts.machine;
+    if (strcmp(uts.machine, "aarch64") == 0) arch = "arm64";
+    else if (strcmp(uts.machine, "x86_64") == 0) arch = "x86_64";
+
+    uid_t uid = geteuid();
+    bool is_root = (uid == 0);
+
+    const char *btf_path = "/sys/kernel/btf/vmlinux";
+    bool btf_readable = (access(btf_path, R_OK) == 0);
+    int drop_reason_cnt = 0;
+    bool has_snd_nxt = false, has_snd_cwnd = false, has_srtt_us = false;
+    if (btf_readable) {
+        char berr[128] = {0};
+        struct btf_db *bdb = btf_db_load(btf_path, berr, sizeof(berr));
+        if (bdb) {
+            struct btf_enum_entry *entries = calloc(512, sizeof(*entries));
+            if (entries) {
+                size_t n = 0;
+                if (btf_export_enum(bdb, "skb_drop_reason", entries, 512, &n) == 0)
+                    drop_reason_cnt = (int)n;
+                free(entries);
+            }
+            uint32_t off_v = 0;
+            has_snd_nxt  = (btf_resolve_field(bdb, "tcp_sock", "snd_nxt", &off_v) == 0);
+            has_snd_cwnd = (btf_resolve_field(bdb, "tcp_sock", "snd_cwnd", &off_v) == 0);
+            has_srtt_us  = (btf_resolve_field(bdb, "tcp_sock", "srtt_us", &off_v) == 0);
+            btf_db_free(bdb);
+        } else {
+            btf_readable = false;
+        }
+    }
+
+    int kptr = 0, unpriv = 0, paranoid = 0;
+    bool has_kptr     = (read_sysctl_int("/proc/sys/kernel/kptr_restrict", &kptr) == 0);
+    bool has_unpriv   = (read_sysctl_int("/proc/sys/kernel/unprivileged_bpf_disabled", &unpriv) == 0);
+    bool has_paranoid = (read_sysctl_int("/proc/sys/kernel/perf_event_paranoid", &paranoid) == 0);
+
+    const char *tfs = tracefs_root();
+    static const char *core_tps[] = {
+        "skb:kfree_skb",
+        "net:net_dev_queue",
+        "net:net_dev_xmit",
+        "tcp:tcp_retransmit_skb"
+    };
+    bool tp_ok[4] = {false, false, false, false};
+    int tp_avail = 0;
+    for (int i = 0; i < 4; i++) {
+        const char *colon = strchr(core_tps[i], ':');
+        if (colon) {
+            char cat[32] = {0};
+            size_t clen = (size_t)(colon - core_tps[i]);
+            if (clen < sizeof(cat)) {
+                memcpy(cat, core_tps[i], clen);
+                cat[clen] = '\0';
+                tp_ok[i] = tracefs_event_exists(cat, colon + 1);
+                if (tp_ok[i]) tp_avail++;
+            }
+        }
+    }
+
+    static const char *core_kps[] = {
+        "ip_rcv",
+        "nf_hook_slow",
+        "tcp_v4_rcv",
+        "tcp_transmit_skb"
+    };
+    bool kp_ok[4] = {false, false, false, false};
+    int kp_avail = 0;
+    char kerr[128] = {0};
+    struct ksym_db *kdb = ksym_db_load("/proc/kallsyms", kerr, sizeof(kerr));
+    if (kdb) {
+        for (int i = 0; i < 4; i++) {
+            char rsym[128] = {0};
+            if (ksym_resolve(kdb, core_kps[i], rsym, sizeof(rsym)) == 0) {
+                kp_ok[i] = true;
+                kp_avail++;
+            }
+        }
+        ksym_db_free(kdb);
+    }
+
+    const char *lvl_root = is_root ? "green" : "red";
+    const char *lvl_btf  = (btf_readable && drop_reason_cnt > 0) ? "green"
+                         : (btf_readable ? "yellow" : "yellow");
+    const char *lvl_tcp  = (has_snd_nxt && has_snd_cwnd && has_srtt_us) ? "green" : "yellow";
+    bool ksym_nonzero = kallsyms_has_nonzero_addrs();
+    const char *lvl_kptr = (!has_kptr) ? "yellow"
+                         : (ksym_nonzero && (kptr == 0 || is_root)) ? "green" : "yellow";
+    const char *lvl_prb  = (tp_avail == 4 && kp_avail == 4) ? "green"
+                         : (tp_avail > 0 || kp_avail > 0) ? "yellow" : "red";
+
+    const char *overall = "ok";
+    if (strcmp(lvl_root, "red") == 0 || strcmp(lvl_prb, "red") == 0)
+        overall = "blocked";
+    else if (strcmp(lvl_btf, "yellow") == 0 || strcmp(lvl_tcp, "yellow") == 0 ||
+             strcmp(lvl_kptr, "yellow") == 0 || strcmp(lvl_prb, "yellow") == 0)
+        overall = "degraded";
+
+    printf("{\n");
+    printf("  \"schema_version\": 1,\n");
+    printf("  \"status\": \"%s\",\n", overall);
+    printf("  \"kernel_release\": \"%s\",\n", uts.release);
+    printf("  \"arch\": \"%s\",\n", arch);
+    printf("  \"uid\": %u,\n", (unsigned)uid);
+    printf("  \"is_root\": %s,\n", is_root ? "true" : "false");
+    printf("  \"btf\": {\n");
+    printf("    \"path\": \"%s\",\n", btf_path);
+    printf("    \"readable\": %s,\n", btf_readable ? "true" : "false");
+    printf("    \"skb_drop_reason_count\": %d,\n", drop_reason_cnt);
+    printf("    \"tcp_sock_fields\": { \"snd_nxt\": %s, \"snd_cwnd\": %s, \"srtt_us\": %s }\n",
+           has_snd_nxt ? "true" : "false",
+           has_snd_cwnd ? "true" : "false",
+           has_srtt_us ? "true" : "false");
+    printf("  },\n");
+    printf("  \"sysctl\": {\n");
+    if (has_kptr)     printf("    \"kptr_restrict\": %d,\n", kptr);
+    else              printf("    \"kptr_restrict\": null,\n");
+    if (has_unpriv)   printf("    \"unprivileged_bpf_disabled\": %d,\n", unpriv);
+    else              printf("    \"unprivileged_bpf_disabled\": null,\n");
+    if (has_paranoid) printf("    \"perf_event_paranoid\": %d\n", paranoid);
+    else              printf("    \"perf_event_paranoid\": null\n");
+    printf("  },\n");
+    printf("  \"probes\": {\n");
+    if (tfs && tfs[0]) printf("    \"tracefs_mount\": \"%s\",\n", tfs);
+    else               printf("    \"tracefs_mount\": null,\n");
+    printf("    \"core_tracepoints\": [");
+    for (int i = 0; i < 4; i++) {
+        printf("%s{\"name\":\"%s\",\"available\":%s}",
+               i ? "," : "", core_tps[i], tp_ok[i] ? "true" : "false");
+    }
+    printf("],\n");
+    printf("    \"core_kprobes\": [");
+    for (int i = 0; i < 4; i++) {
+        printf("%s{\"symbol\":\"%s\",\"available\":%s}",
+               i ? "," : "", core_kps[i], kp_ok[i] ? "true" : "false");
+    }
+    printf("]\n");
+    printf("  },\n");
+    printf("  \"checks\": [\n");
+    printf("    {\"id\":\"root_priv\",\"level\":\"%s\",\"label\":\"Root / BPF 权限\",\"detail\":\"euid=%u\"},\n",
+           lvl_root, (unsigned)uid);
+    printf("    {\"id\":\"vmlinux_btf\",\"level\":\"%s\",\"label\":\"内核 BTF 与 drop_reason 枚举\",\"detail\":\"readable=%s, drop_reasons=%d\"},\n",
+           lvl_btf, btf_readable ? "true" : "false", drop_reason_cnt);
+    printf("    {\"id\":\"tcp_sock_btf\",\"level\":\"%s\",\"label\":\"tcp_sock 字段 (cwnd/RTT)\",\"detail\":\"snd_nxt=%s,snd_cwnd=%s,srtt_us=%s\"},\n",
+           lvl_tcp, has_snd_nxt ? "ok" : "missing", has_snd_cwnd ? "ok" : "missing", has_srtt_us ? "ok" : "missing");
+    printf("    {\"id\":\"kptr_restrict\",\"level\":\"%s\",\"label\":\"内核符号可见性 (kptr_restrict)\",\"detail\":\"value=%s%d, kallsyms_nonzero=%s\"},\n",
+           lvl_kptr, has_kptr ? "" : "unreadable:", has_kptr ? kptr : -1, ksym_nonzero ? "true" : "false");
+    printf("    {\"id\":\"core_probes\",\"level\":\"%s\",\"label\":\"核心 tracepoint / kprobe 符号\",\"detail\":\"tracepoints=%d/4, kprobes=%d/4\"}\n",
+           lvl_prb, tp_avail, kp_avail);
+    printf("  ]\n");
+    printf("}\n");
+    return 0;
 }

@@ -77,7 +77,8 @@ enum pkt_map_idx {
     PKT_MAP_SOCKS        = 4,
     PKT_MAP_CPU_SEQ      = 5,
     PKT_MAP_BTF_OFF      = 6,
-    PKT_MAP_COUNT        = 7
+    PKT_MAP_PLUGIN_CFG   = 7, /* read-only BPF_MAP_FREEZE config for external .bpf.o */
+    PKT_MAP_COUNT        = 8
 };
 
 /* ==================== 3. Protocol Enums (Matching Wire v1.0) ==================== */
@@ -115,7 +116,10 @@ enum pkt_evid_level {
 enum pkt_ev_flags {
     PKT_EVF_IN_TASK          = (1U << 0),
     PKT_EVF_NONLINEAR_TRUNC  = (1U << 1),
-    PKT_EVF_PARTIAL_COVERAGE = (1U << 2)
+    PKT_EVF_PARTIAL_COVERAGE = (1U << 2),
+    PKT_EVF_HAS_TCP_SEQ      = (1U << 8),
+    PKT_EVF_HAS_TCP_CWND     = (1U << 9),
+    PKT_EVF_HAS_TCP_SRTT     = (1U << 10)
 };
 
 /* Active skb lifecycle states (详细设计 §3.3) */
@@ -232,6 +236,26 @@ enum pkt_summary_valid_flags {
 #define PKT_SITE_DYN_ENQ_SENTINEL 0x5A01U
 #define PKT_SITE_DYN_RET_SENTINEL 0x5A02U
 #define PKT_SITE_DYN_BASE         100U
+
+/* Wave 3 external .bpf.o plugin ABI v1 */
+#define PKT_PLUGIN_ABI_VERSION    1U
+#define PKT_SITE_EXT_MIN          0x2000U
+#define PKT_SITE_EXT_MAX          0xFFFEU
+#define PKT_SITE_EXT_SENTINEL     0x7E00U
+
+#define PKT_PLUG_OFF_UNSET        0xFFFFFFFFU
+#define PKT_PLUG_OFF_TCP_SND_NXT  0U
+#define PKT_PLUG_OFF_TCP_SND_CWND 1U
+#define PKT_PLUG_OFF_TCP_SRTT_US  2U
+#define PKT_PLUG_OFF_SKB_SK       3U
+
+struct bpf_plugin_cfg {
+    uint32_t abi_version;
+    uint32_t target_ifindex;
+    uint32_t filter_uid;
+    uint32_t flags;
+    uint32_t extra_off[32];
+};
 
 enum pkt_sock_plugin_role {
     PKT_SOCK_PLUG_NONE          = 0,
