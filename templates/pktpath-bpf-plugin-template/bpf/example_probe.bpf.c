@@ -6,7 +6,7 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-SEC("tracepoint/net/netif_receive_skb")
+SEC("tp_netif_receive_skb")
 int tp_netif_receive_skb(void *ctx)
 {
     (void)ctx;

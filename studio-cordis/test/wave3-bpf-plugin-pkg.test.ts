@@ -35,6 +35,7 @@ import {
   type EbpfCollectorService,
 } from '../src/plugins/adb/ebpf-tc.ts';
 import { registerWave1Builtins } from '../src/plugins/register.ts';
+import { startStudioApp } from '../src/server/app.ts';
 
 function makeElf64Bpf(eMachine = 247, eiClass = 2, eiData = 1, extraBytes = 32): Buffer {
   const buf = Buffer.alloc(64 + extraBytes, 0);
@@ -755,6 +756,96 @@ it("Wave 3 P1-1: single corrupted .bpf.o is isolated and does NOT block healthy 
     assert.ok(pushed.includes(goodObj));
     assert.ok(!pushed.includes(badObj));
   } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+it("Wave 3 HTTP routes: POST /api/kernel/plugins/export and GET /api/device/self-check work end-to-end", async () => {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "pktpath-w3-http-"));
+  const host = new CordisHost({
+    appDir: path.join(workDir, "app"),
+    sessionsRoot: path.join(workDir, "app", "sessions"),
+    pluginsDir: path.join(workDir, "app", "plugins"),
+    exportsDir: path.join(workDir, "app", "exports"),
+    collectorsDir: path.join(workDir, "collectors"),
+    webDir: path.join(workDir, "web"),
+  });
+  registerWave1Builtins(host);
+  await host.start();
+  const app = await startStudioApp({
+    host,
+    listenPort: 0,
+    autoQuitMs: 0,
+  });
+  try {
+    const base = app.url;
+    // Install a valid external BPF plugin first, then export it via HTTP
+    const pkgSrc = path.join(workDir, "src-pkg");
+    fs.mkdirSync(path.join(pkgSrc, "bpf", "arm64"), { recursive: true });
+    const elf = makeElf64Bpf();
+    const sha = sha256Hex(elf);
+    fs.writeFileSync(path.join(pkgSrc, "bpf", "arm64", "demo.bpf.o"), elf);
+    fs.writeFileSync(path.join(pkgSrc, "index.mjs"), "export default { apply() {} };\n");
+    fs.writeFileSync(
+      path.join(pkgSrc, "manifest.json"),
+      JSON.stringify({
+        id: "thirdparty.http-export-demo",
+        name: "HTTP Export Demo",
+        version: "1.2.3",
+        category: "collector",
+        entrypoint: { module: "index.mjs" },
+        kernel_probes: {
+          abi_version: 1,
+          objects: { arm64: { path: "bpf/arm64/demo.bpf.o", sha256: sha } },
+          hooks: [
+            { id: "ext.demo", group: "ingress_rx", sec: "tp_netif_receive_skb", type: "tracepoint", target: "net:netif_receive_skb", stage: "rx_ingress" },
+          ],
+        },
+      }),
+    );
+
+    const instRes = await fetch(`${base}/api/kernel/plugins/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: pkgSrc }),
+    });
+    assert.equal(instRes.status, 200);
+
+    const expRes = await fetch(`${base}/api/kernel/plugins/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "thirdparty.http-export-demo" }),
+    });
+    assert.equal(expRes.status, 200);
+    const expJson = (await expRes.json()) as any;
+    assert.equal(expJson.ok, true);
+    assert.equal(expJson.id, "thirdparty.http-export-demo");
+    assert.ok(fs.existsSync(expJson.path));
+    assert.ok(expJson.size_bytes > 0);
+    assert.equal(expJson.signature_status, "unsigned");
+
+    // Mock selfCheckDevice on the active ADB service and call GET /api/device/self-check
+    const adbSvc = host.getService<any>("transport.adb");
+    assert.ok(adbSvc);
+    adbSvc.client.selfCheckDevice = async (serial: string) => ({
+      serial,
+      overall: "green",
+      source: "agent_self_check",
+      arch: "arm64",
+      checks: [
+        { id: "adb", label: "ADB 连接", status: "green", detail: "已连接" },
+        { id: "btf", label: "内核 BTF", status: "green", detail: "可用" },
+      ],
+    });
+    const scRes = await fetch(`${base}/api/device/self-check?serial=MOCK-SERIAL-1`);
+    assert.equal(scRes.status, 200);
+    const scJson = (await scRes.json()) as any;
+    assert.equal(scJson.ok, true);
+    assert.equal(scJson.serial, "MOCK-SERIAL-1");
+    assert.equal(scJson.overall, "green");
+    assert.equal(scJson.checks.length, 2);
+  } finally {
+    await app.close();
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 });
